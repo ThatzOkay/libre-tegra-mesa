@@ -110,7 +110,7 @@ foreach d : [[with_gallium_kmsro, [
              [with_gallium_vc4, ['vc4']],
              [with_gallium_panfrost, ['panfrost', 'panthor']],
              [with_gallium_etnaviv, ['etnaviv']],
-             [with_gallium_tegra, ['tegra']],
+             [with_gallium_tegra or with_gallium_grate, ['tegra']],
              [with_gallium_crocus, ['crocus']],
              [with_gallium_iris, ['iris']],
              [with_gallium_i915, ['i915']],
