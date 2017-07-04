@@ -472,6 +472,7 @@ grate_create_vertex_state(struct pipe_context *pcontext, unsigned int count,
                           const struct pipe_vertex_element *elements)
 {
    unsigned int i;
+   uint16_t mask = 0;
    struct grate_vertex_state *vtx = CALLOC_STRUCT(grate_vertex_state);
    if (!vtx)
       return NULL;
@@ -483,9 +484,11 @@ grate_create_vertex_state(struct pipe_context *pcontext, unsigned int count,
       dst->buffer_index = src->vertex_buffer_index;
       dst->offset = src->src_offset;
       dst->stride = src->src_stride;
+      mask |= 1 << i;
    }
 
    vtx->num_elements = count;
+   vtx->mask = mask;
 
    return vtx;
 }
