@@ -77,3 +77,7 @@ driver_grate = declare_dependency(
   compile_args : '-DGALLIUM_GRATE',
   link_with : [libgrate, libtegradrm],
 )
+
+if with_tools.contains('drm-shim')
+  subdir('drm-shim')
+endif
