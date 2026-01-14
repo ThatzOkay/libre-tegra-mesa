@@ -158,7 +158,7 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
       break;
 
    default:
-      unreachable("unsupported TGSI-opcode!");
+      UNREACHABLE("unsupported TGSI-opcode!");
    }
 }
 

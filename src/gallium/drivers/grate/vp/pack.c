@@ -163,7 +163,7 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
       break;
 
    default:
-      unreachable("illegal enum vp_dst_file value");
+      UNREACHABLE("illegal enum vp_dst_file value");
    }
    tmp.vector_op_write_mask = vp_write_mask(instr->vec.dst.write_mask);
 
@@ -185,7 +185,7 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
       break;
 
    default:
-      unreachable("illegal enum vp_dst_file value");
+      UNREACHABLE("illegal enum vp_dst_file value");
    }
    tmp.scalar_op_write_mask = vp_write_mask(instr->scalar.dst.write_mask);
 
