@@ -394,7 +394,7 @@ fill(struct grate_channel *gr2d,
       value |= 2 << 16;
       break;
    default:
-      unreachable("invalid blocksize");
+      UNREACHABLE("invalid blocksize");
    }
    grate_stream_push(&gr2d->stream, value);           /* 0x01f - controlmain */
 

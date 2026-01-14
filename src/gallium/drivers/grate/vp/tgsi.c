@@ -218,7 +218,7 @@ tgsi_dst_to_vp(struct grate_vp_shader *vp, const struct tgsi_dst_register *dst, 
       return dst_temp(dst->Index, dst->WriteMask, saturate);
 
    default:
-      unreachable("unsupported output");
+      UNREACHABLE("unsupported output");
    }
 }
 
@@ -249,7 +249,7 @@ tgsi_src_to_vp(struct grate_vp_shader *vp, const struct tgsi_src_register *src)
       return uniform(1023 - src->Index, swizzle, negate, absolute);
 
    default:
-      unreachable("unsupported input!");
+      UNREACHABLE("unsupported input!");
    }
 }
 
@@ -312,7 +312,7 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
                                    tgsi_src_to_vp(vp, &inst->Src[0].Register)));
 
    default:
-      unreachable("unsupported TGSI-opcode!");
+      UNREACHABLE("unsupported TGSI-opcode!");
    }
 }
 

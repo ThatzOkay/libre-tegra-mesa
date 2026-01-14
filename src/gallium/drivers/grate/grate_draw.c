@@ -43,7 +43,7 @@ grate_primitive_type(enum mesa_prim mode)
       return TGR3D_PRIMITIVE_TYPE_TRIANGLE_FAN;
 
    default:
-      unreachable("unexpected enum pipe_prim_type");
+      UNREACHABLE("unexpected enum pipe_prim_type");
    }
 }
 
@@ -355,7 +355,7 @@ grate_draw_vbo(struct pipe_context *pcontext,
       break;
 
    default:
-      unreachable("invalid index_size");
+      UNREACHABLE("invalid index_size");
    }
 
    /* draw params */

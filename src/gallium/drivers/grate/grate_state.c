@@ -313,7 +313,7 @@ grate_cull_face(int cull_face, bool front_ccw)
       return TGR3D_CULL_FACE_BOTH;
 
    default:
-      unreachable("unknown cull_face");
+      UNREACHABLE("unknown cull_face");
    }
 }
 
@@ -377,7 +377,7 @@ grate_compare_func(enum pipe_compare_func func)
    case PIPE_FUNC_GREATER: return TGR3D_COMPARE_FUNC_GREATER;
    case PIPE_FUNC_NOTEQUAL: return TGR3D_COMPARE_FUNC_NOTEQUAL;
    case PIPE_FUNC_ALWAYS: return TGR3D_COMPARE_FUNC_ALWAYS;
-   default: unreachable("unknown pipe_compare_func");
+   default: UNREACHABLE("unknown pipe_compare_func");
    }
 }
 
@@ -464,7 +464,7 @@ attrib_mode(const struct pipe_vertex_element *e)
          break;
 
       default:
-         unreachable("invalid channel-size");
+         UNREACHABLE("invalid channel-size");
       }
 
       if (desc->channel[c].type == UTIL_FORMAT_TYPE_SIGNED)
@@ -486,7 +486,7 @@ attrib_mode(const struct pipe_vertex_element *e)
       break;
 
    default:
-      unreachable("invalid channel-type");
+      UNREACHABLE("invalid channel-type");
    }
 
    format  = TGR3D_VAL(ATTRIB_MODE, TYPE, type);
