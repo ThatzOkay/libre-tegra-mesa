@@ -25,6 +25,8 @@
 
 #include "util/os_file.h"
 #include "util/u_debug.h"
+#include "util/u_screen.h"
+
 
 #include "tegra/tegra_screen.h"
 #include "grate/grate_screen.h"
@@ -47,7 +49,7 @@ struct pipe_screen *tegra_drm_screen_create(int fd)
 #endif
 #ifdef GALLIUM_GRATE
    if (!screen)
-      screen = grate_screen_create(fd);
+      screen = u_pipe_screen_lookup_or_create(fd, NULL, NULL, NULL); // WTF??
 #endif
    if (!screen)
       close(fd);
