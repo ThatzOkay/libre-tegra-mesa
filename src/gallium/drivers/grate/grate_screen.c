@@ -59,7 +59,7 @@ grate_screen_get_screen_fd(struct pipe_screen *pscreen)
 }
 
 static void
-fd_init_screen_caps(struct fd_screen *screen)
+grate_init_screen_caps(struct grate_screen *screen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&screen->base.caps;
 
@@ -375,12 +375,12 @@ fd_init_screen_caps(struct fd_screen *screen)
 }
 
 static void
-fd_init_shader_caps(struct fd_screen *screen)
+grate_init_shader_caps(struct grate_screen *screen)
 {
 
    struct pipe_shader_caps *caps = NULL;
-   
-   caps = (struct pipe_shader_caps *)&screen->base.base.shader_caps[MESA_SHADER_VERTEX];
+
+   caps = (struct pipe_shader_caps *)&screen->base.shader_caps[MESA_SHADER_VERTEX];
 
    // UInt values
    caps->max_instructions =
@@ -659,8 +659,8 @@ grate_screen_create(int fd)
 
    grate_screen_resource_init(&screen->base);
 
-   fd_init_shader_caps(screen);
-   fd_init_screen_caps(screen);
+   grate_init_shader_caps(screen);
+   grate_init_screen_caps(screen);
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct pipe_transfer), 16);
 
