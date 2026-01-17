@@ -6,6 +6,7 @@
 #include "util/u_helpers.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
+#include "util/u_framebuffer.h"
 
 #include "grate_common.h"
 #include "grate_context.h"
@@ -60,15 +61,12 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
    //   context->framebuffer.bos[0] = NULL;
    //}
 
-   struct pipe_surface * dst = &context->framebuffer.base.zsbuf;
-   struct pipe_surface * const what = &framebuffer->zsbuf;
-   pipe_surface_reference(&dst,
-                          what);
+   util_copy_framebuffer_state(cso, framebuffer);
 
    for (i = 0; i < framebuffer->nr_cbufs; i++) {
       if (!framebuffer->cbufs[i].texture)
          continue;
-      struct pipe_surface *ref = &framebuffer->cbufs[i];
+      const struct pipe_surface *ref = &framebuffer->cbufs[i];
       struct grate_resource *res = grate_resource(ref->texture);
       uint32_t rt_params;
 
@@ -79,19 +77,10 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
       context->framebuffer.rt_params[1 + i] = rt_params;
       context->framebuffer.bos[1 + i] = res->bo;
       mask |= 1 << (1 + i);
-
-      pipe_surface_reference(&cso->cbufs[i], ref);
    }
-
-   for (; i < cso->nr_cbufs; i++)
-      pipe_surface_reference(&cso->cbufs[i], NULL);
 
    context->framebuffer.num_rts = 1 + i;
    context->framebuffer.mask = mask;
-
-   context->framebuffer.base.width = framebuffer->width;
-   context->framebuffer.base.height = framebuffer->height;
-   context->framebuffer.base.nr_cbufs = framebuffer->nr_cbufs;
 
    /* prepare the scissor-registers for the non-scissor case */
    context->no_scissor[0]  = host1x_opcode_incr(TGR3D_SCISSOR_HORIZ, 2);
