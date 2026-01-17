@@ -24,17 +24,15 @@ grate_set_sample_mask(struct pipe_context *pcontext,
 }
 
 static void
-grate_set_constant_buffer(struct pipe_context *pcontext, enum pipe_shader_type shader,
-                          uint index, bool take_ownership,
-                          const struct pipe_constant_buffer *buffer)
+grate_set_constant_buffer(struct pipe_context *pcontext, enum mesa_shader_stage shader,
+                          uint index, const struct pipe_constant_buffer *buffer)
 {
    struct grate_context *context = grate_context(pcontext);
 
    assert(index == 0);
    assert(!buffer || buffer->user_buffer);
 
-   util_copy_constant_buffer(&context->constant_buffer[shader], buffer,
-                             take_ownership);
+   util_copy_constant_buffer(&context->constant_buffer[shader], buffer);
 }
 
 static void
@@ -169,16 +167,15 @@ grate_set_vertex_buffers(struct pipe_context *pcontext,
    struct grate_context *context = grate_context(pcontext);
    struct grate_vertexbuf_state *vbs = &context->vbs;
 
-   util_set_vertex_buffers_mask(vbs->vb, &vbs->enabled, buffer, count, true);
+   util_set_vertex_buffers_mask(vbs->vb, &vbs->enabled, buffer, count);
    vbs->count = util_last_bit(vbs->enabled);
 }
 
 
 static void
-grate_set_sampler_views(struct pipe_context *pctx, enum pipe_shader_type shader,
+grate_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
                         unsigned start_slot, unsigned num_views,
                         unsigned unbind_num_trailing_slots,
-                        bool take_ownership,
                         struct pipe_sampler_view **views)
 {
    unimplemented();
@@ -275,7 +272,7 @@ grate_create_sampler_state(struct pipe_context *pcontext,
 
 static void
 grate_bind_sampler_states(struct pipe_context *pcontext,
-                          enum pipe_shader_type shader,
+                          enum mesa_shader_stage shader,
                           unsigned start_slot, unsigned num_samplers,
                           void **samplers)
 {
@@ -616,7 +613,7 @@ static void
 emit_vs_uniforms(struct grate_context *context)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-   struct pipe_constant_buffer *constbuf = &context->constant_buffer[PIPE_SHADER_VERTEX];
+   struct pipe_constant_buffer *constbuf = &context->constant_buffer[MESA_SHADER_VERTEX];
    int len;
 
    if (constbuf->user_buffer != NULL) {
