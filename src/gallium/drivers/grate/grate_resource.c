@@ -435,24 +435,24 @@ grate_clear(struct pipe_context *pcontext, unsigned int buffers,
    if (buffers & PIPE_CLEAR_COLOR) {
       int i;
       for (i = 0; i < fb->nr_cbufs; ++i) {
-         struct pipe_surface *dst = fb->cbufs[i];
+         struct pipe_surface *dst = &fb->cbufs[i];
          if (fill(context->gr2d, grate_resource(dst->texture),
                   pack_color(dst->format, color->f),
                   util_format_get_blocksize(dst->format),
-                  0, 0, dst->width, dst->height) < 0)
+                  0, 0, fb->width, fb->height) < 0)
             return;
       }
    }
 
    if (buffers & PIPE_CLEAR_DEPTH || buffers & PIPE_CLEAR_STENCIL) {
-      if (fb->zsbuf) {
+      //if (fb->zsbuf) {
          /* TODO: handle the case where both are not set! */
-         if (fill(context->gr2d, grate_resource(fb->zsbuf->texture),
-                  util_pack_z_stencil(fb->zsbuf->format, depth, stencil),
-                  util_format_get_blocksize(fb->zsbuf->format),
-                  0, 0, fb->zsbuf->width, fb->zsbuf->height) < 0)
+         if (fill(context->gr2d, grate_resource(fb->zsbuf.texture),
+                  util_pack_z_stencil(fb->zsbuf.format, depth, stencil),
+                  util_format_get_blocksize(fb->zsbuf.format),
+                  0, 0, fb->width, fb->height) < 0)
             return;
-      }
+      //}
    }
 }
 
