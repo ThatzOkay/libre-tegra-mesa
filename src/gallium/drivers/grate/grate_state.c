@@ -44,8 +44,8 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
    unsigned int i;
    uint32_t mask = 0;
 
-   if (framebuffer->zsbuf) {
-      struct grate_resource *res = grate_resource(framebuffer->zsbuf->texture);
+   //if (framebuffer->zsbuf) {
+      struct grate_resource *res = grate_resource(framebuffer->zsbuf.texture);
       uint32_t rt_params;
 
       rt_params  = TGR3D_VAL(RT_PARAMS, FORMAT, res->format);
@@ -55,16 +55,20 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
       context->framebuffer.rt_params[0] = rt_params;
       context->framebuffer.bos[0] = res->bo;
       mask |= 1;
-   } else {
-      context->framebuffer.rt_params[0] = 0;
-      context->framebuffer.bos[0] = NULL;
-   }
+   //} else {
+   //   context->framebuffer.rt_params[0] = 0;
+   //   context->framebuffer.bos[0] = NULL;
+   //}
 
-   pipe_surface_reference(&context->framebuffer.base.zsbuf,
-                          framebuffer->zsbuf);
+   struct pipe_surface * dst = &context->framebuffer.base.zsbuf;
+   struct pipe_surface * const what = &framebuffer->zsbuf;
+   pipe_surface_reference(&dst,
+                          what);
 
    for (i = 0; i < framebuffer->nr_cbufs; i++) {
-      struct pipe_surface *ref = framebuffer->cbufs[i];
+      if (!framebuffer->cbufs[i].texture)
+         continue;
+      struct pipe_surface *ref = &framebuffer->cbufs[i];
       struct grate_resource *res = grate_resource(ref->texture);
       uint32_t rt_params;
 
