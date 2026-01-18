@@ -383,7 +383,7 @@ pipe_tegra_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
 
-   screen = tegra_drm_screen_create(fd);
+   screen = tegra_drm_screen_create(fd, config);
 
    return screen ? debug_screen_wrap(screen) : NULL;
 }
