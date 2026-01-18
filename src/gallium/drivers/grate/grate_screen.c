@@ -628,12 +628,14 @@ grate_screen_create(int fd)
    screen->fd = fd;
    err = drm_tegra_new(&screen->drm, fd);
    if (err) {
+      fprintf(stderr, "drm_tegra_new err: %d\n", err);
       FREE(screen);
       return NULL;
    }
 
    err = drm_tegra_channel_open(&drm_channel, screen->drm, DRM_TEGRA_GR3D);
    if (err) {
+      fprintf(stderr, "drm_tegra_channel_open err: %d\n", err);
       drm_tegra_close(screen->drm);
       FREE(screen);
       return NULL;
