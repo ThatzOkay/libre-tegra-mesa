@@ -13,6 +13,8 @@
 #include "grate_state.h"
 #include "grate_surface.h"
 
+#include "opentegra_lib.h"
+
 #include "host1x01_hardware.h"
 #include "tgr_3d.xml.h"
 
@@ -87,8 +89,19 @@ grate_screen_context_create(struct pipe_screen *pscreen,
    if (!context)
       return NULL;
 
-   if (drm_tegra_get_soc_id(screen->drm) == DRM_TEGRA114_SOC)
-      context->tegra114 = true;
+   enum drm_tegra_soc_id soc_id = drm_tegra_get_soc_id();
+
+   switch (soc_id) {
+      case DRM_TEGRA114_SOC:
+         context->tegra114 = true;
+         break;
+      case DRM_TEGRA_INVALID_SOC:
+         fprintf(stderr,"failed to identify SoC\n");
+         break;
+      case DRM_TEGRA_UNKNOWN_SOC:
+         fprintf(stderr,"failed to identify SoC version\n");
+         break;
+   }
 
    context->base.screen = pscreen;
    context->base.priv = priv;
