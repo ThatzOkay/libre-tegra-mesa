@@ -221,7 +221,7 @@ grate_init_state(struct grate_context *context)
 
    grate_stream_push(stream, host1x_opcode_imm(TGR3D_FP_PSEQ_UPLOAD_INST_BUFFER_FLUSH, 0));
 
-   if (context->tegra114)
+   if (context->soc_id == DRM_TEGRA114_SOC)
       grate_stream_push(stream, host1x_opcode_imm(0x501, (0x2200 << 16) | 0x7));
    else
       grate_stream_push(stream, host1x_opcode_imm(0x501, 0x7));
@@ -271,7 +271,7 @@ grate_init_state(struct grate_context *context)
    grate_stream_push(stream, host1x_opcode_imm(0xe28, 0));
    grate_stream_push(stream, host1x_opcode_imm(0xe29, 0));
 
-   if (context->tegra114) {
+   if (context->soc_id == DRM_TEGRA114_SOC) {
       grate_stream_push(stream, host1x_opcode_imm(0x41a, 0xa00));
       grate_stream_push(stream, host1x_opcode_imm(0x416, 0x140));
    }

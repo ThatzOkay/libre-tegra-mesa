@@ -117,7 +117,7 @@ grate_set_viewport_states(struct pipe_context *pcontext,
    static const float zeps = powf(2.0f, -21);
    unsigned int hw_scale;
 
-   if (context->tegra114)
+   if (context->soc_id == DRM_TEGRA114_SOC)
       hw_scale = 0xFFFFFF;
    else
       hw_scale = 0xFFFFF;
@@ -395,7 +395,7 @@ grate_create_zsa_state(struct pipe_context *pcontext,
    so->commands[1] = depth_test;
    so->num_commands = 2;
 
-   if (context->tegra114) {
+   if (context->soc_id == DRM_TEGRA114_SOC) {
       so->commands[2] = host1x_opcode_incr(0xe45, 1);
       so->commands[3] = depth_test;
       so->num_commands = 4;
