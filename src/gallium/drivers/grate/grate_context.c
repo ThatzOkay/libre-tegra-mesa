@@ -101,6 +101,8 @@ grate_screen_context_create(struct pipe_screen *pscreen,
       case DRM_TEGRA_UNKNOWN_SOC:
          fprintf(stderr,"failed to identify SoC version\n");
          break;
+      default:
+         break;
    }
 
    context->base.screen = pscreen;

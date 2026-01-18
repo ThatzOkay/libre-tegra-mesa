@@ -26,6 +26,6 @@
 
 struct pipe_screen;
 
-struct pipe_screen *tegra_drm_screen_create(int fd);
+struct pipe_screen *tegra_drm_screen_create(int fd, const struct pipe_screen_config *config);
 
 #endif /* __TEGRA_DRM_PUBLIC_H__ */

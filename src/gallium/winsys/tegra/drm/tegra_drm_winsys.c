@@ -24,35 +24,40 @@
 #include <fcntl.h>
 
 #include "util/os_file.h"
-#include "util/u_debug.h"
 #include "util/u_screen.h"
-
 
 #include "tegra/tegra_screen.h"
 #include "grate/grate_screen.h"
+#include "grate/drm/opentegra_lib.h"
+#include "tegra_drm_public.h"
 
-struct pipe_screen *tegra_drm_screen_create(int fd);
-
-struct pipe_screen *tegra_drm_screen_create(int fd)
-{
+static struct pipe_screen *
+tegra_or_grate_screen_create(int fd, const struct pipe_screen_config *config,
+                             struct renderonly *ro) {
    struct pipe_screen *screen = NULL;
-   /*
-    * NOTE: There are reportedly issues with reusing the file descriptor
-    * as-is related to Xinerama. Duplicate it to side-step any issues.
-    */
-   fd = os_dupfd_cloexec(fd);
-   if (fd < 0)
-      return NULL;
+   bool is_grate = false;
+
+#ifdef GALLIUM_GRATE
+   is_grate = drm_tegra_get_soc_id() != DRM_TEGRA_UNKNOWN_SOC
+           && drm_tegra_get_soc_id() != DRM_TEGRA_INVALID_SOC;
+
+   if (is_grate) {
+      screen = grate_screen_create(fd);
+   }
+#endif
 
 #ifdef GALLIUM_TEGRA
-   screen = tegra_screen_create(fd);
+   if (!is_grate) {
+      screen = tegra_screen_create(fd);
+   }
 #endif
-#ifdef GALLIUM_GRATE
-   if (!screen)
-      screen = u_pipe_screen_lookup_or_create(fd, NULL, NULL, NULL); // WTF??
-#endif
-   if (!screen)
-      close(fd);
 
    return screen;
+}
+
+struct pipe_screen *
+tegra_drm_screen_create(int fd, const struct pipe_screen_config *config)
+{
+   return u_pipe_screen_lookup_or_create(os_dupfd_cloexec(fd), config, NULL,
+                                         tegra_or_grate_screen_create);
 }
