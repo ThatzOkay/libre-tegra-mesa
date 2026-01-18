@@ -89,21 +89,7 @@ grate_screen_context_create(struct pipe_screen *pscreen,
    if (!context)
       return NULL;
 
-   enum drm_tegra_soc_id soc_id = drm_tegra_get_soc_id();
-
-   switch (soc_id) {
-      case DRM_TEGRA114_SOC:
-         context->tegra114 = true;
-         break;
-      case DRM_TEGRA_INVALID_SOC:
-         fprintf(stderr,"failed to identify SoC\n");
-         break;
-      case DRM_TEGRA_UNKNOWN_SOC:
-         fprintf(stderr,"failed to identify SoC version\n");
-         break;
-      default:
-         break;
-   }
+   context->soc_id = drm_tegra_get_soc_id();
 
    context->base.screen = pscreen;
    context->base.priv = priv;

@@ -211,7 +211,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
    PUSH(host1x_opcode_incr(TGR3D_FP_PSEQ_DW_CFG, 1));
    PUSH(0x00000040);
 
-   if (context->tegra114) {
+   if (context->soc_id == DRM_TEGRA114_SOC) {
       /* XXX: maybe not needed */
       PUSH(host1x_opcode_incr(0x547, 0x0002));
       PUSH(0xc0000000);
@@ -246,7 +246,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
 
    PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_ALU_SCHED, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link) {
-      if (context->tegra114)
+      if (context->soc_id == DRM_TEGRA114_SOC)
          PUSH(grate_fp_pack_alu_sched_t114(&instr->alu_sched));
       else
          PUSH(grate_fp_pack_sched(&instr->alu_sched));

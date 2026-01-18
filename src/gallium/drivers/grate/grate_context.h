@@ -46,7 +46,7 @@ struct grate_context {
    uint32_t viewport[10];
    uint32_t guardband[4];
    bool y_invert;
-   bool tegra114;
+   enum drm_tegra_soc_id soc_id;
 };
 
 static inline struct grate_context *
