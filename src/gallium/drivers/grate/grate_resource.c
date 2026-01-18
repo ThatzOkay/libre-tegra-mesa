@@ -115,7 +115,7 @@ grate_resource_transfer_flush_region(struct pipe_context *pcontext,
                                      struct pipe_transfer *transfer,
                                      const struct pipe_box *box)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
@@ -249,6 +249,7 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
 void
 grate_screen_resource_init(struct pipe_screen *pscreen)
 {
+   grate_trace();
    pscreen->resource_create = grate_screen_resource_create;
    pscreen->resource_from_handle = grate_screen_resource_from_handle;
    pscreen->resource_get_handle = grate_resource_get_handle;
@@ -265,7 +266,7 @@ grate_resource_copy_region(struct pipe_context *pcontext,
                            unsigned int src_level,
                            const struct pipe_box *box)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
@@ -490,12 +491,13 @@ grate_clear_depth_stencil(struct pipe_context *pipe,
 static void
 grate_flush_resource(struct pipe_context *ctx, struct pipe_resource *resource)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 void
 grate_context_resource_init(struct pipe_context *pcontext)
 {
+   grate_trace();
    pcontext->buffer_map = grate_resource_transfer_map;
    pcontext->texture_map = grate_resource_transfer_map;
    pcontext->transfer_flush_region = grate_resource_transfer_flush_region;

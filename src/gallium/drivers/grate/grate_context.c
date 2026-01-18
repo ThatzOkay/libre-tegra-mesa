@@ -27,6 +27,7 @@ grate_channel_create(struct grate_context *context,
    int err;
    struct drm_tegra_channel *drm_channel;
    struct grate_channel *channel;
+   grate_trace();
 
    err = drm_tegra_channel_open(&drm_channel, screen->drm, class);
    if (err < 0)
@@ -53,6 +54,7 @@ grate_channel_create(struct grate_context *context,
 static void
 grate_channel_delete(struct grate_channel *channel)
 {
+   grate_trace();
    grate_stream_destroy(&channel->stream);
    drm_tegra_channel_close(channel->stream.channel);
    FREE(channel);
@@ -75,7 +77,7 @@ grate_context_flush(struct pipe_context *pcontext,
                     struct pipe_fence_handle **pfence,
                     enum pipe_flush_flags flags)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 struct pipe_context *
@@ -84,6 +86,7 @@ grate_screen_context_create(struct pipe_screen *pscreen,
 {
    struct grate_screen *screen = grate_screen(pscreen);
    int err;
+   grate_trace();
 
    struct grate_context *context = CALLOC_STRUCT(grate_context);
    if (!context)

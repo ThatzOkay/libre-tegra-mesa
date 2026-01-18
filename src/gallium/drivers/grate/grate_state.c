@@ -21,7 +21,7 @@ static void
 grate_set_sample_mask(struct pipe_context *pcontext,
                       unsigned int sample_mask)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
@@ -94,7 +94,7 @@ static void
 grate_set_polygon_stipple(struct pipe_context *pcontext,
                           const struct pipe_poly_stipple *stipple)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
@@ -104,7 +104,7 @@ grate_set_scissor_states(struct pipe_context *pcontext,
                          const struct pipe_scissor_state * scissors)
 {
    assert(num_scissors == 1);
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
@@ -171,33 +171,33 @@ grate_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
                         unsigned unbind_num_trailing_slots,
                         struct pipe_sampler_view **views)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
 grate_set_blend_color(struct pipe_context *pctx,
                       const struct pipe_blend_color *blend_color)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
 grate_set_stencil_ref(struct pipe_context *pctx,
                       const struct pipe_stencil_ref stencil_ref)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
 grate_fp_state_bind(struct pipe_context *pctx, void *hwcso)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
 grate_vp_state_bind(struct pipe_context *pctx, void *hwcso)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 void
@@ -233,7 +233,7 @@ grate_create_blend_state(struct pipe_context *pcontext,
 static void
 grate_bind_blend_state(struct pipe_context *pcontext, void *so)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
@@ -269,7 +269,7 @@ grate_bind_sampler_states(struct pipe_context *pcontext,
                           unsigned start_slot, unsigned num_samplers,
                           void **samplers)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static void
@@ -281,6 +281,7 @@ grate_delete_sampler_state(struct pipe_context *pcontext, void *so)
 void
 grate_context_sampler_init(struct pipe_context *pcontext)
 {
+   grate_trace();
    pcontext->create_sampler_state = grate_create_sampler_state;
    pcontext->bind_sampler_states = grate_bind_sampler_states;
    pcontext->delete_sampler_state = grate_delete_sampler_state;
@@ -351,6 +352,7 @@ grate_delete_rasterizer_state(struct pipe_context *pcontext, void *so)
 void
 grate_context_rasterizer_init(struct pipe_context *pcontext)
 {
+   grate_trace();
    pcontext->create_rasterizer_state = grate_create_rasterizer_state;
    pcontext->bind_rasterizer_state = grate_bind_rasterizer_state;
    pcontext->delete_rasterizer_state = grate_delete_rasterizer_state;
@@ -377,6 +379,7 @@ grate_create_zsa_state(struct pipe_context *pcontext,
 {
    struct grate_context *context = grate_context(pcontext);
    struct grate_zsa_state *so = CALLOC_STRUCT(grate_zsa_state);
+   grate_trace();
    if (!so)
       return NULL;
 
@@ -419,6 +422,7 @@ grate_delete_zsa_state(struct pipe_context *pcontext, void *so)
 void
 grate_context_zsa_init(struct pipe_context *pcontext)
 {
+   grate_trace();
    pcontext->create_depth_stencil_alpha_state = grate_create_zsa_state;
    pcontext->bind_depth_stencil_alpha_state = grate_bind_zsa_state;
    pcontext->delete_depth_stencil_alpha_state = grate_delete_zsa_state;
@@ -680,6 +684,7 @@ grate_emit_state(struct grate_context *context)
 void
 grate_context_vbo_init(struct pipe_context *pcontext)
 {
+   grate_trace();
    pcontext->create_vertex_elements_state = grate_create_vertex_state;
    pcontext->bind_vertex_elements_state = grate_bind_vertex_state;
    pcontext->delete_vertex_elements_state = grate_delete_vertex_state;
