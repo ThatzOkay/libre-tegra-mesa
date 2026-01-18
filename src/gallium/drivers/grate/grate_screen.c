@@ -17,6 +17,8 @@ static const struct debug_named_value debug_options[] = {
      "Print unimplemented functions" },
    { "tgsi", GRATE_DEBUG_TGSI,
      "Dump TGSI during program compile" },
+   { "trace", GRATE_DEBUG_TRACE,
+     "Print trace functions" },
    { NULL }
 };
 
@@ -26,6 +28,7 @@ uint32_t grate_debug;
 static void
 grate_screen_destroy(struct pipe_screen *pscreen)
 {
+   grate_trace();
    struct grate_screen *screen = grate_screen(pscreen);
 
    slab_destroy_parent(&screen->transfer_pool);
@@ -37,18 +40,21 @@ grate_screen_destroy(struct pipe_screen *pscreen)
 static const char *
 grate_screen_get_name(struct pipe_screen *pscreen)
 {
+   grate_trace();
    return "Tegra";
 }
 
 static const char *
 grate_screen_get_vendor(struct pipe_screen *pscreen)
 {
+   grate_trace();
    return "Grate";
 }
 
 static const char *
 grate_screen_get_device_vendor(struct pipe_screen *pscreen)
 {
+   grate_trace();
    return "NVIDIA";
 }
 
@@ -62,6 +68,7 @@ static void
 grate_init_screen_caps(struct grate_screen *screen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&screen->base.caps;
+   grate_trace();
 
    u_init_pipe_screen_caps(&screen->base, 1);
 
@@ -285,7 +292,7 @@ grate_init_screen_caps(struct grate_screen *screen)
    //caps->max_texture_array_layers;
    //caps->max_stream_output_separate_components;
    //caps->max_stream_output_interleaved_components;
-   caps->glsl_feature_level = 
+   caps->glsl_feature_level =
    caps->glsl_feature_level_compatibility = 120;
    caps->essl_feature_level = 100;
    caps->constant_buffer_offset_alignment = 4;
@@ -379,6 +386,7 @@ grate_init_shader_caps(struct grate_screen *screen)
 {
 
    struct pipe_shader_caps *caps = NULL;
+   grate_trace();
 
    caps = (struct pipe_shader_caps *)&screen->base.shader_caps[MESA_SHADER_VERTEX];
 
@@ -557,7 +565,7 @@ grate_screen_fence_reference(struct pipe_screen *pscreen,
                              struct pipe_fence_handle **ptr,
                              struct pipe_fence_handle *fence)
 {
-   unimplemented();
+   grate_unimplemented();
 }
 
 static bool
@@ -566,7 +574,7 @@ grate_screen_fence_finish(struct pipe_screen *screen,
                           struct pipe_fence_handle *fence,
                           uint64_t timeout)
 {
-   unimplemented();
+   grate_unimplemented();
    return false;
 }
 
@@ -621,6 +629,9 @@ grate_screen_create(int fd)
    struct grate_screen *screen;
    int err;
 
+   grate_debug = debug_get_option_grate_debug();
+   grate_trace();
+
    screen = CALLOC_STRUCT(grate_screen);
    if (!screen)
       return NULL;
@@ -642,8 +653,6 @@ grate_screen_create(int fd)
    }
 
    drm_tegra_channel_close(drm_channel);
-
-   grate_debug = debug_get_option_grate_debug();
 
    screen->base.destroy = grate_screen_destroy;
    screen->base.get_name = grate_screen_get_name;
