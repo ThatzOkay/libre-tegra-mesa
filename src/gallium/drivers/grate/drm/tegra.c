@@ -1001,13 +1001,13 @@ static enum drm_tegra_soc_id read_chip_id(const char *path)
 			return DRM_TEGRA114_SOC;
 		}
 
-		return DRM_TEGRA_UNKOWN_SOC;
+		return DRM_TEGRA_UNKNOWN_SOC;
 	}
 
 	return DRM_TEGRA_INVALID_SOC;
 }
 
-enum drm_tegra_soc_id drm_tegra_get_soc_id(struct drm_tegra *drm)
+enum drm_tegra_soc_id drm_tegra_get_soc_id(void)
 {
 	static enum drm_tegra_soc_id sid = DRM_TEGRA_INVALID_SOC;
 
@@ -1018,8 +1018,7 @@ enum drm_tegra_soc_id drm_tegra_get_soc_id(struct drm_tegra *drm)
 	if (sid != DRM_TEGRA_INVALID_SOC)
 		return sid;
 
-	VDBG_DRM(drm, "failed to identify SoC version\n");
-	sid = DRM_TEGRA_UNKOWN_SOC;
+	sid = DRM_TEGRA_UNKNOWN_SOC;
 
 	return sid;
 }

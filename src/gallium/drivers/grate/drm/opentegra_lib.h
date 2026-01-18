@@ -42,7 +42,7 @@ enum drm_tegra_class {
 
 enum drm_tegra_soc_id {
 	DRM_TEGRA_INVALID_SOC,
-	DRM_TEGRA_UNKOWN_SOC,
+	DRM_TEGRA_UNKNOWN_SOC,
 	DRM_TEGRA20_SOC,
 	DRM_TEGRA30_SOC,
 	DRM_TEGRA114_SOC,
@@ -50,7 +50,7 @@ enum drm_tegra_soc_id {
 
 static __maybe_unused const char * const drm_tegra_soc_names[] = {
 	[DRM_TEGRA_INVALID_SOC] = "invalid",
-	[DRM_TEGRA_UNKOWN_SOC] = "unknown",
+	[DRM_TEGRA_UNKNOWN_SOC] = "unknown",
 	[DRM_TEGRA20_SOC] = "Tegra20",
 	[DRM_TEGRA30_SOC] = "Tegra30",
 	[DRM_TEGRA114_SOC] = "Tegra114",
@@ -64,7 +64,7 @@ void drm_tegra_close(struct drm_tegra *drm);
 
 int drm_tegra_version(struct drm_tegra *drm);
 
-enum drm_tegra_soc_id drm_tegra_get_soc_id(struct drm_tegra *drm);
+enum drm_tegra_soc_id drm_tegra_get_soc_id(void);
 
 int drm_tegra_bo_new(struct drm_tegra_bo **bop, struct drm_tegra *drm,
 		     uint32_t flags, uint32_t size);
