@@ -10,7 +10,6 @@ grate_create_surface(struct pipe_context *context,
                      struct pipe_resource *resource,
                      const struct pipe_surface *template)
 {
-   //unsigned int level = template->u.tex.level;
    struct grate_surface *surface = CALLOC_STRUCT(grate_surface);
    if (!surface)
       return NULL;
@@ -19,12 +18,11 @@ grate_create_surface(struct pipe_context *context,
    pipe_reference_init(&surface->base.reference, 1);
 
    surface->base.context = context;
+   surface->base.texture = resource;
    surface->base.format = template->format;
-   //surface->base.width = u_minify(resource->width0, level);
-   //surface->base.height = u_minify(resource->height0, level);
-   //surface->base.u.tex.level = level;
-   //surface->base.u.tex.first_layer = template->u.tex.first_layer;
-   //surface->base.u.tex.last_layer = template->u.tex.last_layer;
+   surface->base.level = template->level;
+   surface->base.first_layer = template->first_layer;
+   surface->base.last_layer = template->last_layer;
 
    return &surface->base;
 }
