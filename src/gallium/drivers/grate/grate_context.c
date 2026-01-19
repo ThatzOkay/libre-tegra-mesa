@@ -100,12 +100,14 @@ grate_screen_context_create(struct pipe_screen *pscreen,
    err = grate_channel_create(context, DRM_TEGRA_GR2D, &context->gr2d);
    if (err < 0) {
       fprintf(stderr, "grate_channel_create() failed: %d\n", err);
+      FREE(context);
       return NULL;
    }
 
    err = grate_channel_create(context, DRM_TEGRA_GR3D, &context->gr3d);
    if (err < 0) {
       fprintf(stderr, "grate_channel_create() failed: %d\n", err);
+      FREE(context);
       return NULL;
    }
 
@@ -114,6 +116,10 @@ grate_screen_context_create(struct pipe_screen *pscreen,
    context->base.destroy = grate_context_destroy;
    context->base.flush = grate_context_flush;
    context->base.stream_uploader = u_upload_create_default(&context->base);
+   if (!context->base.stream_uploader) {
+      FREE(context);
+      return NULL;
+   }
    context->base.const_uploader = context->base.stream_uploader;
 
    grate_context_resource_init(&context->base);

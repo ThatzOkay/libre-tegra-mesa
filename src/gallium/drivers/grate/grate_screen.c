@@ -74,7 +74,7 @@ grate_init_screen_caps(struct grate_screen *screen)
 
    // Bool values
    //caps->graphics;
-   caps->npot_textures = true;
+   caps->npot_textures = true; // not really, but mesa requires it for now!
    //caps->anisotropic_filter;
    //caps->occlusion_query;
    //caps->query_time_elapsed;
@@ -104,8 +104,8 @@ grate_init_screen_caps(struct grate_screen *screen)
    //caps->texture_barrier;
    //caps->stream_output_pause_resume;
    //caps->tgsi_can_compact_constants;
-   caps->vertex_color_unclamped = true;
-   caps->vertex_color_clamped = false;
+   caps->vertex_color_unclamped = true;  //probably irrelevant for GLES2
+   caps->vertex_color_clamped = false; //probably irrelevant for GLES2
    //caps->quads_follow_provoking_vertex_convention;
    //caps->user_vertex_buffers;
    //caps->compute;
@@ -213,6 +213,7 @@ grate_init_screen_caps(struct grate_screen *screen)
    //caps->fragment_shader_interlock;
    //caps->fbfetch_coherent;
    //caps->atomic_float_minmax;
+   // well, not quite. but perhaps close enough?
    caps->fragment_shader_texture_lod = true;
    caps->fragment_shader_derivatives = true;
    //caps->texture_shadow_lod;
@@ -284,7 +285,7 @@ grate_init_screen_caps(struct grate_screen *screen)
 
    // UInt values
    //caps->max_dual_source_render_targets;
-   caps->max_render_targets = 8;
+   caps->max_render_targets = 8; //???
    caps->max_texture_2d_size = 2048;
    caps->max_texture_3d_levels = 0;
    caps->max_texture_cube_levels = 16;
@@ -293,8 +294,8 @@ grate_init_screen_caps(struct grate_screen *screen)
    //caps->max_stream_output_separate_components;
    //caps->max_stream_output_interleaved_components;
    caps->glsl_feature_level =
-   caps->glsl_feature_level_compatibility = 120;
-   caps->essl_feature_level = 100;
+   caps->glsl_feature_level_compatibility = 120; //no clue
+   caps->essl_feature_level = 100; //no clue
    caps->constant_buffer_offset_alignment = 4;
    //caps->timer_resolution;
    //caps->min_map_buffer_alignment;
@@ -344,6 +345,7 @@ grate_init_screen_caps(struct grate_screen *screen)
    //caps->gl_begin_end_buffer_size;
    //caps->glsl_zero_init;
    //caps->max_texture_mb;
+   caps->supported_prim_modes_with_restart = 0;
    caps->supported_prim_modes = BITFIELD_BIT(MESA_PRIM_POINTS) |
                                  BITFIELD_BIT(MESA_PRIM_LINES) |
                                  BITFIELD_BIT(MESA_PRIM_LINE_LOOP) |
@@ -351,7 +353,6 @@ grate_init_screen_caps(struct grate_screen *screen)
                                  BITFIELD_BIT(MESA_PRIM_TRIANGLES) |
                                  BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP) |
                                  BITFIELD_BIT(MESA_PRIM_TRIANGLE_FAN);
-   caps->supported_prim_modes_with_restart = 0;
    //caps->max_sparse_texture_size;
    //caps->max_sparse_3d_texture_size;
    //caps->max_sparse_array_texture_layers;
@@ -388,19 +389,20 @@ grate_init_shader_caps(struct grate_screen *screen)
    struct pipe_shader_caps *caps = NULL;
    grate_trace();
 
+   // Vertex Shader caps
    caps = (struct pipe_shader_caps *)&screen->base.shader_caps[MESA_SHADER_VERTEX];
 
    // UInt values
-   caps->max_instructions =
+   caps->max_instructions = 1024;
    caps->max_alu_instructions = 1024;
-   caps->max_tex_instructions =
-   caps->max_tex_indirections =
+   caps->max_tex_instructions = 0;
+   caps->max_tex_indirections = 0;
    caps->max_control_flow_depth = 0;
    caps->max_inputs = 16;
    caps->max_outputs = 16;
    caps->max_const_buffer0_size = 1024;
    caps->max_const_buffers = 1024;
-   caps->max_temps = 64*4; /* 64 vec4s */
+   caps->max_temps = 64*4; // 64 vec4s
    caps->max_texture_samplers = 0;
    caps->max_sampler_views = 0;
    caps->max_shader_buffers = 0;
@@ -411,8 +413,8 @@ grate_init_shader_caps(struct grate_screen *screen)
 
    // Bool values
    caps->cont_supported = false;
-   caps->indirect_temp_addr = false;
-   caps->indirect_const_addr = true;
+   caps->indirect_temp_addr = false; // cannot index attributes, varyings nor GPRs
+   caps->indirect_const_addr = true; // can index constant registers 
    caps->subroutines = false;
    caps->integers = false;
    //caps->int64_atomics;
@@ -425,122 +427,49 @@ grate_init_shader_caps(struct grate_screen *screen)
    caps->tgsi_sqrt_supported = true;
    caps->tgsi_any_inout_decl_range = false;
 
-   /* cannot index attributes, varyings nor GPRs */
-#if 0
-   // ??
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-      return 0;
-#endif
+   /*  */
 
-
-///////////////////////////////////////////////////////////////////////////////////////////
-// FINISH Fragement shader !! //
-#if 0
-   caps = (struct pipe_shader_caps *)&screen->base.base.shader_caps[MESA_SHADER_FRAGMENT];
+   // Fragment Shader caps
+   caps = (struct pipe_shader_caps *)&screen->base.shader_caps[MESA_SHADER_FRAGMENT];
 
    // UInt values
-   caps->max_instructions;
-   caps->max_alu_instructions;
-   caps->max_tex_instructions;
-   caps->max_tex_indirections;
-   caps->max_control_flow_depth;
-   caps->max_inputs;
-   caps->max_outputs;
-   caps->max_const_buffer0_size;
-   caps->max_const_buffers;
-   caps->max_temps;
-   caps->max_texture_samplers;
-   caps->max_sampler_views;
-   caps->max_shader_buffers;
-   caps->max_shader_images;
-   caps->max_hw_atomic_counters;
-   caps->max_hw_atomic_counter_buffers;
-   caps->supported_irs;
+   caps->max_instructions = 4 * 128;
+   caps->max_alu_instructions = 4 * 128;
+   caps->max_tex_instructions = 128;
+   caps->max_tex_indirections = 128;
+   caps->max_inputs = 16;
+   caps->max_outputs = 16;
+   caps->max_const_buffer0_size = 32;
+   caps->max_const_buffers = 32;
+   caps->max_temps = 16; // scalars
+   caps->max_texture_samplers = 16;
+   caps->max_sampler_views = 16;
+   caps->max_shader_buffers = 0;
+   caps->max_shader_images = 0;
+   caps->max_hw_atomic_counters = 0;
+   caps->max_hw_atomic_counter_buffers = 0;
+   caps->supported_irs = (1 << PIPE_SHADER_IR_TGSI) | (1 << PIPE_SHADER_IR_NIR);
 
    // Bool values
-   caps->cont_supported;
-   caps->indirect_temp_addr;
-   caps->indirect_const_addr;
-   caps->subroutines;
-   caps->integers;
-   caps->int64_atomics;
-   caps->fp16;
-   caps->fp16_derivatives;
-   caps->fp16_const_buffers;
-   caps->int16;
-   caps->glsl_16bit_consts;
-   caps->glsl_16bit_load_dst;
-   caps->tgsi_sqrt_supported;
-   caps->tgsi_any_inout_decl_range;
-
-   case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
-      return 4 * 128;
-
-   case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
-      return 4 * 128;
-
-   case PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS:
-      return 128;
-
-   case PIPE_SHADER_CAP_MAX_TEX_INDIRECTIONS:
-      return 128;
+   caps->integers = false;
+   caps->int64_atomics = false;
+   caps->fp16 = false;
+   caps->fp16_derivatives = false;
+   caps->fp16_const_buffers = false;
+   caps->int16 = false;
+   caps->glsl_16bit_consts = false;
+   caps->glsl_16bit_load_dst = false;
+   caps->tgsi_sqrt_supported = true;
+   caps->tgsi_any_inout_decl_range = false;
 
    /* no control flow */
-   case PIPE_SHADER_CAP_MAX_CONTROL_FLOW_DEPTH:
-   case PIPE_SHADER_CAP_CONT_SUPPORTED:
-   case PIPE_SHADER_CAP_SUBROUTINES:
-      return 0;
-
-   case PIPE_SHADER_CAP_MAX_INPUTS:
-   case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      return 16;
-
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
-      return 32;
-
-   case PIPE_SHADER_CAP_MAX_TEMPS:
-      return 16; /* scalars */
+   caps->max_control_flow_depth = 0;
+   caps->cont_supported = false;
+   caps->subroutines = false;
 
    /* no indirection */
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
-      return 0;
-
-   case PIPE_SHADER_CAP_INTEGERS:
-   case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      return 0;
-
-   case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-   case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
-      return 16;
-
-   case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
-      return 1;
-
-   case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
-      return 0;
-
-   case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-      return 0;
-
-   case PIPE_SHADER_CAP_SUPPORTED_IRS:
-      return (1 << PIPE_SHADER_IR_TGSI) | (1 << PIPE_SHADER_IR_NIR);
-
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
-         return 0;
-
-   case PIPE_SHADER_CAP_FP16:
-   case PIPE_SHADER_CAP_FP16_DERIVATIVES:
-   case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
-   case PIPE_SHADER_CAP_INT16:
-   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
-         return 0;
-#endif
+   caps->indirect_temp_addr = 0;
+   caps->indirect_const_addr = 0;
 }
 
 
