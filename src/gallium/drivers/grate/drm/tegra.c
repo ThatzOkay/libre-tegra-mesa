@@ -1002,6 +1002,11 @@ static enum drm_tegra_soc_id read_chip_id(const char *path)
 		}
 
 		return DRM_TEGRA_UNKNOWN_SOC;
+	} else if (getenv("GRATE_SOC")) {
+		// Fix me: my brain is fried :)
+		char *str = getenv("GRATE_SOC");
+		printf("forced SoC: %s\n", str);
+		return DRM_TEGRA30_SOC;
 	}
 
 	return DRM_TEGRA_INVALID_SOC;
