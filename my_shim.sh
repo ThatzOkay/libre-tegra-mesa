@@ -1,7 +1,7 @@
 #!/bin/sh
 
-#export LD_PRELOAD=/home/jonas/surface_dev/gpu/mesa/build/src/grate/drm-shim/libgrate_noop_drm_shim.so
-#export LD_LIBRARY_PATH=/home/jonas/surface_dev/gpu/mesa/build/src/glx/libGL.so
+#export LD_PRELOAD=build/src/grate/drm-shim/libgrate_noop_drm_shim.so
+#export LD_LIBRARY_PATH=build/src/glx/libGL.so
 
 #glxgears -info
 #EGL_PLATFORM=surfaceless \
@@ -18,9 +18,9 @@ export EGL_LOG_LEVEL=debug
 export EGL_PLATFORM=surfaceless
 
 
-LIBGL_DRIVERS_PATH=/home/jonas/Desktop/SurfaceRT_DEV/gpu/repos/mesa/install_dir/lib/x86_64-linux-gnu/dri \
-	LD_PRELOAD=/home/jonas/Desktop/SurfaceRT_DEV/gpu/repos/mesa/build/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so \
-	LD_LIBRARY_PATH=/home/jonas/Desktop/SurfaceRT_DEV/gpu/repos/mesa/install_dir/lib/x86_64-linux-gnu \
+LIBGL_DRIVERS_PATH=build/install_dir/lib/x86_64-linux-gnu/dri \
+	LD_PRELOAD=build/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so \
+	LD_LIBRARY_PATH=build/install_dir/lib/x86_64-linux-gnu \
 	LIBGL_DEBUG=verbose \
 	MESA_DEBUG=1 \
 	DRI_PRIME_DEBUG=1 \
