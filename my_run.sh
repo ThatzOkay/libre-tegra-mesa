@@ -15,7 +15,7 @@ export GALLIUM_TRACE_TC=true
 export EGL_LOG_LEVEL=debug
 export EGL_PLATFORM=surfaceless
 
-LD_PRELOAD=/home/jonas/Desktop/SurfaceRT_DEV/gpu/repos/mesa/build/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so \
+LD_PRELOAD=build/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so \
 DISPLAY=:0 \
 vblank_mode=0 \
 LIBGL_DEBUG=verbose \

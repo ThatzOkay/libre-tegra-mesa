@@ -1,6 +1,8 @@
 #!/bin/sh
 
-#-Dlegacy-x11=dri2 is needed for newer mesa
+# gnu2 tlsdesc is broken in binutils
+export CFLAGS="$CFLAGS -mtls-dialect=gnu"
+export CXXFLAGS="$CXXFLAGS -mtls-dialect=gnu"
 
 meson setup \
 	-Dbuildtype=debug \
@@ -19,7 +21,6 @@ meson setup \
 	-Dllvm=disabled \
 	-Dtools=drm-shim \
 	-Degl-native-platform=drm \
-	-Dprefix=/home/jonas/Desktop/SurfaceRT_DEV/gpu/repos/mesa/install_dir \
+	-Dprefix="./build/install_dir" \
+	${@} \
 	build
-
-
