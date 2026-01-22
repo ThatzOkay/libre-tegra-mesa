@@ -21,6 +21,6 @@ meson setup \
 	-Dllvm=disabled \
 	-Dtools=drm-shim \
 	-Degl-native-platform=drm \
-	-Dprefix="./build/install_dir" \
+	-Dprefix="${PWD}/build/install_dir" \
 	${@} \
 	build
