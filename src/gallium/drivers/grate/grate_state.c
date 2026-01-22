@@ -285,6 +285,7 @@ grate_context_sampler_init(struct pipe_context *pcontext)
    pcontext->create_sampler_state = grate_create_sampler_state;
    pcontext->bind_sampler_states = grate_bind_sampler_states;
    pcontext->delete_sampler_state = grate_delete_sampler_state;
+   pcontext->sampler_view_release = u_default_sampler_view_release;
 }
 
 static int
