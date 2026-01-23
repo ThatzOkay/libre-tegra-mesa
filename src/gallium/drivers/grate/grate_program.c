@@ -68,6 +68,7 @@ grate_vs_tgsi_transform_instruction(struct tgsi_transform_context *ctx,
 static struct tgsi_token *
 grate_vs_tgsi_transform(const struct tgsi_token *tokens_in)
 {
+   grate_trace();
    const unsigned new_len = tgsi_num_tokens(tokens_in) + 100;
 
    struct tgsi_shader_info info;
@@ -85,6 +86,7 @@ static void *
 grate_create_vs_state(struct pipe_context *pcontext,
                       const struct pipe_shader_state *template)
 {
+   grate_trace();
    struct grate_vertex_shader_state *so =
       CALLOC_STRUCT(grate_vertex_shader_state);
 
@@ -148,12 +150,14 @@ grate_create_vs_state(struct pipe_context *pcontext,
 static void
 grate_bind_vs_state(struct pipe_context *pcontext, void *so)
 {
+   grate_trace();
    grate_context(pcontext)->vshader = so;
 }
 
 static void
 grate_delete_vs_state(struct pipe_context *pcontext, void *so)
 {
+   grate_trace();
    FREE(so);
 }
 
@@ -161,6 +165,7 @@ static void *
 grate_create_fs_state(struct pipe_context *pcontext,
                       const struct pipe_shader_state *template)
 {
+   grate_trace();
    struct grate_context *context = grate_context(pcontext);
    struct grate_fragment_shader_state *so =
       CALLOC_STRUCT(grate_fragment_shader_state);
@@ -291,18 +296,21 @@ grate_create_fs_state(struct pipe_context *pcontext,
 static void
 grate_bind_fs_state(struct pipe_context *pcontext, void *so)
 {
+   grate_trace();
    grate_context(pcontext)->fshader = so;
 }
 
 static void
 grate_delete_fs_state(struct pipe_context *pcontext, void *so)
 {
+   grate_trace();
    FREE(so);
 }
 
 void
 grate_context_program_init(struct pipe_context *pcontext)
 {
+   grate_trace();
    pcontext->create_vs_state = grate_create_vs_state;
    pcontext->bind_vs_state = grate_bind_vs_state;
    pcontext->delete_vs_state = grate_delete_vs_state;

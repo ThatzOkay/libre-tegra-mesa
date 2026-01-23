@@ -19,6 +19,7 @@ if [[ -z "${SHUT_DEBUG}" ]]; then
 	export LIBDRM_TEGRA_DEBUG_BO=1
 	export DRI_PRIME_DEBUG=1
 	export DRM_SHIM_DEBUG=1
+	export NIR_DEBUG=tgsi,print
 fi
 
 export GRATE_SOC=T30

@@ -1,5 +1,7 @@
 #include <stdio.h>
 
+#include "compiler/nir/nir_shader_compiler_options.h"
+
 #include "drm-uapi/drm_fourcc.h"
 
 #include "util/u_memory.h"
@@ -427,6 +429,31 @@ grate_screen_query_dmabuf_modifiers(struct pipe_screen *pscreen,
    }
 }
 
+static const nir_shader_compiler_options grate_base_compiler_options = {
+   /*
+   .fuse_ffma32 = true,
+   .fuse_ffma64 = true,
+   .lower_bitops = true,
+   .lower_extract_byte = true,
+   .lower_extract_word = true,
+   .lower_fdiv = true,
+   .lower_fsat = true,
+   .lower_insert_byte = true,
+   .lower_insert_word = true,
+   .lower_fdph = true,
+   .lower_flrp32 = true,
+   .lower_flrp64 = true,
+   .lower_fmod = true,
+   .lower_fpow = true,
+   .lower_uniforms_to_ubo = true,
+   .lower_vector_cmp = true,
+   .force_indirect_unrolling = nir_var_all,
+   .force_indirect_unrolling_sampler = true,
+   .max_unroll_iterations = 32,
+   */
+   .no_integers = true,
+};
+
 static bool
 grate_screen_is_dmabuf_modifier_supported(struct pipe_screen *pscreen,
                                           uint64_t modifier,
@@ -486,6 +513,9 @@ grate_screen_create(int fd)
    screen->base.is_format_supported = grate_screen_is_format_supported;
    screen->base.query_dmabuf_modifiers = grate_screen_query_dmabuf_modifiers;
    screen->base.is_dmabuf_modifier_supported = grate_screen_is_dmabuf_modifier_supported;
+   
+   screen->base.nir_options[MESA_SHADER_VERTEX] = &grate_base_compiler_options;
+   screen->base.nir_options[MESA_SHADER_FRAGMENT] = &grate_base_compiler_options;
 
    /* fence functions */
    screen->base.fence_reference = grate_screen_fence_reference;
