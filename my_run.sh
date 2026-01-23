@@ -14,6 +14,7 @@ export GALLIUM_TRACE=/tmp/trace-gallium.xml
 export GALLIUM_TRACE_TC=true
 export EGL_LOG_LEVEL=debug
 export EGL_PLATFORM=surfaceless
+export NIR_DEBUG=tgsi,print
 
 LD_PRELOAD=build/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so \
 DISPLAY=:0 \
