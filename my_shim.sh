@@ -1,10 +1,6 @@
-#!/bin/sh
+#!/bin/bash
 
-#export LD_PRELOAD=build/src/grate/drm-shim/libgrate_noop_drm_shim.so
-#export LD_LIBRARY_PATH=build/src/glx/libGL.so
-
-#glxgears -info
-#EGL_PLATFORM=surfaceless \
+source ./my_common.sh
 
 if [[ -z "${SHUT_DEBUG}" ]]; then
 	export vblank_mode=0
@@ -23,22 +19,17 @@ if [[ -z "${SHUT_DEBUG}" ]]; then
 fi
 
 export GRATE_SOC=T30
-INSTALL_PATH="${PWD}/build/install_dir/lib/$(uname -m)-linux-gnu"
 
-if [[ ! -d "${INSTALL_PATH}/dri" ]]; then
-	INSTALL_PATH="${PWD}/build/install_dir/lib"
-fi
-if [[ ! -d "${INSTALL_PATH}/dri" ]]; then
-	echo "Install path not found! '${INSTALL_PATH}'"
-	exit 1
-fi
+LIB_DIR="$(meson introspect --buildoptions build | jq -r '.[] | select(.name=="libdir").value')"
+LIB_PATH="$install_dir/$LIB_DIR"
+
 if [[ -z "${1}" ]]; then
 	set eglgears_wayland -info
 fi
 
 echo "Launching: ${@}"
-LD_LIBRARY_PATH="${INSTALL_PATH}" \
-	LIBGL_DRIVERS_PATH="${INSTALL_PATH}/dri" \
-	LD_PRELOAD="${PWD}/build/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so" \
+LD_LIBRARY_PATH="${LIB_PATH}" \
+	LIBGL_DRIVERS_PATH="${LIB_PATH}/dri" \
+	LD_PRELOAD="${build_dir}/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so" \
 	MESA_LOADER_DRIVER_OVERRIDE=tegra \
 	"${@}"

@@ -1,4 +1,6 @@
-#!/bin/sh
+#!/bin/bash
+
+source ./my_common.sh
 
 # gnu2 tlsdesc is broken in binutils
 export CFLAGS="$CFLAGS -mtls-dialect=gnu"
@@ -21,6 +23,6 @@ meson setup \
 	-Dllvm=disabled \
 	-Dtools=drm-shim \
 	-Degl-native-platform=drm \
-	-Dprefix="${PWD}/build/install_dir" \
+	-Dprefix="${install_dir}" \
 	${@} \
-	build
+	$build_dir
