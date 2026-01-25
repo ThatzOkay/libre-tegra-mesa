@@ -45,7 +45,7 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
    unsigned int i;
    uint32_t mask = 0;
 
-   //if (framebuffer->zsbuf) {
+   if (framebuffer->zsbuf.texture) {
       struct grate_resource *res = grate_resource(framebuffer->zsbuf.texture);
       uint32_t rt_params;
 
@@ -56,10 +56,10 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
       context->framebuffer.rt_params[0] = rt_params;
       context->framebuffer.bos[0] = res->bo;
       mask |= 1;
-   //} else {
-   //   context->framebuffer.rt_params[0] = 0;
-   //   context->framebuffer.bos[0] = NULL;
-   //}
+   } else {
+      context->framebuffer.rt_params[0] = 0;
+      context->framebuffer.bos[0] = NULL;
+   }
 
    util_copy_framebuffer_state(cso, framebuffer);
 
