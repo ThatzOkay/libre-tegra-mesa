@@ -298,8 +298,8 @@ grate_init_shader_caps(struct grate_screen *screen)
    caps->max_control_flow_depth = 0;
    caps->max_inputs = 16;
    caps->max_outputs = 16;
-   caps->max_const_buffer0_size = 1024;
-   caps->max_const_buffers = 1024;
+   caps->max_const_buffer0_size = 256 * sizeof(float[4]);
+   caps->max_const_buffers = 1;
    caps->max_temps = 64*4; // 64 vec4s
    caps->max_texture_samplers = 0;
    caps->max_sampler_views = 0;
@@ -336,7 +336,7 @@ grate_init_shader_caps(struct grate_screen *screen)
    caps->max_inputs = 16;
    caps->max_outputs = 16;
    caps->max_const_buffer0_size = 32;
-   caps->max_const_buffers = 32;
+   caps->max_const_buffers = 1;
    caps->max_temps = 16; // scalars
    caps->max_texture_samplers = 16;
    caps->max_sampler_views = 16;
