@@ -1,4 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -e
+
+cd "$(dirname "$0")"
 
 source ./my_common.sh
 
@@ -21,15 +24,20 @@ fi
 export GRATE_SOC=T30
 
 LIB_DIR="$(meson introspect --buildoptions build | jq -r '.[] | select(.name=="libdir").value')"
-LIB_PATH="$install_dir/$LIB_DIR"
+LIB_PATH="${INSTALL_DIR}/${LIB_DIR}"
 
 if [[ -z "${1}" ]]; then
 	set eglgears_wayland -info
 fi
 
+if [[ ! -d "${LIB_PATH}" ]]; then
+       echo "Install path not found! '${LIB_PATH}'. Shim may not use driver libs..."
+       exit 1
+fi
+
 echo "Launching: ${@}"
 LD_LIBRARY_PATH="${LIB_PATH}" \
 	LIBGL_DRIVERS_PATH="${LIB_PATH}/dri" \
-	LD_PRELOAD="${build_dir}/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so" \
+	LD_PRELOAD="${BUILD_DIR}/src/gallium/drivers/grate/drm-shim/libtegra_noop_drm_shim.so" \
 	MESA_LOADER_DRIVER_OVERRIDE=tegra \
 	"${@}"

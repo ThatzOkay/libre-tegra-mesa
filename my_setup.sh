@@ -1,4 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -e
+
+cd "$(dirname "$0")"
 
 source ./my_common.sh
 
@@ -23,6 +26,6 @@ meson setup \
 	-Dllvm=disabled \
 	-Dtools=drm-shim \
 	-Degl-native-platform=drm \
-	-Dprefix="${install_dir}" \
+	-Dprefix="${INSTALL_DIR}" \
 	${@} \
-	$build_dir
+	"${BUILD_DIR}"
