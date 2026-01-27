@@ -648,10 +648,9 @@ emit_program(struct grate_context *context)
 
    /* depends on linking */
    struct grate_fp_info *info = &context->fshader->info;
-   assert(info->num_inputs > 0);
    cull_face_linker_setup |= TGR3D_VAL(CULL_FACE_LINKER_SETUP,
                                        LINKER_INST_COUNT,
-                                       info->num_inputs - 1);
+                                       0 < info->num_inputs ? (info->num_inputs - 1) : 0);
 
    uint32_t linker_insts[3 + info->num_inputs * 2];
    linker_insts[0] = host1x_opcode_incr(TGR3D_CULL_FACE_LINKER_SETUP, 1);
