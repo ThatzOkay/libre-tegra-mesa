@@ -1,4 +1,5 @@
 #include "grate_compiler.h"
+#include "unistd.h"
 #include "vpir.h"
 
 #include "tgsi/tgsi_parse.h"
@@ -313,6 +314,7 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
 
    default:
       printf("GRATE VERTEX TGSI UNIMPLEMENTED: 0x%02x\n", inst->Instruction.Opcode);
+      return 0;
    }
 }
 
@@ -328,6 +330,8 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
       case TGSI_TOKEN_TYPE_INSTRUCTION:
          if (tgsi->FullToken.FullInstruction.Instruction.Opcode != TGSI_OPCODE_END) {
             struct vp_instr *instr = tgsi_to_vp(vp, &tgsi->FullToken.FullInstruction);
+            if (!instr) 
+               continue;
             list_addtail(&instr->link, &vp->instructions);
          }
          break;
