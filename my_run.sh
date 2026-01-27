@@ -1,4 +1,7 @@
-#!/bin/sh
+#!/usr/bin/env bash
+set -e
+
+cd "$(dirname "$0")"
 
 # DISPLAY=:0 put app to display, needed for SSH
 # vblank_mode=0 disables vsync. Shows max FPS instead of 60

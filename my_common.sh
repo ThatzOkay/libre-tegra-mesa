@@ -1,4 +1,4 @@
 #!/bin/bash
 
-build_dir="${PWD}/build"
-install_dir="${build_dir}/install_dir"
+BUILD_DIR="${PWD}/build"
+INSTALL_DIR="${BUILD_DIR}/install_dir"
