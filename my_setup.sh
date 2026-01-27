@@ -9,6 +9,13 @@ source ./my_common.sh
 export CFLAGS="$CFLAGS -mtls-dialect=gnu"
 export CXXFLAGS="$CXXFLAGS -mtls-dialect=gnu"
 
+EXTRA_ARGS=""
+if [[ -f "/sys/devices/soc0/family" ]] && [[ "$(cat /sys/devices/soc0/family)" = "Tegra" ]]; then
+	echo "Tegra! skipping drm-shim";
+else
+	EXTRA_ARGS="${EXTRA_ARGS} -Dtools=drm-shim"
+fi
+
 meson setup \
 	-Dbuildtype=debug \
 	-Db_ndebug=false \
@@ -24,8 +31,8 @@ meson setup \
 	-Dgallium-va=disabled \
 	-Dlibunwind=disabled \
 	-Dllvm=disabled \
-	-Dtools=drm-shim \
 	-Degl-native-platform=drm \
 	-Dprefix="${INSTALL_DIR}" \
+	${EXTRA_ARGS} \
 	${@} \
 	"${BUILD_DIR}"
