@@ -559,7 +559,7 @@ option(
   value : [],
   choices : ['amd', 'asahi', 'dlclose-skip', 'drm-shim', 'etnaviv', 'freedreno',  
              'gamma', 'glsl', 'imagination', 'intel', 'intel-ui', 'lima', 'nir',
-             'nouveau', 'panfrost', 'zink', 'all'],
+             'nouveau', 'panfrost', 'zink', 'grate', 'all'],
   description : 'List of tools to build. (Note: `intel-ui` selects `intel`)',
 )
 

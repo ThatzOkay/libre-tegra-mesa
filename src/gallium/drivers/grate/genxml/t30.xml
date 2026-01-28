@@ -1,0 +1,2029 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<database xmlns="http://nouveau.freedesktop.org/"
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
+
+<import file="common.xml"/>        
+
+<enum name="TGR3D_COND">
+	<value value="0" name="IMMEDIATE" />
+	<value value="1" name="OP_DONE" />
+	<value value="2" name="RD_DONE" />
+	<value value="3" name="REG_WR_SAFE" />
+	<value value="4" name="COND_4" />
+	<value value="5" name="COND_5" />
+	<value value="6" name="COND_6" />
+	<value value="7" name="COND_7" />
+	<value value="8" name="COND_8" />
+	<value value="9" name="COND_9" />
+	<value value="10" name="COND_10" />
+	<value value="11" name="COND_11" />
+	<value value="12" name="COND_12" />
+	<value value="13" name="COND_13" />
+	<value value="14" name="COND_14" />
+	<value value="15" name="COND_15" />
+</enum>
+<enum name="TGR3D_CTXSW_INT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_AUTO_ACK">
+	<value value="0" name="MANUAL" />
+	<value value="1" name="AUTOACK" />
+</enum>
+<enum name="TGR3D_BLK">
+	<value value="0" name="IDX_HRD" />
+	<value value="1" name="IDX_HWR" />
+	<value value="2" name="IDX_MEMRDREQ" />
+	<value value="3" name="IDX_MEMRDRET" />
+	<value value="4" name="IDX_DMAACC" />
+	<value value="5" name="IDX_IDXFETCH" />
+	<value value="6" name="IDX_IDXLINES" />
+	<value value="7" name="IDX_IDXCOUNTS" />
+	<value value="8" name="IDX_VTXFETCH" />
+	<value value="9" name="IDX_VTXWORDS" />
+	<value value="10" name="IDX_VTXCACHE" />
+	<value value="11" name="IDX_VTXSTALL" />
+	<value value="12" name="IDX_PRIMSTALL" />
+	<value value="13" name="IDX_PRIMS" />
+	<value value="14" name="IDX_POINTS" />
+	<value value="15" name="IDX_LINES" />
+	<value value="16" name="IDX_TRIS" />
+	<value value="17" name="VPE_CLIPATADR" />
+	<value value="18" name="VPE_INSTISSUE" />
+	<value value="19" name="VPE_STALL" />
+	<value value="20" name="VPE_THREAD0" />
+	<value value="21" name="VPE_THREAD1" />
+	<value value="22" name="CLIP" />
+	<value value="23" name="CLIP_QRETIRE" />
+	<value value="24" name="CLIP_VPE" />
+	<value value="25" name="CLIP_ATRD" />
+	<value value="26" name="CLIP_TRIVREJ" />
+	<value value="27" name="CLIP_DEGEN" />
+	<value value="28" name="CLIP_ZEROAREA" />
+	<value value="29" name="CLIP_REJECT" />
+	<value value="30" name="CLIP_CULL" />
+	<value value="31" name="CLIP_NEWTRI" />
+	<value value="32" name="CLIP_NEWLINE" />
+	<value value="33" name="CLIP_LR" />
+	<value value="34" name="CLIP_TB" />
+	<value value="35" name="CLIP_NF" />
+	<value value="36" name="CLIP_UC" />
+	<value value="37" name="SETUP_COV" />
+	<value value="38" name="SETUP_Z" />
+	<value value="39" name="QRAST_SRDAT0" />
+	<value value="40" name="QRAST_SRDAT1" />
+	<value value="41" name="QRAST_SB" />
+	<value value="42" name="QRAST_VRDAT0" />
+	<value value="43" name="QRAST_VRDAT1" />
+	<value value="44" name="QRAST_ZRDAT0" />
+	<value value="45" name="QRAST_ZRDAT1" />
+	<value value="46" name="QRAST_PSEQ" />
+	<value value="47" name="QRAST" />
+	<value value="48" name="QRAST_SBPIX" />
+	<value value="49" name="QRAST_QZCULL" />
+	<value value="50" name="QRAST_QZKILL" />
+	<value value="51" name="QRAST_QSCULL" />
+	<value value="52" name="QRAST_QVCULL" />
+	<value value="53" name="QRAST_COARSE" />
+	<value value="54" name="QRAST_FINE" />
+	<value value="55" name="QRAST_CACHE0" />
+	<value value="56" name="QRAST_CACHE1" />
+	<value value="57" name="QRAST_PRIMS" />
+	<value value="58" name="QRAST_FLUSH" />
+	<value value="59" name="PSEQ_DWR" />
+	<value value="60" name="PSEQ_RDAT" />
+	<value value="61" name="PSEQ_RDATCMD" />
+	<value value="62" name="PSEQ" />
+	<value value="63" name="PSEQ_QPKT" />
+	<value value="64" name="PSEQ_QZS" />
+	<value value="65" name="PSEQ_PKT" />
+	<value value="66" name="PSEQ_ZS" />
+	<value value="67" name="PSEQ_NOP" />
+	<value value="68" name="PSEQ_CMD0" />
+	<value value="69" name="PSEQ_CMD1" />
+	<value value="70" name="PSEQ_LOAD" />
+	<value value="71" name="PSEQ_FETCH" />
+	<value value="72" name="PSEQ_FETCHNOEX" />
+	<value value="73" name="PSEQ_CACHE" />
+	<value value="74" name="PSEQ_RECIRC0" />
+	<value value="75" name="PSEQ_RECIRC1" />
+	<value value="76" name="PSEQ_RECIRC2" />
+	<value value="77" name="PSEQ_EPOCH" />
+	<value value="78" name="PSEQ_REQWAIT" />
+	<value value="79" name="PSEQ_RETWAIT" />
+	<value value="80" name="ATRAST_TRAM" />
+	<value value="81" name="ATRAST_SLOPE" />
+	<value value="82" name="ATRAST_TOP" />
+	<value value="83" name="ATRAST_BOT" />
+	<value value="84" name="TEX" />
+	<value value="85" name="TEX_MEMRDREQ" />
+	<value value="86" name="TEX_MEMRDRET" />
+	<value value="87" name="TEX_CACHEACC" />
+	<value value="88" name="TEX_CACHEMISS" />
+	<value value="89" name="TEX_FETCH" />
+	<value value="90" name="TEX_FETCHNOEX" />
+	<value value="91" name="TEX_FILTER0" />
+	<value value="92" name="TEX_FILTER1" />
+	<value value="93" name="TEX_LODHIST0" />
+	<value value="94" name="TEX_LODHIST1" />
+	<value value="95" name="TEX_ANISOHIST0" />
+	<value value="96" name="TEX_ANISOHIST1" />
+	<value value="97" name="TEX_ANISOFINE0" />
+	<value value="98" name="TEX_ANISOFINE1" />
+	<value value="99" name="TEX_LATHIDE" />
+	<value value="100" name="TEX_PERFDEG" />
+	<value value="101" name="ALU_TOP" />
+	<value value="102" name="ALU_BOT" />
+	<value value="103" name="DWR" />
+	<value value="104" name="DWR_STORE" />
+	<value value="105" name="DWR_WRITE" />
+	<value value="106" name="DWR_WRITENOEX" />
+	<value value="107" name="DWR_SPILL" />
+	<value value="108" name="DWR_FLUSH" />
+	<value value="109" name="DWR_LATEOPS" />
+	<value value="110" name="DWR_CACHE" />
+	<value value="111" name="FDC_DWR0" />
+	<value value="112" name="FDC_DWR1" />
+	<value value="113" name="FDC_IMEMRDREQ" />
+	<value value="114" name="FDC_EMEMRDREQ" />
+	<value value="115" name="FDC_IMEMWRREQ" />
+	<value value="116" name="FDC_EMEMWRREQ" />
+	<value value="117" name="FDC_PSEQ0" />
+	<value value="118" name="FDC_PSEQ1" />
+	<value value="119" name="FDC_SBPSEQ" />
+	<value value="120" name="FDC_QSRD0" />
+	<value value="121" name="FDC_QSRD1" />
+	<value value="122" name="FDC_QSWR0" />
+	<value value="123" name="FDC_QSWR1" />
+	<value value="124" name="FDC_SBQRAST" />
+	<value value="125" name="FDC_QVRD0" />
+	<value value="126" name="FDC_QVRD1" />
+	<value value="127" name="FDC_QVWR0" />
+	<value value="128" name="FDC_QVWR1" />
+	<value value="129" name="FDC_QZRD0" />
+	<value value="130" name="FDC_QZRD1" />
+	<value value="131" name="FDC_QZWR0" />
+	<value value="132" name="FDC_QZWR1" />
+	<value value="133" name="FDC_L2RD0" />
+	<value value="134" name="FDC_L2RD1" />
+	<value value="135" name="FDC_L2RD2" />
+	<value value="136" name="FDC_L2RD3" />
+	<value value="137" name="FDC_L2RD4" />
+	<value value="138" name="FDC_L2RD5" />
+	<value value="139" name="FDC_L2RD6" />
+	<value value="140" name="FDC_L2RD7" />
+	<value value="141" name="FDC_L2WR0" />
+	<value value="142" name="FDC_L2WR1" />
+	<value value="143" name="FDC_L2WR2" />
+	<value value="144" name="FDC_L2WR3" />
+	<value value="145" name="FDC_L2WR4" />
+	<value value="146" name="FDC_L2WR5" />
+	<value value="147" name="FDC_L2WR6" />
+	<value value="148" name="FDC_L2WR7" />
+	<value value="149" name="FDC_L2MC" />
+	<value value="150" name="FDC_L2RDEVICT0" />
+	<value value="151" name="FDC_L2RDEVICT1" />
+	<value value="152" name="FDC_L2WREVICT0" />
+	<value value="153" name="FDC_L2WREVICT1" />
+	<value value="154" name="FDC_WRSNOOP" />
+	<value value="155" name="FDC_SBSNOOP" />
+	<value value="156" name="FDC_RDTAGSTALL0" />
+	<value value="157" name="FDC_RDTAGSTALL1" />
+	<value value="158" name="FDC_WRTAGSTALL0" />
+	<value value="159" name="FDC_WRTAGSTALL1" />
+	<value value="160" name="NUM_BLOCKS" />
+</enum>
+<enum name="TGR3D_SNX_ZERO_PRESERVE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_ATTR_FMT">
+	<value value="0" name="U8" />
+	<value value="1" name="U8N" />
+	<value value="2" name="S8" />
+	<value value="3" name="S8N" />
+	<value value="4" name="U16" />
+	<value value="5" name="U16N" />
+	<value value="6" name="S16" />
+	<value value="7" name="S16N" />
+	<value value="8" name="U32" />
+	<value value="9" name="U32N" />
+	<value value="10" name="S32" />
+	<value value="11" name="S32N" />
+	<value value="12" name="X32" />
+	<value value="13" name="F32" />
+	<value value="14" name="H16" />
+</enum>
+<enum name="TGR3D_DRAW_MODE">
+	<value value="0" name="ARRAY" />
+	<value value="1" name="ELE8" />
+	<value value="2" name="ELE16" />
+	<value value="3" name="ELE32" />
+</enum>
+<enum name="TGR3D_FLAT_VTX">
+	<value value="0" name="FIRST" />
+	<value value="1" name="LAST" />
+</enum>
+<enum name="TGR3D_PRIM_TYPE">
+	<value value="0" name="POINTS" />
+	<value value="1" name="LINES" />
+	<value value="2" name="LINE_LOOP" />
+	<value value="3" name="LINE_STRIP" />
+	<value value="4" name="TRIS" />
+	<value value="5" name="TRI_STRIP" />
+	<value value="6" name="TRI_FAN" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRCL_MCLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDMC_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRMC_CLLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDCL_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_ZERO_MODE">
+	<value value="0" name="UNEQUAL" />
+	<value value="1" name="EQUAL" />
+</enum>
+<enum name="TGR3D_SHADER_VERSION">
+	<value value="2" name="V1" />
+	<value value="3" name="V2" />
+	<value value="1" name="V3" />
+</enum>
+<enum name="TGR3D_SRC">
+	<value value="0" name="VPE" />
+	<value value="1" name="Z" />
+</enum>
+<enum name="TGR3D_P0_LINE_WIDTH">
+	<value value="0" name="CONST" />
+	<value value="1" name="VARYING" />
+</enum>
+<enum name="TGR3D_P0_LINE_LENGTH">
+	<value value="0" name="VARYING" />
+	<value value="1" name="CONST" />
+</enum>
+<enum name="TGR3D_P0_POINT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="S" />
+	<value value="2" name="T" />
+</enum>
+<enum name="TGR3D_P1_LINE_WIDTH">
+	<value value="0" name="CONST" />
+	<value value="1" name="VARYING" />
+</enum>
+<enum name="TGR3D_P1_LINE_LENGTH">
+	<value value="0" name="VARYING" />
+	<value value="1" name="CONST" />
+</enum>
+<enum name="TGR3D_P1_POINT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="S" />
+	<value value="2" name="T" />
+</enum>
+<enum name="TGR3D_P2_LINE_WIDTH">
+	<value value="0" name="CONST" />
+	<value value="1" name="VARYING" />
+</enum>
+<enum name="TGR3D_P2_LINE_LENGTH">
+	<value value="0" name="VARYING" />
+	<value value="1" name="CONST" />
+</enum>
+<enum name="TGR3D_P2_POINT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="S" />
+	<value value="2" name="T" />
+</enum>
+<enum name="TGR3D_P3_LINE_WIDTH">
+	<value value="0" name="CONST" />
+	<value value="1" name="VARYING" />
+</enum>
+<enum name="TGR3D_P3_LINE_LENGTH">
+	<value value="0" name="VARYING" />
+	<value value="1" name="CONST" />
+</enum>
+<enum name="TGR3D_P3_POINT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="S" />
+	<value value="2" name="T" />
+</enum>
+<enum name="TGR3D_P0_TRAM_FMT">
+	<value value="0" name="NOP" />
+	<value value="1" name="LP_LO" />
+	<value value="2" name="LP_HI" />
+	<value value="3" name="HP" />
+</enum>
+<enum name="TGR3D_P1_TRAM_FMT">
+	<value value="0" name="NOP" />
+	<value value="1" name="LP_LO" />
+	<value value="2" name="LP_HI" />
+	<value value="3" name="HP" />
+</enum>
+<enum name="TGR3D_P2_TRAM_FMT">
+	<value value="0" name="NOP" />
+	<value value="1" name="LP_LO" />
+	<value value="2" name="LP_HI" />
+	<value value="3" name="HP" />
+</enum>
+<enum name="TGR3D_P3_TRAM_FMT">
+	<value value="0" name="NOP" />
+	<value value="1" name="LP_LO" />
+	<value value="2" name="LP_HI" />
+	<value value="3" name="HP" />
+</enum>
+<enum name="TGR3D_P0_TRI_SHADE_MODE">
+	<value value="0" name="SMOOTH" />
+	<value value="1" name="FLAT" />
+</enum>
+<enum name="TGR3D_P1_TRI_SHADE_MODE">
+	<value value="0" name="SMOOTH" />
+	<value value="1" name="FLAT" />
+</enum>
+<enum name="TGR3D_P2_TRI_SHADE_MODE">
+	<value value="0" name="SMOOTH" />
+	<value value="1" name="FLAT" />
+</enum>
+<enum name="TGR3D_P3_TRI_SHADE_MODE">
+	<value value="0" name="SMOOTH" />
+	<value value="1" name="FLAT" />
+</enum>
+<enum name="TGR3D_FRONT_FACE">
+	<value value="0" name="POS" />
+	<value value="1" name="NEG" />
+</enum>
+<enum name="TGR3D_CULL">
+	<value value="0" name="NONE" />
+	<value value="1" name="POS" />
+	<value value="2" name="NEG" />
+	<value value="3" name="BOTH" />
+</enum>
+<enum name="TGR3D_TRANSPOSE_XY">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_CLIP_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_ATTR_COMP">
+	<value value="0" name="X" />
+	<value value="1" name="Y" />
+	<value value="2" name="Z" />
+	<value value="3" name="W" />
+</enum>
+<enum name="TGR3D_POINT_SIZE_MODE">
+	<value value="0" name="FIXED" />
+	<value value="1" name="PSIZE" />
+	<value value="2" name="SHEAR" />
+</enum>
+<enum name="TGR3D_CLIP_MODE">
+	<value value="0" name="SCREEN" />
+	<value value="1" name="GUARDBAND" />
+</enum>
+<enum name="TGR3D_CUT">
+	<value value="0" name="FRENCH" />
+	<value value="1" name="SQUARE" />
+</enum>
+<enum name="TGR3D_CLIP_MODE">
+	<value value="0" name="SCREEN" />
+	<value value="1" name="GUARDBAND" />
+</enum>
+<enum name="TGR3D_ATTR_COMP">
+	<value value="0" name="X" />
+	<value value="1" name="Y" />
+	<value value="2" name="Z" />
+	<value value="3" name="W" />
+</enum>
+<enum name="TGR3D_ENABLE">
+	<value value="0" name="DISABLED" />
+	<value value="1" name="ENABLED" />
+</enum>
+<enum name="TGR3D_GR3D_SETUPDPCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPCGCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPCCCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPCPCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPVPCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPARCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPPACLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPDZCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPTICLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_CLIPSICLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_S_FUNC">
+	<value value="0" name="NEVER" />
+	<value value="1" name="LESS" />
+	<value value="2" name="EQUAL" />
+	<value value="3" name="LEQUAL" />
+	<value value="4" name="GREATER" />
+	<value value="5" name="NOTEQUAL" />
+	<value value="6" name="GEQUAL" />
+	<value value="7" name="ALWAYS" />
+</enum>
+<enum name="TGR3D_COVERAGE_MERGE">
+	<value value="0" name="NONE" />
+	<value value="1" name="OR" />
+	<value value="2" name="XOR" />
+	<value value="3" name="OR_NOT" />
+</enum>
+<enum name="TGR3D_S_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_QRAST_FB_WRITE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_Z_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_Z_FUNC">
+	<value value="0" name="NEVER" />
+	<value value="1" name="LESS" />
+	<value value="2" name="EQUAL" />
+	<value value="3" name="LEQUAL" />
+	<value value="4" name="GREATER" />
+	<value value="5" name="NOTEQUAL" />
+	<value value="6" name="GEQUAL" />
+	<value value="7" name="ALWAYS" />
+</enum>
+<enum name="TGR3D_QRAST_FB_WRITE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_Z_CLAMP">
+	<value value="0" name="CLAMP" />
+	<value value="1" name="KILL" />
+</enum>
+<enum name="TGR3D_Z_CLAMP_OVERRIDE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SWATH_WIDTH">
+	<value value="0" name="PIX_8" />
+	<value value="1" name="PIX_16" />
+</enum>
+<enum name="TGR3D_V_DIRECTION">
+	<value value="0" name="DOWN" />
+	<value value="1" name="ALTERNATE" />
+</enum>
+<enum name="TGR3D_RAST_SCISSOR_SNAP">
+	<value value="0" name="NOP" />
+	<value value="1" name="SAMPLE" />
+	<value value="2" name="STALL" />
+</enum>
+<enum name="TGR3D_BBOX_ACCUMULATE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_RAST_SCISSOR_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_GRANULARITY">
+	<value value="0" name="OFF" />
+	<value value="1" name="PER_SAMPLE" />
+	<value value="2" name="PER_PIXEL" />
+	<value value="3" name="PSEUDO" />
+</enum>
+<enum name="TGR3D_INDEX_MODE">
+	<value value="0" name="TABLE" />
+	<value value="1" name="FORMULA" />
+	<value value="2" name="RESERVED_1" />
+	<value value="3" name="RESERVED_2" />
+</enum>
+<enum name="TGR3D_BLOCKING_MODE">
+	<value value="0" name="OFF" />
+	<value value="1" name="PER_TRI_RAST" />
+	<value value="2" name="PER_TRI_SHADER" />
+</enum>
+<enum name="TGR3D_CACHE">
+	<value value="0" name="ON" />
+	<value value="1" name="OFF" />
+</enum>
+<enum name="TGR3D_PIXTEST_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCIF_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TOP_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_SCOREBOARD_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_LATENCYFIFO_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_ZSER_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_REG_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_SETUPIF_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TIDZSER_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_PIPE_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_QRAST_FB_WRITE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="UNMERGE" />
+	<value value="2" name="MERGE" />
+	<value value="3" name="ONE" />
+</enum>
+<enum name="TGR3D_TRANSPARENCY">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SILHOUETTE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_VCAA_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+	<value value="2" name="COMPUTE_ONLY" />
+</enum>
+<enum name="TGR3D_VIRTUAL_AS_REAL">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_VCAA_OUTPUT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="MERGE" />
+	<value value="2" name="UNMERGE" />
+	<value value="3" name="SMEAR" />
+	<value value="4" name="STENCIL_COVERAGE" />
+</enum>
+<enum name="TGR3D_SWALLOW_QUADS">
+	<value value="0" name="OFF" />
+	<value value="1" name="VIRTUAL" />
+	<value value="2" name="ALL" />
+</enum>
+<enum name="TGR3D_PASS_ONLY">
+	<value value="0" name="ENABLE" />
+	<value value="1" name="DISABLE" />
+</enum>
+<enum name="TGR3D_SCOREBOARD_OUTPUT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_PSEQ_FLUSH">
+	<value value="0" name="PERFORMANCE" />
+	<value value="1" name="DETERMINISTIC" />
+</enum>
+<enum name="TGR3D_OVERLAP">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_OP">
+	<value value="0" name="NOP" />
+	<value value="1" name="LD" />
+	<value value="2" name="LD_R20" />
+	<value value="3" name="LD_R80" />
+</enum>
+<enum name="TGR3D_READ_KILLED">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_READ_NON_CENTER">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_X_EN">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_Y_EN">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SEQ_EN">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_COMMAND_EN">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_CUBE">
+	<value value="0" name="NOP" />
+	<value value="1" name="R0" />
+</enum>
+<enum name="TGR3D_CORE_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_SLOPES_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TRAM_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_BARY_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_ONEOVERW_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_MFU_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_MULABS_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_IPAS_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_USER_LOD">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_USER_LOD_BIAS">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_FETCH_KILLED">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_FETCH">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_COMP_SEL">
+	<value value="0" name="RG" />
+	<value value="1" name="BA" />
+</enum>
+<enum name="TGR3D_COLOR_KEY">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_REG_DST">
+	<value value="0" name="R0R1" />
+	<value value="1" name="R2R3" />
+</enum>
+<enum name="TGR3D_REG_SRC">
+	<value value="0" name="R0R1R2" />
+	<value value="1" name="R2R3R0" />
+</enum>
+<enum name="TGR3D_NORMALIZE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_BASE_LEVEL_ONLY">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NON_POWER_OF_TWO">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_TRILINEAR_OPT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_LAYOUT">
+	<value value="0" name="LINEAR" />
+	<value value="1" name="SWIZZLED" />
+	<value value="2" name="TILED_LINEAR" />
+	<value value="3" name="TILED_SWIZZLED" />
+	<value value="4" name="XY_TILED_LINEAR" />
+	<value value="5" name="XY_TILED_SWIZZLED" />
+</enum>
+<enum name="TGR3D_MIRROR_S">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_MIRROR_T">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_CLAMP_S">
+	<value value="0" name="WRAP" />
+	<value value="1" name="CLAMP" />
+</enum>
+<enum name="TGR3D_CLAMP_T">
+	<value value="0" name="WRAP" />
+	<value value="1" name="CLAMP" />
+</enum>
+<enum name="TGR3D_ANISO_OPT">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="SLOPE_2" />
+	<value value="2" name="FLOOR" />
+	<value value="3" name="FLOOR_EVEN" />
+</enum>
+<enum name="TGR3D_TEXTURE_CACHE_EN">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_TEXPBCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TEXPPBCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TEXLODCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TEXFORMATCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TEXLODLOWERDPCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TEXNONBYPCLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_TEXCACHECLK_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRCL_MCLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDMC_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRMC_CLLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDCL_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_BASE_LEVEL_ONLY">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_OPCODE">
+	<value value="0" name="KEEP" />
+	<value value="1" name="INVERT" />
+	<value value="2" name="EXECUTE" />
+	<value value="3" name="NO_EXECUTE" />
+</enum>
+<enum name="TGR3D_OP">
+	<value value="0" name="NOP" />
+	<value value="1" name="ST" />
+	<value value="2" name="ST_R20" />
+	<value value="3" name="ST_R80" />
+</enum>
+<enum name="TGR3D_WRITE_KILLED">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_WRITE_NON_CENTER">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_OP">
+	<value value="0" name="CLEAR" />
+	<value value="1" name="AND" />
+	<value value="2" name="AND_REVERSE" />
+	<value value="3" name="COPY" />
+	<value value="4" name="AND_INVERTED" />
+	<value value="5" name="NOOP" />
+	<value value="6" name="XOR" />
+	<value value="7" name="OR" />
+	<value value="8" name="NOR" />
+	<value value="9" name="EQUIV" />
+	<value value="10" name="INVERT" />
+	<value value="11" name="OR_REVERSE" />
+	<value value="12" name="COPY_INVERTED" />
+	<value value="13" name="OR_INVERTED" />
+	<value value="14" name="NAND" />
+	<value value="15" name="SET" />
+</enum>
+<enum name="TGR3D_SURFACE_0_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_1_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_2_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_3_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_4_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_5_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_6_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_7_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_8_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_9_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_10_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_11_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_12_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_13_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_14_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SURFACE_15_ST_ENABLE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_Z_TEST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_MCCIF_PORT_ASSIGN">
+	<value value="0" name="EXT_INT" />
+	<value value="1" name="EVEN_ODD" />
+</enum>
+<enum name="TGR3D_FDC_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCPR_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCZR_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCSR_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCVR_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCDW_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCZW_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCSW_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCVW_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_FDCSB_CLKEN_OVR">
+	<value value="0" name="CLK_GATED" />
+	<value value="1" name="CLK_ALWAYS_ON" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRCL_MCLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDMC_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRMC_CLLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDCL_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_GPU_A">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_GPU_B">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_GPU">
+	<value value="0" name="GPU_A" />
+	<value value="1" name="GPU_B" />
+	<value value="2" name="IMMEDIATE" />
+</enum>
+<enum name="TGR3D_SPLIT_AXIS">
+	<value value="0" name="X" />
+	<value value="1" name="Y" />
+</enum>
+<enum name="TGR3D_SWAP">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_EN">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_EVENT">
+	<value value="0" name="NEVER" />
+	<value value="1" name="NOW" />
+	<value value="2" name="IDLE" />
+	<value value="3" name="TIMEOUT" />
+</enum>
+<enum name="TGR3D_OVERLAP">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_STRUCTURE">
+	<value value="0" name="LINEAR" />
+	<value value="1" name="TILED" />
+	<value value="2" name="XY_TILED" />
+</enum>
+<enum name="TGR3D_SURF_FORMAT">
+	<value value="0" name="C4X4" />
+	<value value="1" name="A8" />
+	<value value="2" name="L8" />
+	<value value="3" name="S8" />
+	<value value="4" name="L8A8" />
+	<value value="5" name="B2G3R3" />
+	<value value="6" name="B5G6R5" />
+	<value value="7" name="B5G5R5A1" />
+	<value value="8" name="B4G4R4A4" />
+	<value value="9" name="A1B5G5R5" />
+	<value value="10" name="A4B4G4R4" />
+	<value value="11" name="Z16" />
+	<value value="12" name="Z16NL" />
+	<value value="13" name="R8G8B8A8" />
+	<value value="14" name="B8G8R8A8" />
+	<value value="15" name="A16_float" />
+	<value value="16" name="L16_float" />
+	<value value="17" name="L16A16_float" />
+	<value value="18" name="R16G16B16A16_float" />
+	<value value="19" name="R11G11B10_float" />
+	<value value="20" name="P128" />
+	<value value="21" name="P32_float" />
+	<value value="22" name="DXT1" />
+	<value value="23" name="DXT1C" />
+	<value value="24" name="DXT3" />
+	<value value="25" name="DXT5" />
+	<value value="26" name="ETC" />
+	<value value="27" name="ETC3" />
+	<value value="28" name="ETC5" />
+	<value value="29" name="LATC1" />
+	<value value="30" name="LATC2" />
+	<value value="31" name="B8G8R8G8" />
+	<value value="32" name="G8B8G8R8" />
+	<value value="33" name="R10G10B10_float_A2" />
+	<value value="34" name="R8G8B8X8" />
+	<value value="35" name="B8G8R8X8" />
+</enum>
+<enum name="TGR3D_QUADLIN">
+	<value value="0" name="LINEAR" />
+	<value value="1" name="TILED" />
+</enum>
+<enum name="TGR3D_DITHER">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SYNCPT_INCR">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SYNCPT_INCR">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_DITHER_ALPHA">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRCL_MCLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDMC_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_WRMC_CLLE2X">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_NV_MCCIF_RDCL_RDFAST">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_READ_DEST">
+	<value value="0" name="HOST1X" />
+	<value value="1" name="MEMORY" />
+</enum>
+<enum name="TGR3D_ALTERNATE">
+	<value value="0" name="DISABLE" />
+	<value value="1" name="ENABLE" />
+</enum>
+<enum name="TGR3D_SWATH_ALIGN">
+	<value value="0" name="EVEN" />
+	<value value="1" name="ODD" />
+</enum>
+<domain name="TGR3D" width="32">
+	<reg32 offset="0x0" name="CTL_INCR_SYNCPT">
+		<bitfield name="INDX" low="0" high="7" />
+		<bitfield name="COND" low="8" high="15" type="TGR3D_COND" />
+	</reg32>
+	<reg32 offset="0x1" name="CTL_INCR_SYNCPT_CNTRL">
+		<bitfield name="INCR_SYNCPT_SOFT_RESET" pos="0" />
+		<bitfield name="INCR_SYNCPT_NO_STALL" pos="8" />
+	</reg32>
+	<reg32 offset="0x2" name="CTL_INCR_SYNCPT_ERROR">
+		<bitfield name="COND_STATUS" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x8" name="CTL_INTSTATUS">
+		<bitfield name="CTXSW_INT" pos="0" />
+	</reg32>
+	<reg32 offset="0x9" name="CTL_INTENABLE">
+		<bitfield name="CTXSW_INT" pos="0" type="TGR3D_CTXSW_INT" />
+	</reg32>
+	<reg32 offset="0xa" name="CTL_CTXSW">
+		<bitfield name="CURR_CLASS" low="0" high="9" />
+		<bitfield name="AUTO_ACK" pos="11" type="TGR3D_AUTO_ACK" />
+		<bitfield name="CURR_CHANNEL" low="12" high="15" />
+		<bitfield name="NEXT_CLASS" low="16" high="25" />
+		<bitfield name="NEXT_CHANNEL" low="28" high="31" />
+	</reg32>
+	<reg32 offset="0xc" name="CTL_STAT" length="2">
+		<bitfield name="EN" pos="0" />
+		<bitfield name="BLK" low="1" high="8" type="TGR3D_BLK" />
+		<bitfield name="OVF" pos="31" />
+	</reg32>
+	<reg32 offset="0xe" name="CTL_STAT_CLK_COUNT" length="2">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x10" name="CTL_STAT_XFER_COUNT" length="2">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x12" name="CTL_STAT_WAIT_COUNT" length="2">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x14" name="CTL_STAT_EN_COUNT" length="2">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x100" name="IDX_ATTRIBUTE_BASE" length="16" stride="2">
+		<bitfield name="ATTR_BASE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x101" name="IDX_ATTRIBUTE_MODE" length="16" stride="2">
+		<bitfield name="ATTR_FMT" low="0" high="3" type="TGR3D_ATTR_FMT" />
+		<bitfield name="ATTR_SIZE" low="4" high="6" />
+		<bitfield name="ATTR_STRIDE" low="8" high="19" />
+		<bitfield name="SNX_ZERO_PRESERVE" pos="20" type="TGR3D_SNX_ZERO_PRESERVE" />
+	</reg32>
+	<reg32 offset="0x120" name="IDX_ATTR_MASK">
+		<bitfield name="OUTPUT_ATTR_MASK" low="0" high="15" />
+		<bitfield name="INPUT_ATTR_MASK" low="16" high="31" />
+	</reg32>
+	<reg32 offset="0x121" name="IDX_INDEX_BASE">
+		<bitfield name="INDEX_BASE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x122" name="IDX_SET_PRIM">
+		<bitfield name="PIVOT_VTX" low="0" high="19" />
+		<bitfield name="PRIM_TYPE" low="24" high="26" type="TGR3D_PRIM_TYPE" />
+		<bitfield name="FLAT_VTX" pos="27" type="TGR3D_FLAT_VTX" />
+		<bitfield name="DRAW_MODE" low="28" high="29" type="TGR3D_DRAW_MODE" />
+		<bitfield name="INVALIDATE_DMACACHE" pos="30" />
+		<bitfield name="INVALIDATE_VTXCACHE" pos="31" />
+	</reg32>
+	<reg32 offset="0x123" name="IDX_DRAW_PRIM">
+		<bitfield name="START_VTX" low="0" high="19" />
+		<bitfield name="VTX_COUNT" low="20" high="31" />
+	</reg32>
+	<reg32 offset="0x124" name="IDX_IDX_CTL">
+		<bitfield name="VAR_IBUF_SIZE" pos="0" />
+		<bitfield name="VAR_OBUF_SIZE" pos="1" />
+		<bitfield name="LATE_BINDING" pos="2" />
+		<bitfield name="DMACACHE_DISABLE" pos="3" />
+		<bitfield name="FORCE_TRANSFORM" pos="4" />
+		<bitfield name="INDEX_TOO_LARGE" pos="5" />
+	</reg32>
+	<reg32 offset="0x125" name="IDX_IDX_STAT">
+		<bitfield name="IBUF_INUSE" low="0" high="7" />
+	</reg32>
+	<reg32 offset="0x126" name="IDX_NV_MCCIF_FIFOCTRL_RO">
+		<bitfield name="NV_MCCIF_WRCL_MCLE2X" pos="0" type="TGR3D_NV_MCCIF_WRCL_MCLE2X" />
+		<bitfield name="NV_MCCIF_RDMC_RDFAST" pos="1" type="TGR3D_NV_MCCIF_RDMC_RDFAST" />
+		<bitfield name="NV_MCCIF_WRMC_CLLE2X" pos="2" type="TGR3D_NV_MCCIF_WRMC_CLLE2X" />
+		<bitfield name="NV_MCCIF_RDCL_RDFAST" pos="3" type="TGR3D_NV_MCCIF_RDCL_RDFAST" />
+		<bitfield name="NV_WCLK_OVERRIDE" pos="16" />
+		<bitfield name="NV_RCLK_OVERRIDE" pos="17" />
+	</reg32>
+	<reg32 offset="0x200" name="VPE_MODE">
+		<bitfield name="SHADER_VERSION" low="0" high="1" type="TGR3D_SHADER_VERSION" />
+		<bitfield name="ZERO_MODE" pos="4" type="TGR3D_ZERO_MODE" />
+	</reg32>
+	<reg32 offset="0x201" name="VPE_TIMEOUT">
+		<bitfield name="MAX_INSN_COUNT" low="0" high="15" />
+	</reg32>
+	<reg32 offset="0x202" name="VPE_CONST_READ_LIMIT">
+		<bitfield name="MIN_CONST_INDEX" low="0" high="15" />
+		<bitfield name="MAX_CONST_INDEX" low="16" high="31" />
+	</reg32>
+	<reg32 offset="0x203" name="VPE_BRANCHBITS">
+		<bitfield name="BRANCHBITS" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x204" name="VPE_START">
+		<bitfield name="START_ADDR" low="0" high="7" />
+	</reg32>
+	<reg32 offset="0x205" name="VPE_INST_OFFSET">
+		<bitfield name="INDEX" low="0" high="9" />
+	</reg32>
+	<reg32 offset="0x206" name="VPE_INST_DATA">
+		<bitfield name="INST_DATA" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x207" name="VPE_CONST_OFFSET">
+		<bitfield name="INDEX" low="0" high="9" />
+	</reg32>
+	<reg32 offset="0x208" name="VPE_CONST_DATA">
+		<bitfield name="CONST_DATA" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x209" name="VPE_GEOM_STALL">
+		<bitfield name="VPE_STALL" low="0" high="7" />
+		<bitfield name="VPE_FLUSH" pos="16" />
+	</reg32>
+	<reg32 offset="0x20a" name="VPE_VPE_CTRL">
+		<bitfield name="VPE_CTRL_THR0_DISABLE" pos="0" />
+		<bitfield name="VPE_CTRL_THR1_DISABLE" pos="1" />
+		<bitfield name="VPE_CTRL_THR2_DISABLE" pos="2" />
+		<bitfield name="VPE_CTRL_SPARE0" pos="3" />
+		<bitfield name="VPE_CTRL_VPEDP_CLKEN_OVR" pos="4" />
+		<bitfield name="VPE_CTRL_VPEIR_CLKEN_OVR" pos="5" />
+		<bitfield name="VPE_CTRL_VPECR_CLKEN_OVR" pos="6" />
+		<bitfield name="VPE_CTRL_VPEIB_CLKEN_OVR" pos="7" />
+		<bitfield name="VPE_CTRL_VPEOB_CLKEN_OVR" pos="8" />
+		<bitfield name="VPE_CTRL_VPEOD_CLKEN_OVR" pos="9" />
+		<bitfield name="VPE_CTRL_VPERF_CLKEN_OVR" pos="10" />
+		<bitfield name="VPE_CTRL_VPEOR_CLKEN_OVR" pos="11" />
+	</reg32>
+	<reg32 offset="0x20b" name="VPE_VPE_DEBUG">
+		<bitfield name="VPE_DEBUG_IBUF_SIZE" pos="0" />
+		<bitfield name="VPE_DEBUG_OBUF_SIZE" pos="1" />
+		<bitfield name="VPE_DEBUG_SERIALIZE_MODES" pos="2" />
+		<bitfield name="VPE_DEBUG_OLDEST_FIRST" pos="3" />
+		<bitfield name="VPE_DEBUG_SERIAL_THREADS" pos="4" />
+		<bitfield name="VPE_DEBUG_THREAD_EXCLUSIVE" pos="5" />
+		<bitfield name="VPE_DEBUG_VTF_SERIAL" pos="6" />
+		<bitfield name="VPE_DEBUG_SPARE" pos="7" />
+	</reg32>
+	<reg32 offset="0x300" name="SU_INST_EVEN" length="32" stride="2">
+		<bitfield name="SRC" low="0" high="1" type="TGR3D_SRC" />
+		<bitfield name="VC_ROW" low="3" high="6" />
+		<bitfield name="TRAM_ROW" low="9" high="14" />
+		<bitfield name="P0_LINE_WIDTH" pos="16" type="TGR3D_P0_LINE_WIDTH" />
+		<bitfield name="P0_LINE_LENGTH" pos="17" type="TGR3D_P0_LINE_LENGTH" />
+		<bitfield name="P0_POINT" low="18" high="19" type="TGR3D_P0_POINT" />
+		<bitfield name="P1_LINE_WIDTH" pos="20" type="TGR3D_P1_LINE_WIDTH" />
+		<bitfield name="P1_LINE_LENGTH" pos="21" type="TGR3D_P1_LINE_LENGTH" />
+		<bitfield name="P1_POINT" low="22" high="23" type="TGR3D_P1_POINT" />
+		<bitfield name="P2_LINE_WIDTH" pos="24" type="TGR3D_P2_LINE_WIDTH" />
+		<bitfield name="P2_LINE_LENGTH" pos="25" type="TGR3D_P2_LINE_LENGTH" />
+		<bitfield name="P2_POINT" low="26" high="27" type="TGR3D_P2_POINT" />
+		<bitfield name="P3_LINE_WIDTH" pos="28" type="TGR3D_P3_LINE_WIDTH" />
+		<bitfield name="P3_LINE_LENGTH" pos="29" type="TGR3D_P3_LINE_LENGTH" />
+		<bitfield name="P3_POINT" low="30" high="31" type="TGR3D_P3_POINT" />
+	</reg32>
+	<reg32 offset="0x301" name="SU_INST_ODD" length="32" stride="2">
+		<bitfield name="P0_TRAM_COL" low="0" high="1" />
+		<bitfield name="P0_TRAM_FMT" low="2" high="3" type="TGR3D_P0_TRAM_FMT" />
+		<bitfield name="P1_TRAM_COL" low="4" high="5" />
+		<bitfield name="P1_TRAM_FMT" low="6" high="7" type="TGR3D_P1_TRAM_FMT" />
+		<bitfield name="P2_TRAM_COL" low="8" high="9" />
+		<bitfield name="P2_TRAM_FMT" low="10" high="11" type="TGR3D_P2_TRAM_FMT" />
+		<bitfield name="P3_TRAM_COL" low="12" high="13" />
+		<bitfield name="P3_TRAM_FMT" low="14" high="15" type="TGR3D_P3_TRAM_FMT" />
+		<bitfield name="P0_TRI_SHADE_MODE" pos="16" type="TGR3D_P0_TRI_SHADE_MODE" />
+		<bitfield name="P1_TRI_SHADE_MODE" pos="17" type="TGR3D_P1_TRI_SHADE_MODE" />
+		<bitfield name="P2_TRI_SHADE_MODE" pos="18" type="TGR3D_P2_TRI_SHADE_MODE" />
+		<bitfield name="P3_TRI_SHADE_MODE" pos="19" type="TGR3D_P3_TRI_SHADE_MODE" />
+	</reg32>
+	<reg32 offset="0x340" name="SU_DRAW_POINT">
+		<bitfield name="V0" low="0" high="3" />
+		<bitfield name="V0_LOAD" pos="24" />
+	</reg32>
+	<reg32 offset="0x341" name="SU_DRAW_LINE">
+		<bitfield name="V0" low="0" high="3" />
+		<bitfield name="V1" low="8" high="11" />
+		<bitfield name="V0_LOAD" pos="24" />
+		<bitfield name="V1_LOAD" pos="25" />
+	</reg32>
+	<reg32 offset="0x342" name="SU_DRAW_TRI">
+		<bitfield name="V0" low="0" high="3" />
+		<bitfield name="V1" low="8" high="11" />
+		<bitfield name="V2" low="16" high="19" />
+		<bitfield name="V0_LOAD" pos="24" />
+		<bitfield name="V1_LOAD" pos="25" />
+		<bitfield name="V2_LOAD" pos="26" />
+	</reg32>
+	<reg32 offset="0x343" name="SU_PARAM">
+		<bitfield name="FIRST_INST" low="0" high="4" />
+		<bitfield name="LAST_INST" low="5" high="9" />
+		<bitfield name="FRONT_FACE" pos="15" type="TGR3D_FRONT_FACE" />
+		<bitfield name="CULL" low="16" high="17" type="TGR3D_CULL" />
+		<bitfield name="SUBPIX_XOFF" low="18" high="23" />
+		<bitfield name="SUBPIX_YOFF" low="24" high="29" />
+		<bitfield name="TRANSPOSE_XY" pos="30" type="TGR3D_TRANSPOSE_XY" />
+		<bitfield name="CLIP_ENABLE" pos="31" type="TGR3D_CLIP_ENABLE" />
+	</reg32>
+	<reg32 offset="0x344" name="SU_ZBIAS">
+		<bitfield name="VAL" low="0" high="21" />
+	</reg32>
+	<reg32 offset="0x345" name="SU_ZFACTOR">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x346" name="SU_POINT_PARAM">
+		<bitfield name="VTX_OFFS" low="0" high="3" />
+		<bitfield name="ATTR_COMP" low="8" high="9" type="TGR3D_ATTR_COMP" />
+		<bitfield name="POINT_SIZE_MODE" low="10" high="11" type="TGR3D_POINT_SIZE_MODE" />
+		<bitfield name="CLIP_MODE" pos="12" type="TGR3D_CLIP_MODE" />
+	</reg32>
+	<reg32 offset="0x347" name="SU_POINT_WIDTH_2">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x348" name="SU_POINT_MAX_S">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x349" name="SU_POINT_MAX_T">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x34a" name="SU_POINT_MIN_S">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x34b" name="SU_POINT_MIN_T">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x34c" name="SU_LINE_PARAM">
+		<bitfield name="CUT" pos="0" type="TGR3D_CUT" />
+		<bitfield name="CLIP_MODE" pos="1" type="TGR3D_CLIP_MODE" />
+	</reg32>
+	<reg32 offset="0x34d" name="SU_LINE_WIDTH_2">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x34e" name="SU_LINE_MAX_ATTR_W">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x34f" name="SU_LINE_MIN_ATTR_W">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x350" name="SU_SCISSOR_X">
+		<bitfield name="MAX" low="0" high="12" />
+		<bitfield name="MIN" low="16" high="27" />
+	</reg32>
+	<reg32 offset="0x351" name="SU_SCISSOR_Y">
+		<bitfield name="MAX" low="0" high="12" />
+		<bitfield name="MIN" low="16" high="27" />
+	</reg32>
+	<reg32 offset="0x352" name="SU_VIEWPORT_X">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x353" name="SU_VIEWPORT_Y">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x354" name="SU_VIEWPORT_Z">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x355" name="SU_VIEWPORT_W">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x356" name="SU_VIEWPORT_H">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x357" name="SU_VIEWPORT_D">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x358" name="SU_GUARDBAND_W">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x359" name="SU_GUARDBAND_H">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x35a" name="SU_GUARDBAND_D">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x35b" name="SU_UCPLANE">
+		<bitfield name="VTX_OFFS" low="0" high="3" />
+		<bitfield name="ATTR_COMP" low="8" high="9" type="TGR3D_ATTR_COMP" />
+		<bitfield name="ENABLE" pos="10" type="TGR3D_ENABLE" />
+	</reg32>
+	<reg32 offset="0x363" name="SU_CLKEN_OVERRIDE">
+		<bitfield name="GR3D_SETUPDPCLK_CLKEN_OVR" pos="0" type="TGR3D_GR3D_SETUPDPCLK_CLKEN_OVR" />
+	</reg32>
+	<reg32 offset="0x364" name="SU_CLIP_CLKEN_OVERRIDE">
+		<bitfield name="CLIPCGCLK_CLKEN_OVR" pos="0" type="TGR3D_CLIPCGCLK_CLKEN_OVR" />
+		<bitfield name="CLIPCCCLK_CLKEN_OVR" pos="1" type="TGR3D_CLIPCCCLK_CLKEN_OVR" />
+		<bitfield name="CLIPCPCLK_CLKEN_OVR" pos="2" type="TGR3D_CLIPCPCLK_CLKEN_OVR" />
+		<bitfield name="CLIPVPCLK_CLKEN_OVR" pos="3" type="TGR3D_CLIPVPCLK_CLKEN_OVR" />
+		<bitfield name="CLIPARCLK_CLKEN_OVR" pos="4" type="TGR3D_CLIPARCLK_CLKEN_OVR" />
+		<bitfield name="CLIPPACLK_CLKEN_OVR" pos="5" type="TGR3D_CLIPPACLK_CLKEN_OVR" />
+		<bitfield name="CLIPDZCLK_CLKEN_OVR" pos="6" type="TGR3D_CLIPDZCLK_CLKEN_OVR" />
+		<bitfield name="CLIPTICLK_CLKEN_OVR" pos="7" type="TGR3D_CLIPTICLK_CLKEN_OVR" />
+		<bitfield name="CLIPSICLK_CLKEN_OVR" pos="8" type="TGR3D_CLIPSICLK_CLKEN_OVR" />
+	</reg32>
+	<reg32 offset="0x365" name="SU_OUTER_SLI_SCISSOR_X">
+		<bitfield name="MAX" low="0" high="12" />
+		<bitfield name="MIN" low="16" high="27" />
+	</reg32>
+	<reg32 offset="0x366" name="SU_OUTER_SLI_SCISSOR_Y">
+		<bitfield name="MAX" low="0" high="12" />
+		<bitfield name="MIN" low="16" high="27" />
+	</reg32>
+	<reg32 offset="0x400" name="QR_S_TEST" length="2">
+		<bitfield name="S_MASK" low="0" high="7" />
+		<bitfield name="S_FUNC" low="8" high="10" type="TGR3D_S_FUNC" />
+	</reg32>
+	<reg32 offset="0x402" name="QR_S_CTRL">
+		<bitfield name="COVERAGE_MERGE" low="0" high="1" type="TGR3D_COVERAGE_MERGE" />
+		<bitfield name="S_SURF_PTR" low="2" high="4" />
+		<bitfield name="S_ENABLE" pos="5" type="TGR3D_S_ENABLE" />
+		<bitfield name="QRAST_FB_WRITE" pos="6" type="TGR3D_QRAST_FB_WRITE" />
+	</reg32>
+	<reg32 offset="0x403" name="QR_Z_TEST">
+		<bitfield name="Z_SURF_PTR" low="0" high="2" />
+		<bitfield name="Z_ENABLE" pos="3" type="TGR3D_Z_ENABLE" />
+		<bitfield name="Z_FUNC" low="4" high="7" type="TGR3D_Z_FUNC" />
+		<bitfield name="QRAST_FB_WRITE" pos="8" type="TGR3D_QRAST_FB_WRITE" />
+		<bitfield name="Z_CLAMP" pos="9" type="TGR3D_Z_CLAMP" />
+		<bitfield name="Z_CLAMP_OVERRIDE" pos="10" type="TGR3D_Z_CLAMP_OVERRIDE" />
+	</reg32>
+	<reg32 offset="0x404" name="QR_Z_MIN">
+		<bitfield name="VALUE" low="0" high="19" />
+	</reg32>
+	<reg32 offset="0x405" name="QR_Z_MAX">
+		<bitfield name="VALUE" low="0" high="19" />
+	</reg32>
+	<reg32 offset="0x406" name="QR_RAST_OPERATION">
+		<bitfield name="SWATH_WIDTH" low="0" high="1" type="TGR3D_SWATH_WIDTH" />
+		<bitfield name="V_DIRECTION" pos="2" type="TGR3D_V_DIRECTION" />
+	</reg32>
+	<reg32 offset="0x407" name="QR_RAST_SCISSOR_SNAP">
+		<bitfield name="RAST_SCISSOR_SNAP" low="0" high="1" type="TGR3D_RAST_SCISSOR_SNAP" />
+		<bitfield name="RAST_SCISSOR_UPDATE" pos="2" />
+		<bitfield name="RAST_SCISSOR_UPDATE_WRITE" pos="3" />
+		<bitfield name="BBOX_ACCUMULATE" pos="4" type="TGR3D_BBOX_ACCUMULATE" />
+		<bitfield name="RAST_SCISSOR_ENABLE" pos="5" type="TGR3D_RAST_SCISSOR_ENABLE" />
+	</reg32>
+	<reg32 offset="0x408" name="QR_RAST_SCISSOR_MIN">
+		<bitfield name="X" low="0" high="12" />
+		<bitfield name="Y" low="16" high="28" />
+	</reg32>
+	<reg32 offset="0x409" name="QR_RAST_SCISSOR_MAX">
+		<bitfield name="X" low="0" high="12" />
+		<bitfield name="Y" low="16" high="28" />
+	</reg32>
+	<reg32 offset="0x40a" name="QR_RAST_BBOX_MIN">
+		<bitfield name="X" low="0" high="12" />
+		<bitfield name="Y" low="16" high="28" />
+	</reg32>
+	<reg32 offset="0x40b" name="QR_RAST_BBOX_MAX">
+		<bitfield name="X" low="0" high="12" />
+		<bitfield name="Y" low="16" high="28" />
+	</reg32>
+	<reg32 offset="0x40c" name="QR_SB_OPERATION">
+		<bitfield name="GRANULARITY" low="0" high="1" type="TGR3D_GRANULARITY" />
+		<bitfield name="INDEX_MODE" low="2" high="3" type="TGR3D_INDEX_MODE" />
+		<bitfield name="BLOCKING_MODE" low="4" high="5" type="TGR3D_BLOCKING_MODE" />
+		<bitfield name="STALL" pos="6" />
+		<bitfield name="CLEAR" pos="7" />
+		<bitfield name="CACHE" pos="8" type="TGR3D_CACHE" />
+		<bitfield name="RD_OPTZ_CYA" pos="9" />
+	</reg32>
+	<reg32 offset="0x40d" name="QR_QRAST_CLKEN_OVERRIDE">
+		<bitfield name="PIXTEST_CLKEN_OVR" pos="0" type="TGR3D_PIXTEST_CLKEN_OVR" />
+		<bitfield name="FDCIF_CLKEN_OVR" pos="1" type="TGR3D_FDCIF_CLKEN_OVR" />
+		<bitfield name="TOP_CLKEN_OVR" pos="2" type="TGR3D_TOP_CLKEN_OVR" />
+		<bitfield name="SCOREBOARD_CLKEN_OVR" pos="3" type="TGR3D_SCOREBOARD_CLKEN_OVR" />
+		<bitfield name="LATENCYFIFO_CLKEN_OVR" pos="4" type="TGR3D_LATENCYFIFO_CLKEN_OVR" />
+		<bitfield name="ZSER_CLKEN_OVR" pos="5" type="TGR3D_ZSER_CLKEN_OVR" />
+		<bitfield name="REG_CLKEN_OVR" pos="6" type="TGR3D_REG_CLKEN_OVR" />
+		<bitfield name="SETUPIF_CLKEN_OVR" pos="7" type="TGR3D_SETUPIF_CLKEN_OVR" />
+		<bitfield name="TIDZSER_CLKEN_OVR" pos="8" type="TGR3D_TIDZSER_CLKEN_OVR" />
+		<bitfield name="PIPE_CLKEN_OVR" pos="9" type="TGR3D_PIPE_CLKEN_OVR" />
+	</reg32>
+	<reg32 offset="0x40e" name="QR_VCAA_OPERATION">
+		<bitfield name="QRAST_FB_WRITE" low="0" high="1" type="TGR3D_QRAST_FB_WRITE" />
+		<bitfield name="TRANSPARENCY" pos="2" type="TGR3D_TRANSPARENCY" />
+		<bitfield name="SILHOUETTE" pos="3" type="TGR3D_SILHOUETTE" />
+		<bitfield name="VCAA_SURF_PTR" low="4" high="6" />
+		<bitfield name="VCAA_ENABLE" low="7" high="8" type="TGR3D_VCAA_ENABLE" />
+		<bitfield name="VIRTUAL_AS_REAL" pos="9" type="TGR3D_VIRTUAL_AS_REAL" />
+	</reg32>
+	<reg32 offset="0x40f" name="QR_OUTPUT_TO_SHADER">
+		<bitfield name="VCAA_OUTPUT" low="0" high="2" type="TGR3D_VCAA_OUTPUT" />
+		<bitfield name="SWALLOW_QUADS" low="3" high="4" type="TGR3D_SWALLOW_QUADS" />
+		<bitfield name="PASS_ONLY" pos="5" type="TGR3D_PASS_ONLY" />
+		<bitfield name="SCOREBOARD_OUTPUT" pos="6" type="TGR3D_SCOREBOARD_OUTPUT" />
+		<bitfield name="TIMEOUT" low="7" high="9" />
+		<bitfield name="PSEQ_FLUSH" pos="10" type="TGR3D_PSEQ_FLUSH" />
+		<bitfield name="OVERLAP" pos="11" type="TGR3D_OVERLAP" />
+	</reg32>
+	<reg32 offset="0x410" name="QR_QRAST_DEBUG">
+		<bitfield name="VALUE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x411" name="QR_QRAST_LIMITS">
+		<bitfield name="PIX_CNT_QRAST" low="0" high="11" />
+		<bitfield name="PIX_CNT_SHD" low="12" high="22" />
+	</reg32>
+	<reg32 offset="0x412" name="QR_PIXEL_COUNT_CTRL">
+		<bitfield name="ENABLE" pos="0" />
+		<bitfield name="COUNT_NON_CENTER" pos="1" />
+	</reg32>
+	<reg32 offset="0x413" name="QR_PIXEL_COUNT">
+		<bitfield name="VALUE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x500" name="PSEQ_FLUSH">
+		<bitfield name="FLUSH" pos="0" />
+	</reg32>
+	<reg32 offset="0x501" name="PSEQ_CTL">
+		<bitfield name="MERGE_SPAN_STARTS" pos="0" />
+		<bitfield name="MERGE_REGISTERS" pos="1" />
+		<bitfield name="REMOVE_KILLED_PIXELS" pos="2" />
+		<bitfield name="ALLOW_QID_COLLISIONS" pos="3" />
+		<bitfield name="MAX_OUT" low="4" high="13" />
+		<bitfield name="MIN_OUT" low="14" high="23" />
+	</reg32>
+	<reg32 offset="0x502" name="PSEQ_TIMEOUT">
+		<bitfield name="COUNT" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x503" name="PSEQ_PC">
+		<bitfield name="PC" low="0" high="3" />
+	</reg32>
+	<reg32 offset="0x520" name="PSEQ_COMMAND_EVEN" length="16" stride="2">
+		<bitfield name="DATA" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x521" name="PSEQ_COMMAND_ODD" length="16" stride="2">
+		<bitfield name="DATA" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x540" name="PSEQ_INST_OFFSET">
+		<bitfield name="INDEX" low="0" high="5" />
+	</reg32>
+	<reg32 offset="0x541" name="PSEQ_INST_DATA">
+		<bitfield name="ARGS" low="0" high="15" />
+		<bitfield name="SURF" low="16" high="19" />
+		<bitfield name="READ_NON_CENTER" pos="20" type="TGR3D_READ_NON_CENTER" />
+		<bitfield name="READ_KILLED" pos="21" type="TGR3D_READ_KILLED" />
+		<bitfield name="CACHE_PERSISTENT" pos="22" />
+		<bitfield name="OP" low="23" high="24" type="TGR3D_OP" />
+	</reg32>
+	<reg32 offset="0x542" name="PSEQ_DBG_X">
+		<bitfield name="END" low="0" high="10" />
+		<bitfield name="START" low="11" high="21" />
+	</reg32>
+	<reg32 offset="0x543" name="PSEQ_DBG_Y">
+		<bitfield name="END" low="0" high="10" />
+		<bitfield name="START" low="11" high="21" />
+	</reg32>
+	<reg32 offset="0x544" name="PSEQ_DBG_CTL">
+		<bitfield name="X_EN" pos="0" type="TGR3D_X_EN" />
+		<bitfield name="Y_EN" pos="1" type="TGR3D_Y_EN" />
+		<bitfield name="SEQ_EN" pos="2" type="TGR3D_SEQ_EN" />
+		<bitfield name="COMMAND_EN" pos="3" type="TGR3D_COMMAND_EN" />
+		<bitfield name="SEQ_START" low="4" high="9" />
+		<bitfield name="SEQ_END" low="12" high="17" />
+		<bitfield name="COMMAND_PC" low="24" high="27" />
+	</reg32>
+	<reg32 offset="0x545" name="PSEQ_QUAD_ID">
+		<bitfield name="INDEX" low="0" high="7" />
+	</reg32>
+	<reg32 offset="0x546" name="PSEQ_DWR_IF_STATE">
+		<bitfield name="START" low="0" high="5" />
+		<bitfield name="COUNT" low="6" high="12" />
+		<bitfield name="NEXT" low="13" high="18" />
+		<bitfield name="NOT_LAST_EXE" pos="19" />
+	</reg32>
+	<reg32 offset="0x600" name="AT_REMAP_OFFSET">
+		<bitfield name="INDEX" low="0" high="5" />
+		<bitfield name="BASE" low="6" high="11" />
+	</reg32>
+	<reg32 offset="0x601" name="AT_REMAP_DATA">
+		<bitfield name="COUNT" low="0" high="1" />
+		<bitfield name="OFFSET" low="2" high="7" />
+	</reg32>
+	<reg32 offset="0x602" name="AT_REMAP_DATA_4X">
+		<bitfield name="COUNT0" low="0" high="1" />
+		<bitfield name="OFFSET0" low="2" high="7" />
+		<bitfield name="COUNT1" low="8" high="9" />
+		<bitfield name="OFFSET1" low="10" high="15" />
+		<bitfield name="COUNT2" low="16" high="17" />
+		<bitfield name="OFFSET2" low="18" high="23" />
+		<bitfield name="COUNT3" low="24" high="25" />
+		<bitfield name="OFFSET3" low="26" high="31" />
+	</reg32>
+	<reg32 offset="0x603" name="AT_INST_OFFSET">
+		<bitfield name="INDEX" low="0" high="6" />
+	</reg32>
+	<reg32 offset="0x604" name="AT_INST_DATA">
+		<bitfield name="DATA0" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x605" name="AT_INST_DATA">
+		<bitfield name="DATA1" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x608" name="AT_CONSTANT0" length="4">
+		<bitfield name="VAL" low="0" high="19" />
+	</reg32>
+	<reg32 offset="0x60c" name="AT_TRAM_OFFSET">
+		<bitfield name="INDEX" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0x60d" name="AT_TRAM_DATA">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x60e" name="AT_CLKEN_OVERRIDE">
+		<bitfield name="CORE_CLKEN_OVR" pos="0" type="TGR3D_CORE_CLKEN_OVR" />
+		<bitfield name="SLOPES_CLKEN_OVR" pos="1" type="TGR3D_SLOPES_CLKEN_OVR" />
+		<bitfield name="TRAM_CLKEN_OVR" pos="2" type="TGR3D_TRAM_CLKEN_OVR" />
+		<bitfield name="BARY_CLKEN_OVR" pos="3" type="TGR3D_BARY_CLKEN_OVR" />
+		<bitfield name="ONEOVERW_CLKEN_OVR" pos="4" type="TGR3D_ONEOVERW_CLKEN_OVR" />
+		<bitfield name="MFU_CLKEN_OVR" pos="5" type="TGR3D_MFU_CLKEN_OVR" />
+		<bitfield name="MULABS_CLKEN_OVR" pos="6" type="TGR3D_MULABS_CLKEN_OVR" />
+		<bitfield name="IPAS_CLKEN_OVR" pos="7" type="TGR3D_IPAS_CLKEN_OVR" />
+	</reg32>
+	<reg32 offset="0x700" name="TEX_INST_OFFSET">
+		<bitfield name="INDEX" low="0" high="5" />
+	</reg32>
+	<reg32 offset="0x701" name="TEX_INST_DATA">
+		<bitfield name="SURF_PTR" low="0" high="3" />
+		<bitfield name="REG_SRC" pos="4" type="TGR3D_REG_SRC" />
+		<bitfield name="REG_DST" pos="5" type="TGR3D_REG_DST" />
+		<bitfield name="COLOR_KEY" pos="6" type="TGR3D_COLOR_KEY" />
+		<bitfield name="COMP_SEL" pos="7" type="TGR3D_COMP_SEL" />
+		<bitfield name="FETCH" pos="10" type="TGR3D_FETCH" />
+		<bitfield name="FETCH_KILLED" pos="11" type="TGR3D_FETCH_KILLED" />
+		<bitfield name="USER_LOD_BIAS" pos="12" type="TGR3D_USER_LOD_BIAS" />
+		<bitfield name="USER_LOD" pos="13" type="TGR3D_USER_LOD" />
+	</reg32>
+	<reg32 offset="0x702" name="TEX_COLORKEY">
+		<bitfield name="VALUE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x710" name="TEX_TEXADDR" length="16">
+		<bitfield name="BASE_ADDRESS" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x720" name="TEX_TEXDESC" length="16" stride="2">
+		<bitfield name="TRILINEAR_OPT" pos="30" type="TGR3D_TRILINEAR_OPT" />
+		<bitfield name="LERP_MAG" pos="29" />
+		<bitfield name="LERP_MIN" pos="28" />
+		<bitfield name="LERP_MIP" pos="27" />
+		<bitfield name="LOD_BIAS" low="18" high="26" />
+		<bitfield name="MAX_ANISO" low="14" high="17" />
+		<bitfield name="SURF_FORMAT" low="8" high="13" />
+		<bitfield name="CUBEMAP" pos="7" />
+		<bitfield name="LAYOUT" low="4" high="6" type="TGR3D_LAYOUT" />
+		<bitfield name="MIRROR_S" pos="3" type="TGR3D_MIRROR_S" />
+		<bitfield name="MIRROR_T" pos="2" type="TGR3D_MIRROR_T" />
+		<bitfield name="CLAMP_S" pos="1" type="TGR3D_CLAMP_S" />
+		<bitfield name="CLAMP_T" pos="0" type="TGR3D_CLAMP_T" />
+	</reg32>
+	<reg32 offset="0x721" name="TEX_TEXDESC" length="16" stride="2">
+		<bitfield name="WIDTH" low="20" high="31" />
+		<bitfield name="HEIGHT" low="8" high="19" />
+		<bitfield name="NORMALIZE" pos="7" type="TGR3D_NORMALIZE" />
+		<bitfield name="LOG2_WIDTH" low="28" high="31" />
+		<bitfield name="LOG2_HEIGHT" low="24" high="27" />
+		<bitfield name="LOD_MIN" low="16" high="23" />
+		<bitfield name="LOD_MAX" low="8" high="15" />
+		<bitfield name="BASE_LEVEL_ONLY" pos="7" type="TGR3D_BASE_LEVEL_ONLY" />
+		<bitfield name="NON_POWER_OF_TWO" pos="6" type="TGR3D_NON_POWER_OF_TWO" />
+		<bitfield name="ARRAY_MAX" low="0" high="5" />
+	</reg32>
+	<reg32 offset="0x740" name="TEX_TEXCTL">
+		<bitfield name="TEXTURE_CACHE_EN" pos="0" type="TGR3D_TEXTURE_CACHE_EN" />
+		<bitfield name="ANISO_OPT" low="2" high="3" type="TGR3D_ANISO_OPT" />
+		<bitfield name="ANISO_BIAS" low="4" high="6" />
+	</reg32>
+	<reg32 offset="0x741" name="TEX_CLKEN_OVERRIDE">
+		<bitfield name="TEXPBCLK_CLKEN_OVR" pos="0" type="TGR3D_TEXPBCLK_CLKEN_OVR" />
+		<bitfield name="TEXPPBCLK_CLKEN_OVR" pos="1" type="TGR3D_TEXPPBCLK_CLKEN_OVR" />
+		<bitfield name="TEXLODCLK_CLKEN_OVR" pos="2" type="TGR3D_TEXLODCLK_CLKEN_OVR" />
+		<bitfield name="TEXFORMATCLK_CLKEN_OVR" pos="3" type="TGR3D_TEXFORMATCLK_CLKEN_OVR" />
+		<bitfield name="TEXLODLOWERDPCLK_CLKEN_OVR" pos="4" type="TGR3D_TEXLODLOWERDPCLK_CLKEN_OVR" />
+		<bitfield name="TEXNONBYPCLK_CLKEN_OVR" pos="5" type="TGR3D_TEXNONBYPCLK_CLKEN_OVR" />
+		<bitfield name="TEXCACHECLK_CLKEN_OVR" pos="6" type="TGR3D_TEXCACHECLK_CLKEN_OVR" />
+	</reg32>
+	<reg32 offset="0x742" name="TEX_NV_MCCIF_FIFOCTRL_RO">
+		<bitfield name="NV_MCCIF_WRCL_MCLE2X" pos="0" type="TGR3D_NV_MCCIF_WRCL_MCLE2X" />
+		<bitfield name="NV_MCCIF_RDMC_RDFAST" pos="1" type="TGR3D_NV_MCCIF_RDMC_RDFAST" />
+		<bitfield name="NV_MCCIF_WRMC_CLLE2X" pos="2" type="TGR3D_NV_MCCIF_WRMC_CLLE2X" />
+		<bitfield name="NV_MCCIF_RDCL_RDFAST" pos="3" type="TGR3D_NV_MCCIF_RDCL_RDFAST" />
+		<bitfield name="NV_WCLK_OVERRIDE" pos="16" />
+		<bitfield name="NV_RCLK_OVERRIDE" pos="17" />
+	</reg32>
+	<reg32 offset="0x750" name="TEX_TEXDESC_NPOT_AUX" length="16">
+		<bitfield name="LOD_MAX" low="0" high="7" />
+		<bitfield name="LOD_MIN" low="8" high="15" />
+		<bitfield name="LOG2_HEIGHT" low="16" high="19" />
+		<bitfield name="LOG2_WIDTH" low="20" high="23" />
+		<bitfield name="BASE_LEVEL_ONLY" pos="24" type="TGR3D_BASE_LEVEL_ONLY" />
+	</reg32>
+	<reg32 offset="0x800" name="ALU_REMAP_OFFSET">
+		<bitfield name="INDEX" low="0" high="5" />
+		<bitfield name="BASE" low="6" high="11" />
+	</reg32>
+	<reg32 offset="0x801" name="ALU_REMAP_DATA">
+		<bitfield name="COUNT" low="0" high="1" />
+		<bitfield name="OFFSET" low="2" high="7" />
+	</reg32>
+	<reg32 offset="0x802" name="ALU_REMAP_DATA_4X">
+		<bitfield name="COUNT0" low="0" high="1" />
+		<bitfield name="OFFSET0" low="2" high="7" />
+		<bitfield name="COUNT1" low="8" high="9" />
+		<bitfield name="OFFSET1" low="10" high="15" />
+		<bitfield name="COUNT2" low="16" high="17" />
+		<bitfield name="OFFSET2" low="18" high="23" />
+		<bitfield name="COUNT3" low="24" high="25" />
+		<bitfield name="OFFSET3" low="26" high="31" />
+	</reg32>
+	<reg32 offset="0x803" name="ALU_INST_OFFSET">
+		<bitfield name="INDEX" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0x804" name="ALU_INST_DATA">
+		<bitfield name="OP" low="27" high="31" />
+		<bitfield name="DEST" low="13" high="26" />
+		<bitfield name="A" low="0" high="12" />
+		<bitfield name="B" low="19" high="31" />
+		<bitfield name="C" low="6" high="18" />
+		<bitfield name="D" low="0" high="5" />
+	</reg32>
+	<reg32 offset="0x805" name="ALU_P2CX_OFFSET">
+		<bitfield name="INDEX" low="0" high="5" />
+	</reg32>
+	<reg32 offset="0x806" name="ALU_P2CX_DATA">
+		<bitfield name="REFERENCE" low="0" high="15" />
+		<bitfield name="MASK" low="16" high="31" />
+		<bitfield name="OPCODE" low="0" high="31" type="TGR3D_OPCODE" />
+	</reg32>
+	<reg32 offset="0x820" name="ALU_GLOBALS" length="32">
+		<bitfield name="L10" low="0" high="9" />
+		<bitfield name="H10" low="10" high="19" />
+		<bitfield name="VAL" low="0" high="19" />
+	</reg32>
+	<reg32 offset="0x900" name="DW_INST_OFFSET">
+		<bitfield name="INDEX" low="0" high="5" />
+	</reg32>
+	<reg32 offset="0x901" name="DW_INST_DATA">
+		<bitfield name="OP" low="0" high="1" type="TGR3D_OP" />
+		<bitfield name="SURF" low="2" high="5" />
+		<bitfield name="WRITE_KILLED" pos="6" type="TGR3D_WRITE_KILLED" />
+		<bitfield name="WRITE_NON_CENTER" pos="7" type="TGR3D_WRITE_NON_CENTER" />
+		<bitfield name="CACHE_PERSISTENT" pos="8" />
+		<bitfield name="CACHE_READ_CLEAN" pos="9" />
+		<bitfield name="ARGS" low="10" high="25" />
+	</reg32>
+	<reg32 offset="0x902" name="DW_LOGIC_OP">
+		<bitfield name="OP" low="0" high="3" type="TGR3D_OP" />
+	</reg32>
+	<reg32 offset="0x903" name="DW_ST_ENABLE">
+		<bitfield name="SURFACE_0_ST_ENABLE" pos="0" type="TGR3D_SURFACE_0_ST_ENABLE" />
+		<bitfield name="SURFACE_1_ST_ENABLE" pos="1" type="TGR3D_SURFACE_1_ST_ENABLE" />
+		<bitfield name="SURFACE_2_ST_ENABLE" pos="2" type="TGR3D_SURFACE_2_ST_ENABLE" />
+		<bitfield name="SURFACE_3_ST_ENABLE" pos="3" type="TGR3D_SURFACE_3_ST_ENABLE" />
+		<bitfield name="SURFACE_4_ST_ENABLE" pos="4" type="TGR3D_SURFACE_4_ST_ENABLE" />
+		<bitfield name="SURFACE_5_ST_ENABLE" pos="5" type="TGR3D_SURFACE_5_ST_ENABLE" />
+		<bitfield name="SURFACE_6_ST_ENABLE" pos="6" type="TGR3D_SURFACE_6_ST_ENABLE" />
+		<bitfield name="SURFACE_7_ST_ENABLE" pos="7" type="TGR3D_SURFACE_7_ST_ENABLE" />
+		<bitfield name="SURFACE_8_ST_ENABLE" pos="8" type="TGR3D_SURFACE_8_ST_ENABLE" />
+		<bitfield name="SURFACE_9_ST_ENABLE" pos="9" type="TGR3D_SURFACE_9_ST_ENABLE" />
+		<bitfield name="SURFACE_10_ST_ENABLE" pos="10" type="TGR3D_SURFACE_10_ST_ENABLE" />
+		<bitfield name="SURFACE_11_ST_ENABLE" pos="11" type="TGR3D_SURFACE_11_ST_ENABLE" />
+		<bitfield name="SURFACE_12_ST_ENABLE" pos="12" type="TGR3D_SURFACE_12_ST_ENABLE" />
+		<bitfield name="SURFACE_13_ST_ENABLE" pos="13" type="TGR3D_SURFACE_13_ST_ENABLE" />
+		<bitfield name="SURFACE_14_ST_ENABLE" pos="14" type="TGR3D_SURFACE_14_ST_ENABLE" />
+		<bitfield name="SURFACE_15_ST_ENABLE" pos="15" type="TGR3D_SURFACE_15_ST_ENABLE" />
+		<bitfield name="SURFACES_ENABLE" low="0" high="15" />
+		<bitfield name="Z_TEST" pos="16" type="TGR3D_Z_TEST" />
+	</reg32>
+	<reg32 offset="0x904" name="DW_MEMORY_OUTPUT_ADDRESS">
+		<bitfield name="BASE_ADDRESS" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x905" name="DW_MEMORY_OUTPUT_DATA">
+		<bitfield name="DATA" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x906" name="DW_MEMORY_OUTPUT_INCR">
+		<bitfield name="AMOUNT" pos="0" />
+	</reg32>
+	<reg32 offset="0x907" name="DW_TIMESTAMP_CTL">
+		<bitfield name="ENABLE" pos="0" />
+	</reg32>
+	<reg32 offset="0x908" name="DW_TIMESTAMP_LOW">
+		<bitfield name="VALUE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x909" name="DW_TIMESTAMP_HIGH">
+		<bitfield name="VALUE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0x90a" name="DW_PIXEL_COUNT_CTRL">
+		<bitfield name="ENABLE" pos="0" />
+		<bitfield name="COUNT_NON_CENTER" pos="1" />
+	</reg32>
+	<reg32 offset="0x90b" name="DW_PIXEL_COUNT">
+		<bitfield name="VALUE" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xa00" name="FDC_CONTROL">
+		<bitfield name="INVALIDATE" pos="0" />
+		<bitfield name="FLUSH" pos="1" />
+		<bitfield name="STRICT_RI_ARB" pos="2" />
+		<bitfield name="STRICT_L2_ARB" pos="3" />
+		<bitfield name="DISABLE_AUTO_FLUSH" pos="4" />
+		<bitfield name="PERSISTENT_CLEAR" pos="5" />
+		<bitfield name="STRICT_MC_WR_ARB" pos="6" />
+		<bitfield name="DISABLE_PERSISTENT" pos="7" />
+		<bitfield name="DISABLE_READ_CLEAN" pos="8" />
+		<bitfield name="STRICT_DP_Q_RI_ARB" pos="9" />
+		<bitfield name="MCCIF_PORT_ASSIGN" pos="10" type="TGR3D_MCCIF_PORT_ASSIGN" />
+		<bitfield name="READ_BUF_MIN_LINE" pos="11" />
+		<bitfield name="FORCE_PIPE_CLEAN" pos="12" />
+	</reg32>
+	<reg32 offset="0xa01" name="FDC_STATUS">
+		<bitfield name="FLUSH_DONE" pos="0" />
+		<bitfield name="CSIM_SHUTDOWN_STATUS" pos="31" />
+	</reg32>
+	<reg32 offset="0xa02" name="FDC_MAX_QZ_LINES">
+		<bitfield name="MAX_QZ_LINES" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0xa03" name="FDC_MAX_QV_LINES">
+		<bitfield name="MAX_QV_LINES" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0xa04" name="FDC_MAX_QS_LINES">
+		<bitfield name="MAX_QS_LINES" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0xa05" name="FDC_MAX_PS_LINES">
+		<bitfield name="MAX_PS_LINES" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0xa06" name="FDC_MAX_Q_LINES">
+		<bitfield name="MAX_Q_LINES" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0xa07" name="FDC_MAX_Q_P_LINES">
+		<bitfield name="MAX_Q_P_LINES" low="0" high="8" />
+	</reg32>
+	<reg32 offset="0xa08" name="FDC_FLUSH_CTL">
+		<bitfield name="AUTO_FLUSH_DELAY" low="0" high="7" />
+		<bitfield name="MAX_FLUSH_STALLS" low="8" high="12" />
+		<bitfield name="DISABLE_AGGRESSIVE_FLUSH0" pos="16" />
+		<bitfield name="DISABLE_AGGRESSIVE_FLUSH1" pos="17" />
+	</reg32>
+	<reg32 offset="0xa09" name="FDC_L1_TIMEOUT">
+		<bitfield name="QR_TIMEOUT" low="0" high="4" />
+		<bitfield name="P_TIMEOUT" low="8" high="12" />
+		<bitfield name="QW_TIMEOUT" low="16" high="20" />
+		<bitfield name="D_TIMEOUT" low="24" high="28" />
+	</reg32>
+	<reg32 offset="0xa0a" name="FDC_INSTRUMENT">
+		<bitfield name="STAT_EN" pos="0" />
+	</reg32>
+	<reg32 offset="0xa0b" name="FDC_CLKEN_OVERRIDE">
+		<bitfield name="FDC_CLKEN_OVR" pos="0" type="TGR3D_FDC_CLKEN_OVR" />
+		<bitfield name="FDCPR_CLKEN_OVR" pos="1" type="TGR3D_FDCPR_CLKEN_OVR" />
+		<bitfield name="FDCZR_CLKEN_OVR" pos="2" type="TGR3D_FDCZR_CLKEN_OVR" />
+		<bitfield name="FDCSR_CLKEN_OVR" pos="3" type="TGR3D_FDCSR_CLKEN_OVR" />
+		<bitfield name="FDCVR_CLKEN_OVR" pos="4" type="TGR3D_FDCVR_CLKEN_OVR" />
+		<bitfield name="FDCDW_CLKEN_OVR" pos="5" type="TGR3D_FDCDW_CLKEN_OVR" />
+		<bitfield name="FDCZW_CLKEN_OVR" pos="6" type="TGR3D_FDCZW_CLKEN_OVR" />
+		<bitfield name="FDCSW_CLKEN_OVR" pos="7" type="TGR3D_FDCSW_CLKEN_OVR" />
+		<bitfield name="FDCVW_CLKEN_OVR" pos="8" type="TGR3D_FDCVW_CLKEN_OVR" />
+		<bitfield name="FDCSB_CLKEN_OVR" pos="9" type="TGR3D_FDCSB_CLKEN_OVR" />
+	</reg32>
+	<reg32 offset="0xa0c" name="FDC_NV_MCCIF_FIFOCTRL_RO">
+		<bitfield name="NV_MCCIF_WRCL_MCLE2X" pos="0" type="TGR3D_NV_MCCIF_WRCL_MCLE2X" />
+		<bitfield name="NV_MCCIF_RDMC_RDFAST" pos="1" type="TGR3D_NV_MCCIF_RDMC_RDFAST" />
+		<bitfield name="NV_MCCIF_WRMC_CLLE2X" pos="2" type="TGR3D_NV_MCCIF_WRMC_CLLE2X" />
+		<bitfield name="NV_MCCIF_RDCL_RDFAST" pos="3" type="TGR3D_NV_MCCIF_RDCL_RDFAST" />
+		<bitfield name="NV_WCLK_OVERRIDE" pos="16" />
+		<bitfield name="NV_RCLK_OVERRIDE" pos="17" />
+	</reg32>
+	<reg32 offset="0xb00" name="GSHIM_WRITE_MASK">
+		<bitfield name="GPU_A" pos="0" type="TGR3D_GPU_A" />
+		<bitfield name="GPU_B" pos="1" type="TGR3D_GPU_B" />
+	</reg32>
+	<reg32 offset="0xb01" name="GSHIM_READ_SELECT">
+		<bitfield name="GPU" low="0" high="1" type="TGR3D_GPU" />
+	</reg32>
+	<reg32 offset="0xb02" name="GSHIM_FLUSH">
+		<bitfield name="FLUSH" pos="0" />
+	</reg32>
+	<reg32 offset="0xb03" name="GSHIM_SCISSOR_SPLIT">
+		<bitfield name="SPLIT_AXIS" pos="0" type="TGR3D_SPLIT_AXIS" />
+		<bitfield name="SWAP" pos="1" type="TGR3D_SWAP" />
+		<bitfield name="VCAA" pos="3" />
+		<bitfield name="SPLIT_POINT" low="2" high="14" />
+	</reg32>
+	<reg32 offset="0xb04" name="GSHIM_STAT_ENABLE">
+		<bitfield name="EN" pos="0" type="TGR3D_EN" />
+		<bitfield name="OVR" pos="2" />
+		<bitfield name="INDEX" low="3" high="5" />
+	</reg32>
+	<reg32 offset="0xb06" name="GSHIM_STAT_STALL" length="2">
+		<bitfield name="COUNT" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xb08" name="GSHIM_STAT_WAIT" length="2">
+		<bitfield name="COUNT" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xb0a" name="GSHIM_STAT_COMB" length="2">
+		<bitfield name="COUNT" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xb0c" name="GSHIM_STAT_HWR_WAIT">
+		<bitfield name="COUNT" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xb0d" name="GSHIM_STAT_HWR_XFER">
+		<bitfield name="COUNT" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xb0e" name="GSHIM_STAT_SYNCPT_WAIT" length="2">
+		<bitfield name="COUNT" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xb10" name="GSHIM_DLB_CONTROL">
+		<bitfield name="MIN_INCR" low="0" high="5" />
+		<bitfield name="MAX_INCR" low="6" high="17" />
+		<bitfield name="HISTORY_SIZE" low="18" high="24" />
+	</reg32>
+	<reg32 offset="0xb11" name="GSHIM_DLB_RANGE">
+		<bitfield name="MIN" low="0" high="12" />
+		<bitfield name="MAX" low="13" high="26" />
+	</reg32>
+	<reg32 offset="0xb12" name="GSHIM_DLB_TRIGGER">
+		<bitfield name="EVENT" low="0" high="1" type="TGR3D_EVENT" />
+		<bitfield name="TIMEOUT" low="2" high="31" />
+	</reg32>
+	<reg32 offset="0xb13" name="GSHIM_HIGH_WATERMARK">
+		<bitfield name="COUNT" low="0" high="13" />
+	</reg32>
+	<reg32 offset="0xb14" name="GSHIM_DEBUG0">
+		<bitfield name="VAL" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xe00" name="GLOBAL_SURFADDR" length="16">
+		<bitfield name="BASE_ADDRESS" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xe10" name="GLOBAL_SURFDESC" length="16">
+		<bitfield name="OVERLAP" pos="27" type="TGR3D_OVERLAP" />
+		<bitfield name="STRUCTURE" low="25" high="26" type="TGR3D_STRUCTURE" />
+		<bitfield name="ARRAY_STRIDE" low="8" high="24" />
+		<bitfield name="STRIDE" low="8" high="23" />
+		<bitfield name="SURF_FORMAT" low="2" high="7" type="TGR3D_SURF_FORMAT" />
+		<bitfield name="QUADLIN" pos="1" type="TGR3D_QUADLIN" />
+		<bitfield name="DITHER" pos="0" type="TGR3D_DITHER" />
+	</reg32>
+	<reg32 offset="0xe20" name="GLOBAL_PIX_ATTR">
+		<bitfield name="NUM_ROWS" low="0" high="1" />
+		<bitfield name="FIRST_SEQUENCE" low="8" high="13" />
+		<bitfield name="MAX_QID" low="24" high="31" />
+	</reg32>
+	<reg32 offset="0xe21" name="GLOBAL_TRI_ATTR">
+		<bitfield name="NUM_TRIS" low="0" high="6" />
+		<bitfield name="TRI_ROWS" low="8" high="14" />
+	</reg32>
+	<reg32 offset="0xe22" name="GLOBAL_INST_OFFSET">
+		<bitfield name="INDEX" low="0" high="5" />
+	</reg32>
+	<reg32 offset="0xe23" name="GLOBAL_RAISE">
+		<bitfield name="SIGNAL" low="0" high="4" />
+		<bitfield name="CHANNEL" low="8" high="11" />
+		<bitfield name="SYNCPT_INCR" pos="31" type="TGR3D_SYNCPT_INCR" />
+	</reg32>
+	<reg32 offset="0xe24" name="GLOBAL_REFCNT">
+		<bitfield name="VALUE" low="0" high="31" />
+		<bitfield name="SYNCPT_INCR" pos="31" type="TGR3D_SYNCPT_INCR" />
+	</reg32>
+	<reg32 offset="0xe25" name="GLOBAL_INSTRUMENT">
+		<bitfield name="STAT_EN" pos="0" />
+	</reg32>
+	<reg32 offset="0xe26" name="GLOBAL_DITHER_TABLE">
+		<bitfield name="ZERO_ZERO" low="0" high="2" />
+		<bitfield name="ZERO_ONE" low="3" high="5" />
+		<bitfield name="ONE_ZERO" low="6" high="8" />
+		<bitfield name="ONE_ONE" low="9" high="11" />
+		<bitfield name="DITHER_ALPHA" pos="12" type="TGR3D_DITHER_ALPHA" />
+	</reg32>
+	<reg32 offset="0xe27" name="GLOBAL_FLUSH">
+		<bitfield name="TEXTURE" pos="0" />
+		<bitfield name="QRAST" pos="1" />
+		<bitfield name="GR3D" pos="2" />
+	</reg32>
+	<reg32 offset="0xe28" name="GLOBAL_S_OPERATION" length="2">
+		<bitfield name="S_FAIL" low="0" high="2" />
+		<bitfield name="Z_FAIL" low="3" high="5" />
+		<bitfield name="Z_PASS" low="6" high="8" />
+		<bitfield name="S_WR_MASK" low="9" high="16" />
+		<bitfield name="S_REF" low="17" high="24" />
+	</reg32>
+	<reg32 offset="0xe2a" name="GLOBAL_SPILLSURFADDR">
+		<bitfield name="BASE_ADDRESS" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xe2b" name="GLOBAL_NV_MCCIF_FIFOCTRL">
+		<bitfield name="NV_MCCIF_WRCL_MCLE2X" pos="0" type="TGR3D_NV_MCCIF_WRCL_MCLE2X" />
+		<bitfield name="NV_MCCIF_RDMC_RDFAST" pos="1" type="TGR3D_NV_MCCIF_RDMC_RDFAST" />
+		<bitfield name="NV_MCCIF_WRMC_CLLE2X" pos="2" type="TGR3D_NV_MCCIF_WRMC_CLLE2X" />
+		<bitfield name="NV_MCCIF_RDCL_RDFAST" pos="3" type="TGR3D_NV_MCCIF_RDCL_RDFAST" />
+		<bitfield name="NV_WCLK_OVERRIDE" pos="16" />
+		<bitfield name="NV_RCLK_OVERRIDE" pos="17" />
+	</reg32>
+	<reg32 offset="0xe30" name="GLOBAL_SURFOVERADDR" length="16">
+		<bitfield name="BASE_ADDRESS" low="0" high="31" />
+	</reg32>
+	<reg32 offset="0xe40" name="GLOBAL_MEMORY_OUTPUT_READS">
+		<bitfield name="READ_DEST" pos="0" type="TGR3D_READ_DEST" />
+	</reg32>
+	<reg32 offset="0xe41" name="GLOBAL_HORIZONTAL_SWATH_RENDERING">
+		<bitfield name="ALTERNATE" pos="0" type="TGR3D_ALTERNATE" />
+		<bitfield name="SWATH_ALIGN" pos="1" type="TGR3D_SWATH_ALIGN" />
+	</reg32>
+	<reg32 offset="0xe42" name="GLOBAL_INNER_SLI_SCISSOR_X">
+		<bitfield name="MAX" low="0" high="12" />
+		<bitfield name="MIN" low="16" high="27" />
+	</reg32>
+	<reg32 offset="0xe43" name="GLOBAL_INNER_SLI_SCISSOR_Y">
+		<bitfield name="MAX" low="0" high="12" />
+		<bitfield name="MIN" low="16" high="27" />
+	</reg32>
+</domain>
+</database>
