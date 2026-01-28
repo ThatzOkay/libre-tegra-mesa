@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "drm-shim/drm_shim.h"
-#include "../drm/opentegra_drm.h"
+#include "drm-uapi/tegra_drm.h"
 
 #include "util/u_math.h"
 
@@ -59,9 +59,6 @@ static ioctl_fn_t driver_ioctls[] = {
    [DRM_TEGRA_GEM_GET_TILING] = tegra_ioctl_noop,
    [DRM_TEGRA_GEM_SET_FLAGS] = tegra_ioctl_noop,
    [DRM_TEGRA_GEM_GET_FLAGS] = tegra_ioctl_noop,
-   [DRM_TEGRA_GEM_CPU_PREP] = tegra_ioctl_noop,
-   [DRM_TEGRA_SUBMIT_V2] = tegra_ioctl_noop,
-   [DRM_TEGRA_VERSION] = tegra_ioctl_noop,
 };
 
 void

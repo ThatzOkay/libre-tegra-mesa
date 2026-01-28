@@ -67,7 +67,7 @@ grate_screen_get_screen_fd(struct pipe_screen *pscreen)
 }
 
 static void
-grate_init_screen_caps(struct grate_screen *screen)
+grate_screen_init_caps(struct grate_screen *screen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&screen->base.caps;
    grate_trace();
@@ -224,36 +224,36 @@ grate_init_screen_caps(struct grate_screen *screen)
    //////////////////////////////////////////////////////////////
 
    // Bool values
-   caps->npot_textures = true; // not really, but mesa requires it for now!
+   caps->npot_textures = true; // not really, but mesa requires it for now!`
    caps->blend_equation_separate = true;
-   caps->vertex_color_unclamped = true;  //probably irrelevant for GLES2
-   caps->vertex_color_clamped = false; //probably irrelevant for GLES2
+   caps->vertex_color_unclamped = true;  // probably irrelevant for GLES2
+   caps->vertex_color_clamped = false; // probably irrelevant for GLES2
    caps->mixed_framebuffer_sizes = true;
-   caps->buffer_map_persistent_coherent = false;
+   caps->buffer_map_persistent_coherent = false; // dunno
    caps->uma = true;
-   caps->can_bind_const_buffer_as_vertex = false;
-   caps->allow_mapped_buffers_during_execution = false;
+   caps->can_bind_const_buffer_as_vertex = false; // TODO: probably
+   caps->allow_mapped_buffers_during_execution = false; // TODO: probably
    
    // well, not quite. but perhaps close enough?
    caps->fragment_shader_texture_lod = true;
    caps->fragment_shader_derivatives = true;
    caps->min_texel_offset = 0;
    caps->max_texel_offset = 0;
-   caps->max_render_targets = 8; //???
+   caps->max_render_targets = 8; // ???
    caps->max_texture_2d_size = 2048;
    caps->max_texture_3d_levels = 0;
-   caps->max_texture_cube_levels = 16;
+   caps->max_texture_cube_levels = 16; // ???
    caps->glsl_feature_level =
-   caps->glsl_feature_level_compatibility = 120; //no clue
-   caps->essl_feature_level = 100; //no clue
-   caps->constant_buffer_offset_alignment = 4;
+   caps->glsl_feature_level_compatibility = 120; // no clue
+   caps->essl_feature_level = 100; // no clue
+   caps->constant_buffer_offset_alignment = 4; // DWORD aligned, can do pure data GATHER 
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
    caps->vendor_id = 0x10de;
    caps->device_id = 0xFFFFFFFF;
    caps->video_memory = 0;
    caps->max_vertex_attrib_stride = (1 << 24) - 1;
-   caps->mixed_color_depth_bits = true; // ?? wtf
-   caps->fbfetch = 0;
+   caps->mixed_color_depth_bits = 1; // probably true ?
+   caps->fbfetch = 0; // TODO: supported, but let's enable later
    caps->max_varyings = 16;
    caps->supported_prim_modes_with_restart = 0;
    caps->supported_prim_modes = BITFIELD_BIT(MESA_PRIM_POINTS) |
@@ -263,17 +263,18 @@ grate_init_screen_caps(struct grate_screen *screen)
                                  BITFIELD_BIT(MESA_PRIM_TRIANGLES) |
                                  BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP) |
                                  BITFIELD_BIT(MESA_PRIM_TRIANGLE_FAN);
-   caps->min_line_width = 1.0;
-   caps->min_line_width_aa = 1.0;
-   caps->max_line_width = 8192.0;
-   caps->max_line_width_aa = 8192.0;
-   caps->line_width_granularity = 1.0/16;
-   caps->min_point_size = 1.0;
-   caps->min_point_size_aa = 1.0;
-   caps->max_point_size = 8192.0;
-   caps->max_point_size_aa = 8192.0;
-   caps->point_size_granularity = 1.0/16;
-   caps->max_texture_anisotropy = 16.0; //Vendor GL has EXT_texture_filter_anisotropic
+   caps->min_line_width = 1.0f; // no clue
+   caps->min_line_width_aa = 1.0f; // no clue
+   caps->max_line_width = 8192.0; // no clue
+   caps->max_line_width_aa = 8192.0; // no clue
+
+   caps->min_point_size = 1.0; // no clue
+   caps->min_point_size_aa = 1.0; // no clue
+   caps->max_point_size = 8192.0; // no clue
+   caps->max_point_size_aa = 8192.0; // no clue
+   caps->point_size_granularity = 
+   caps->line_width_granularity = 1.0 / 16; // TODO: not a real limit, HW uses floats... but helps caching CSOs
+   caps->max_texture_anisotropy = 0; // TODOD: 16.0; // Vendor GL has EXT_texture_filter_anisotropic
    caps->max_texture_lod_bias = 15.0;
    caps->min_conservative_raster_dilate = 0.0;
    caps->max_conservative_raster_dilate = 0.0;
@@ -281,7 +282,7 @@ grate_init_screen_caps(struct grate_screen *screen)
 }
 
 static void
-grate_init_shader_caps(struct grate_screen *screen)
+grate_screen_init_shader_caps(struct grate_screen *screen)
 {
 
    struct pipe_shader_caps *caps = NULL;
@@ -523,8 +524,8 @@ grate_screen_create(int fd)
 
    grate_screen_resource_init(&screen->base);
 
-   grate_init_shader_caps(screen);
-   grate_init_screen_caps(screen);
+   grate_screen_init_shader_caps(screen);
+   grate_screen_init_caps(screen);
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct pipe_transfer), 16);
 
