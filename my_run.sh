@@ -3,10 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-# DISPLAY=:0 put app to display, needed for SSH
 # vblank_mode=0 disables vsync. Shows max FPS instead of 60
-# LIBGL_DRI3_DISABLE=true disable DRI3, tegra-xf86 only implements DRI2. Should be replaced with wayland anyway
-
 
 export vblank_mode=0
 export GRATE_DEBUG=unimplemented,tgsi,trace
@@ -16,13 +13,7 @@ export MESA_LOG_LEVEL=debug
 export GALLIUM_TRACE=/tmp/trace-gallium.xml
 export GALLIUM_TRACE_TC=true
 export EGL_LOG_LEVEL=debug
-export EGL_PLATFORM=surfaceless
+#export EGL_PLATFORM=surfaceless
 export NIR_DEBUG=tgsi,print
 
-DISPLAY=:0 \
-vblank_mode=0 \
-LIBGL_DEBUG=verbose \
 meson devenv -C build $@
-
-
-#LIBGL_DRI3_DISABLE=true \
