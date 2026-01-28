@@ -1,0 +1,48 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<database xmlns="http://nouveau.freedesktop.org/"
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
+
+<import file="common.xml"/>        
+
+<enum name="chip" bare="yes">
+        <value name="T20" value="2"/>
+        <value name="T30" value="3"/>
+        <value name="T114" value="4"/>
+</enum>
+<!--
+<bitset name="Test" varset="chip" variants="T20" inline="yes">
+        <bitfield name="MIN" low="0" high="12" />
+</bitset>
+<bitset name="Test" varset="chip" variants="T114" inline="yes">
+        <bitfield name="MIN" low="0" high="12" />
+</bitset>
+
+<bitset name="Tst" varset="chip" inline="yes">
+        <bitfield name="MIN" low="0" high="12" variants="T30"/>
+</bitset>
+
+<domain name="TGR3D" width="32" prefix="variant" varset="chip">
+	<reg32 offset="0x0" name="A" type="Test" />
+	<reg32 offset="0x0" name="A" type="Tst" />
+		
+		
+		
+	<reg32 offset="0x1" name="B" variants="T20-">
+		<bitfield name="MAX" low="0" high="12"/>
+	</reg32>
+	<reg32 offset="0x1" name="B" variants="T30-">
+		<bitfield name="MAX" low="0" high="12"/>
+	</reg32>
+	
+	<reg32 offset="0x1" name="B" variants="T20">
+		<bitfield name="MAX" low="0" high="8"/>
+	</reg32>
+	
+	<reg32 offset="0x3" name="D">
+		<bitfield name="MAX" low="0" high="12" varset="chip" variants="T20"/>
+	</reg32>
+
+</domain>
+-->
+</database>

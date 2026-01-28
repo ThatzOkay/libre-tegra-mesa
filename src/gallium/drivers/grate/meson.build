@@ -81,3 +81,7 @@ driver_grate = declare_dependency(
 if with_tools.contains('drm-shim')
   subdir('drm-shim')
 endif
+
+if with_tools.contains('grate')
+  subdir('genxml')
+endif

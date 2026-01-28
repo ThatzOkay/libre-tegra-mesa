@@ -13,7 +13,7 @@ EXTRA_ARGS=""
 if [[ -f "/sys/devices/soc0/family" ]] && [[ "$(cat /sys/devices/soc0/family)" = "Tegra" ]]; then
 	echo "Tegra! skipping drm-shim";
 else
-	EXTRA_ARGS="${EXTRA_ARGS} -Dtools=drm-shim"
+	EXTRA_ARGS="${EXTRA_ARGS} -Dtools=drm-shim,grate"
 fi
 
 meson setup \
