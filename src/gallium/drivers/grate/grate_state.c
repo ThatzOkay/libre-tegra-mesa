@@ -278,6 +278,32 @@ grate_delete_sampler_state(struct pipe_context *pcontext, void *so)
    FREE(so);
 }
 
+static struct pipe_sampler_view *
+grate_create_sampler_view(struct pipe_context *pcontext,
+                          struct pipe_resource *resource,
+                          const struct pipe_sampler_view *template)
+{
+   struct pipe_sampler_view *so = CALLOC_STRUCT(pipe_sampler_view);
+   if (!so)
+      return NULL;
+
+   *so = *template;
+   so->texture = NULL;
+   pipe_resource_reference(&so->texture, resource);
+   pipe_reference_init(&so->reference, 1);
+   so->context = pcontext;
+
+   return so;
+}
+
+static void
+grate_sampler_view_destroy(struct pipe_context *pcontext,
+                           struct pipe_sampler_view *pview)
+{
+   pipe_resource_reference(&pview->texture, NULL);
+   FREE(pview);
+}
+
 void
 grate_context_sampler_init(struct pipe_context *pcontext)
 {
@@ -285,6 +311,8 @@ grate_context_sampler_init(struct pipe_context *pcontext)
    pcontext->create_sampler_state = grate_create_sampler_state;
    pcontext->bind_sampler_states = grate_bind_sampler_states;
    pcontext->delete_sampler_state = grate_delete_sampler_state;
+   pcontext->create_sampler_view = grate_create_sampler_view;
+   pcontext->sampler_view_destroy = grate_sampler_view_destroy;
    pcontext->sampler_view_release = u_default_sampler_view_release;
 }
 

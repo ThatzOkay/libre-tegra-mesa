@@ -509,7 +509,9 @@ grate_context_resource_init(struct pipe_context *pcontext)
    pcontext->resource_copy_region = grate_resource_copy_region;
    pcontext->blit = grate_blit;
    pcontext->clear = grate_clear;
+   pcontext->clear_buffer = u_default_clear_buffer;
    pcontext->flush_resource = grate_flush_resource;
+   pcontext->resource_release = u_default_resource_release;
    pcontext->clear_render_target = grate_clear_render_target;
    pcontext->clear_depth_stencil = grate_clear_depth_stencil;
 }
