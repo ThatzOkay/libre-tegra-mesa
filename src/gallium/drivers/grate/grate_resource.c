@@ -53,6 +53,12 @@ grate_resource_get_handle(struct pipe_screen *pscreen,
          fprintf(stderr, "drm_tegra_bo_get_handle() failed: %d\n", err);
          return false;
       }
+   } else if (handle->type == WINSYS_HANDLE_TYPE_FD) {
+      err = drm_tegra_bo_to_dmabuf(resource->bo, &handle->handle);
+      if (err < 0) {
+         fprintf(stderr, "drm_tegra_bo_get_handle() failed: %d\n", err);
+         return false;
+      }
    } else {
       fprintf(stdout, "unsupported handle type: %d\n", handle->type);
       return false;
