@@ -129,8 +129,8 @@ grate_create_vs_state(struct pipe_context *pcontext,
       return NULL;
    }
 
-   commands[0] = host1x_opcode_imm(TGR3D_VP_UPLOAD_INST_ID, 0);
-   commands[1] = host1x_opcode_nonincr(TGR3D_VP_UPLOAD_INST,
+   commands[0] = host1x_opcode_imm(REG_TGR3D_VPE_INST_OFFSET, 0);
+   commands[1] = host1x_opcode_nonincr(REG_TGR3D_VPE_INST_DATA,
                                        num_instructions * 4);
 
    struct vp_instr *last = list_last_entry(&vp.instructions, struct vp_instr, link);
@@ -200,44 +200,48 @@ grate_create_fs_state(struct pipe_context *pcontext,
    util_dynarray_init(&buf, NULL);
 
 #define PUSH(x) util_dynarray_append(&buf, uint32_t, (x))
-   PUSH(host1x_opcode_incr(TGR3D_ALU_BUFFER_SIZE, 1));
+   PUSH(host1x_opcode_incr(REG_TGR3D_GLOBAL_PIX_ATTR, 1));
+   // TODO: document/convert these values
    PUSH(0x58000000);
 
-   PUSH(host1x_opcode_imm(TGR3D_FP_PSEQ_QUAD_ID, 0));
-   PUSH(host1x_opcode_imm(TGR3D_FP_UPLOAD_INST_ID_COMMON, 0));
-   PUSH(host1x_opcode_imm(TGR3D_FP_UPLOAD_MFU_INST_ID, 0));
-   PUSH(host1x_opcode_imm(TGR3D_FP_UPLOAD_ALU_INST_ID, 0));
+   PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_QUAD_ID, 0));
+   PUSH(host1x_opcode_imm(REG_TGR3D_GLOBAL_INST_OFFSET, 0));
+   PUSH(host1x_opcode_imm(REG_TGR3D_AT_INST_OFFSET, 0));
+   PUSH(host1x_opcode_imm(REG_TGR3D_ALU_INST_OFFSET, 0));
 
    int num_fp_instrs = list_length(&fp.fp_instructions);
    assert(num_fp_instrs < 64);
 
-   PUSH(host1x_opcode_incr(TGR3D_FP_PSEQ_ENGINE_INST, 1));
+   PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_COMMAND_EVEN(0), 1));
+   // TODO: document/convert these values
    PUSH(0x20006000 | num_fp_instrs);
 
-   PUSH(host1x_opcode_incr(TGR3D_FP_PSEQ_DW_CFG, 1));
+   PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_DWR_IF_STATE, 1));
+   // TODO: document/convert these values
    PUSH(0x00000040);
 
    if (soc_id == DRM_TEGRA_SOC_T114) {
+      // TODO: document/convert these values
       /* XXX: maybe not needed */
       PUSH(host1x_opcode_incr(0x547, 0x0002));
       PUSH(0xc0000000);
       PUSH(0x00000000);
    }
 
-   PUSH(host1x_opcode_imm(TGR3D_FP_PSEQ_UPLOAD_INST_BUFFER_FLUSH, 0));
+   PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
 
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_PSEQ_UPLOAD_INST, num_fp_instrs));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_PSEQ_INST_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
       PUSH(0x00000000);
 
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_MFU_SCHED, num_fp_instrs));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_AT_REMAP_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
       PUSH(grate_fp_pack_sched(&instr->mfu_sched));
 
    int num_mfu_instrs = list_length(&fp.mfu_instructions);
    assert(num_mfu_instrs < 64); // TODO: not sure if this is really correct
 
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_MFU_INST, num_mfu_instrs * 2));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_AT_INST_DATA_LO, num_mfu_instrs * 2));
    list_for_each_entry(struct fp_mfu_instr, instr, &fp.mfu_instructions, link) {
       uint32_t words[2];
       grate_fp_pack_mfu(words, instr);
@@ -246,11 +250,11 @@ grate_create_fs_state(struct pipe_context *pcontext,
    }
 
    // TODO: emit actual instructions here
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_TEX_INST, num_fp_instrs));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_TEX_INST_DATA, num_fp_instrs));
    for (int i = 0; i < num_fp_instrs; ++i)
       PUSH(0x00000000);
 
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_ALU_SCHED, num_fp_instrs));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_REMAP_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link) {
       if (soc_id == DRM_TEGRA_SOC_T114)
          PUSH(grate_fp_pack_alu_sched_t114(&instr->alu_sched));
@@ -259,8 +263,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
    }
 
    int num_alu_instrs = list_length(&fp.alu_instructions);
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_ALU_INST,
-        num_alu_instrs * 4 * 2));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_INST_DATA, num_alu_instrs * 4 * 2));
    list_for_each_entry(struct fp_alu_instr_packet, instr, &fp.alu_instructions, link) {
       for (int i = 0; i < 4; ++i) {
          uint32_t words[2];
@@ -270,19 +273,19 @@ grate_create_fs_state(struct pipe_context *pcontext,
       }
    }
 
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_ALU_INST_COMPLEMENT, num_fp_instrs));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_P2CX_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
       PUSH(0x00000000);
 
-   PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_DW_INST, num_fp_instrs));
+   PUSH(host1x_opcode_nonincr(REG_TGR3D_DW_INST_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
       PUSH(grate_fp_pack_dw(&instr->dw));
 
    uint32_t tram_setup = 0;
-   tram_setup |= TGR3D_VAL(TRAM_SETUP, USED_TRAM_ROWS_NB, fp.info.max_tram_row);
-   tram_setup |= TGR3D_VAL(TRAM_SETUP, DIV64, 64 / fp.info.max_tram_row);
+   tram_setup |= TGR3D_GLOBAL_TRI_ATTR_NUM_TRIS(64 / fp.info.max_tram_row);
+   tram_setup |= TGR3D_GLOBAL_TRI_ATTR_TRI_ROWS(fp.info.max_tram_row);
 
-   PUSH(host1x_opcode_incr(TGR3D_TRAM_SETUP, 1));
+   PUSH(host1x_opcode_incr(REG_TGR3D_GLOBAL_TRI_ATTR, 1));
    PUSH(tram_setup);
 
 #undef PUSH

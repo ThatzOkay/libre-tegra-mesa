@@ -53,9 +53,9 @@ static void grate_add_render_target(struct grate_context *context,
    struct grate_resource *res = grate_resource(ref->texture);
    uint32_t rt_params;
    
-   rt_params  = TGR3D_VAL(RT_PARAMS, FORMAT, res->format);
-   rt_params |= TGR3D_VAL(RT_PARAMS, PITCH, res->pitch);
-   rt_params |= TGR3D_BOOL(RT_PARAMS, TILED, res->tiled);
+   rt_params  = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(res->format);
+   rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->pitch);
+   rt_params |= TGR3D_GLOBAL_SURFDESC_STRUCTURE(res->tiled);
    
    context->framebuffer.rt_params[context->framebuffer.num_rts] = rt_params;
    context->framebuffer.rt_bos[context->framebuffer.num_rts] = res->bo;
@@ -83,11 +83,11 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
    }
 
    /* prepare the scissor-registers for the non-scissor case */
-   context->no_scissor[0]  = host1x_opcode_incr(TGR3D_SCISSOR_HORIZ, 2);
-   context->no_scissor[1]  = TGR3D_VAL(SCISSOR_HORIZ, MIN, 0);
-   context->no_scissor[1] |= TGR3D_VAL(SCISSOR_HORIZ, MAX, framebuffer->width);
-   context->no_scissor[2]  = TGR3D_VAL(SCISSOR_VERT, MIN, 0);
-   context->no_scissor[2] |= TGR3D_VAL(SCISSOR_VERT, MAX, framebuffer->height);
+   context->no_scissor[0]  = host1x_opcode_incr(REG_TGR3D_SU_SCISSOR_X, 2);
+   context->no_scissor[1]  = TGR3D_SU_SCISSOR_X_MIN(0);
+   context->no_scissor[1] |= TGR3D_SU_SCISSOR_X_MAX(framebuffer->width);
+   context->no_scissor[2]  = TGR3D_SU_SCISSOR_Y_MIN(0);
+   context->no_scissor[2] |= TGR3D_SU_SCISSOR_Y_MAX(framebuffer->height);
 }
 
 static void
@@ -125,7 +125,7 @@ grate_set_viewport_states(struct pipe_context *pcontext,
    assert(num_viewports == 1);
    assert(start_slot == 0);
 
-   context->viewport[0] = host1x_opcode_incr(TGR3D_VIEWPORT_X_BIAS, 6);
+   context->viewport[0] = host1x_opcode_incr(REG_TGR3D_SU_VIEWPORT_X, 6);
    context->viewport[1] = u_bitcast_f2u(viewports[0].translate[0] * 16.0f);
    context->viewport[2] = u_bitcast_f2u(viewports[0].translate[1] * 16.0f);
    context->viewport[3] = u_bitcast_f2u(viewports[0].translate[2] - zeps);
@@ -135,7 +135,7 @@ grate_set_viewport_states(struct pipe_context *pcontext,
 
    uint32_t depth_near = (viewports[0].translate[2] - viewports[0].scale[2]) * hw_scale;
    uint32_t depth_far = (viewports[0].translate[2] + viewports[0].scale[2]) * hw_scale;
-   context->viewport[7] = host1x_opcode_incr(TGR3D_DEPTH_RANGE_NEAR, 2);
+   context->viewport[7] = host1x_opcode_incr(REG_TGR3D_QR_Z_MIN, 2);
    context->viewport[8] = depth_near;
    context->viewport[9] = depth_far;
 
@@ -144,7 +144,7 @@ grate_set_viewport_states(struct pipe_context *pcontext,
    float max_y = fabs(viewports[0].translate[1]);
    float scale_x = viewports[0].scale[0];
    float scale_y = fabs(viewports[0].scale[1]);
-   context->guardband[0] = host1x_opcode_incr(TGR3D_GUARDBAND_WIDTH, 3);
+   context->guardband[0] = host1x_opcode_incr(REG_TGR3D_SU_GUARDBAND_W, 3);
    context->guardband[1] = u_bitcast_f2u((3967 - max_x) / scale_x);
    context->guardband[2] = u_bitcast_f2u((3967 - max_y) / scale_y);
    context->guardband[3] = u_bitcast_f2u(6.99);
@@ -321,16 +321,16 @@ grate_cull_face(int cull_face, bool front_ccw)
 {
    switch (cull_face) {
    case PIPE_FACE_NONE:
-      return TGR3D_CULL_FACE_NONE;
+      return TGR3D_CULL_NONE;
 
    case PIPE_FACE_FRONT:
-      return front_ccw ? TGR3D_CULL_FACE_CCW : TGR3D_CULL_FACE_CW;
+      return front_ccw ? TGR3D_CULL_POS : TGR3D_CULL_NEG;
 
    case PIPE_FACE_BACK:
-      return front_ccw ? TGR3D_CULL_FACE_CW : TGR3D_CULL_FACE_CCW;
+      return front_ccw ? TGR3D_CULL_NEG : TGR3D_CULL_POS;
 
    case PIPE_FACE_FRONT_AND_BACK:
-      return TGR3D_CULL_FACE_BOTH;
+      return TGR3D_CULL_BOTH;
 
    default:
       UNREACHABLE("unknown cull_face");
@@ -347,21 +347,17 @@ grate_create_rasterizer_state(struct pipe_context *pcontext,
 
    so->base = *template;
 
-   so->draw_params = TGR3D_VAL(DRAW_PARAMS, PROVOKING_VERTEX, !template->flatshade_first);
+   so->draw_params = TGR3D_IDX_SET_PRIM_FLAT_VTX(!template->flatshade_first);
 
    /* normal */
-   so->cull_face[0] = TGR3D_BOOL(CULL_FACE_LINKER_SETUP, FRONT_CW,
-                                 !template->front_ccw);
-   so->cull_face[0] |= TGR3D_VAL(CULL_FACE_LINKER_SETUP, CULL_FACE,
-                                 grate_cull_face(template->cull_face,
-                                                 template->front_ccw));
+   so->cull_face[0] = TGR3D_SU_PARAM_FRONT_FACE(!template->front_ccw);
+   so->cull_face[0] |= TGR3D_SU_PARAM_CULL(grate_cull_face(template->cull_face,
+                                           template->front_ccw));
 
    /* y-inverted */
-   so->cull_face[1] = TGR3D_BOOL(CULL_FACE_LINKER_SETUP, FRONT_CW,
-                                 template->front_ccw);
-   so->cull_face[1] |= TGR3D_VAL(CULL_FACE_LINKER_SETUP, CULL_FACE,
-                                 grate_cull_face(template->cull_face,
-                                                 !template->front_ccw));
+   so->cull_face[1] = TGR3D_SU_PARAM_FRONT_FACE(template->front_ccw);
+   so->cull_face[1] |= TGR3D_SU_PARAM_CULL(grate_cull_face(template->cull_face,
+                                           !template->front_ccw));
 
    return so;
 }
@@ -391,13 +387,13 @@ static int
 grate_compare_func(enum pipe_compare_func func)
 {
    switch (func) {
-   case PIPE_FUNC_NEVER: return TGR3D_COMPARE_FUNC_NEVER;
-   case PIPE_FUNC_LESS: return TGR3D_COMPARE_FUNC_LESS;
-   case PIPE_FUNC_EQUAL: return TGR3D_COMPARE_FUNC_EQUAL;
-   case PIPE_FUNC_LEQUAL: return TGR3D_COMPARE_FUNC_LEQUAL;
-   case PIPE_FUNC_GREATER: return TGR3D_COMPARE_FUNC_GREATER;
-   case PIPE_FUNC_NOTEQUAL: return TGR3D_COMPARE_FUNC_NOTEQUAL;
-   case PIPE_FUNC_ALWAYS: return TGR3D_COMPARE_FUNC_ALWAYS;
+   case PIPE_FUNC_NEVER: return TGR3D_FUNC_NEVER;
+   case PIPE_FUNC_LESS: return TGR3D_FUNC_LESS;
+   case PIPE_FUNC_EQUAL: return TGR3D_FUNC_EQUAL;
+   case PIPE_FUNC_LEQUAL: return TGR3D_FUNC_LEQUAL;
+   case PIPE_FUNC_GREATER: return TGR3D_FUNC_GREATER;
+   case PIPE_FUNC_NOTEQUAL: return TGR3D_FUNC_NOTEQUAL;
+   case PIPE_FUNC_ALWAYS: return TGR3D_FUNC_ALWAYS;
    default: UNREACHABLE("unknown pipe_compare_func");
    }
 }
@@ -415,15 +411,12 @@ grate_create_zsa_state(struct pipe_context *pcontext,
    so->base = *template;
 
    uint32_t depth_test = 0;
-   depth_test |= TGR3D_VAL(DEPTH_TEST_PARAMS, FUNC,
-                           grate_compare_func(template->depth_func));
-   depth_test |= TGR3D_BOOL(DEPTH_TEST_PARAMS, DEPTH_TEST,
-                            template->depth_enabled);
-   depth_test |= TGR3D_BOOL(DEPTH_TEST_PARAMS, DEPTH_WRITE,
-                            template->depth_writemask);
-   depth_test |= 0x200;
+   depth_test |= TGR3D_QR_Z_TEST_Z_FUNC(grate_compare_func(template->depth_func));
+   depth_test |= TGR3D_QR_Z_TEST_Z_ENABLE(template->depth_enabled);
+   depth_test |= TGR3D_QR_Z_TEST_QRAST_FB_WRITE(template->depth_writemask);
+   depth_test |= TGR3D_QR_Z_TEST_Z_CLAMP(TGR3D_Z_CLAMP_KILL);
 
-   so->commands[0] = host1x_opcode_incr(TGR3D_DEPTH_TEST_PARAMS, 1);
+   so->commands[0] = host1x_opcode_incr(REG_TGR3D_QR_Z_TEST, 1);
    so->commands[1] = depth_test;
    so->num_commands = 2;
 
@@ -475,15 +468,15 @@ attrib_mode(const struct pipe_vertex_element *e)
    case UTIL_FORMAT_TYPE_SIGNED:
       switch (desc->channel[c].size) {
       case 8:
-         type = TGR3D_ATTRIB_TYPE_UBYTE;
+         type = TGR3D_ATTR_FMT_U8;
          break;
 
       case 16:
-         type = TGR3D_ATTRIB_TYPE_USHORT;
+         type = TGR3D_ATTR_FMT_U16;
          break;
 
       case 32:
-         type = TGR3D_ATTRIB_TYPE_UINT;
+         type = TGR3D_ATTR_FMT_U32;
          break;
 
       default:
@@ -500,20 +493,20 @@ attrib_mode(const struct pipe_vertex_element *e)
 
    case UTIL_FORMAT_TYPE_FIXED:
       assert(desc->channel[c].size == 32);
-      type = TGR3D_ATTRIB_TYPE_FIXED16;
+      type = TGR3D_ATTR_FMT_X32;
       break;
 
    case UTIL_FORMAT_TYPE_FLOAT:
       assert(desc->channel[c].size == 32); /* TODO: float16 ? */
-      type = TGR3D_ATTRIB_TYPE_FLOAT32;
+      type = TGR3D_ATTR_FMT_F32;
       break;
 
    default:
       UNREACHABLE("invalid channel-type");
    }
 
-   format  = TGR3D_VAL(ATTRIB_MODE, TYPE, type);
-   format |= TGR3D_VAL(ATTRIB_MODE, SIZE, desc->nr_channels);
+   format  = TGR3D_IDX_ATTRIBUTE_MODE_ATTR_FMT(type);
+   format |= TGR3D_IDX_ATTRIBUTE_MODE_ATTR_SIZE(desc->nr_channels);
    return format;
 }
 
@@ -575,9 +568,9 @@ emit_attribs(struct grate_context *context)
 
       uint32_t attrib = e->attrib;
       assert(e->stride < 1 << 24);
-      attrib |= TGR3D_VAL(ATTRIB_MODE, STRIDE, e->stride);
+      attrib |= TGR3D_IDX_ATTRIBUTE_MODE_ATTR_STRIDE(e->stride);
 
-      grate_stream_push(stream, host1x_opcode_incr(TGR3D_ATTRIB_PTR(i), 2));
+      grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_IDX_ATTRIBUTE_BASE(i), 2));
       grate_stream_push_reloc(stream, r->bo, vb->buffer_offset + e->offset);
       grate_stream_push(stream, attrib);
    }
@@ -590,20 +583,20 @@ emit_render_targets(struct grate_context *context)
    struct grate_stream *stream = &context->gr3d->stream;
    const struct grate_framebuffer_state *fb = &context->framebuffer;
 
-   grate_stream_push(stream, host1x_opcode_incr(TGR3D_RT_PARAMS(0), fb->num_rts));
+   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC, fb->num_rts));
    for (i = 0; i < fb->num_rts; ++i) {
       uint32_t rt_params = fb->rt_params[i];
       /* TODO: setup dither */
-      /* rt_params |= TGR3D_BOOL(RT_PARAMS, DITHER_ENABLE, enable_dither); */
+      /* rt_params |= TGR3D_GLOBAL_SURFDESC_DITHER(enable_dither); */
       grate_stream_push(stream, rt_params);
    }
 
-   grate_stream_push(stream, host1x_opcode_incr(TGR3D_RT_PTR(0), fb->num_rts));
+   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR, fb->num_rts));
    for (i = 0; i < fb->num_rts; ++i) {
       grate_stream_push_reloc(stream, fb->rt_bos[i], 0);
    }
 
-   grate_stream_push(stream, host1x_opcode_incr(TGR3D_RT_ENABLE, 1));
+   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_DW_ST_ENABLE, 1));
    grate_stream_push(stream, fb->rt_mask);
 }
 
@@ -649,8 +642,8 @@ emit_vs_uniforms(struct grate_context *context)
       len = constbuf->buffer_size / 4;
       assert(len < 256 * 4);
 
-      grate_stream_push(stream, host1x_opcode_imm(TGR3D_VP_UPLOAD_CONST_ID, 0));
-      grate_stream_push(stream, host1x_opcode_nonincr(TGR3D_VP_UPLOAD_CONST, len));
+      grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_VPE_CONST_OFFSET, 0));
+      grate_stream_push(stream, host1x_opcode_nonincr(REG_TGR3D_VPE_CONST_DATA, len));
       grate_stream_push_words(stream, constbuf->user_buffer, len, 0);
    }
 }
@@ -665,26 +658,29 @@ static void
 emit_program(struct grate_context *context)
 {
    struct grate_stream *stream = &context->gr3d->stream;
+   uint32_t cull_face_linker_setup;
+
 
    emit_shader(stream, &context->vshader->blob);
    emit_shader(stream, &context->fshader->blob);
 
-   uint32_t cull_face_linker_setup = TGR3D_VAL(CULL_FACE_LINKER_SETUP,
-                                               UNK_18_31, 0x2e38);
+   cull_face_linker_setup = TGR3D_SU_PARAM_SUBPIX_XOFF(0x38) |
+                            TGR3D_SU_PARAM_SUBPIX_YOFF(0x38) |
+                            TGR3D_SU_PARAM_TRANSPOSE_XY(TGR3D_STATE_DISABLED) |
+                            TGR3D_SU_PARAM_CLIP_ENABLE(TGR3D_STATE_ENABLED);
 
    /* depends on cull-face */
    cull_face_linker_setup |= context->rast->cull_face[context->y_invert];
 
    /* depends on linking */
    struct grate_fp_info *info = &context->fshader->info;
-   cull_face_linker_setup |= TGR3D_VAL(CULL_FACE_LINKER_SETUP,
-                                       LINKER_INST_COUNT,
-                                       0 < info->num_inputs ? (info->num_inputs - 1) : 0);
+   cull_face_linker_setup |= TGR3D_SU_PARAM_LAST_INST(0 < info->num_inputs ?
+                                                      (info->num_inputs - 1) : 0);
 
    uint32_t linker_insts[3 + info->num_inputs * 2];
-   linker_insts[0] = host1x_opcode_incr(TGR3D_CULL_FACE_LINKER_SETUP, 1);
+   linker_insts[0] = host1x_opcode_incr(REG_TGR3D_SU_PARAM, 1);
    linker_insts[1] = cull_face_linker_setup;
-   linker_insts[2] = host1x_opcode_incr(TGR3D_LINKER_INSTRUCTION(0), info->num_inputs * 2);
+   linker_insts[2] = host1x_opcode_incr(REG_TGR3D_SU_INST_EVEN(0), info->num_inputs * 2);
 
    for (int i = 0; i < info->num_inputs; ++i) {
       linker_insts[3 + i * 2] = info->inputs[i].src;
