@@ -5,13 +5,13 @@ cd "$(dirname "$0")"
 
 source ./my_common.sh
 
-# gnu2 tlsdesc is broken in binutils
-export CFLAGS="$CFLAGS -mtls-dialect=gnu"
-export CXXFLAGS="$CXXFLAGS -mtls-dialect=gnu"
-
 EXTRA_ARGS=""
 if [[ -f "/sys/devices/soc0/family" ]] && [[ "$(cat /sys/devices/soc0/family)" = "Tegra" ]]; then
 	echo "Tegra! skipping drm-shim";
+
+	# gnu2 tlsdesc is broken in binutils
+	export CFLAGS="$CFLAGS -mtls-dialect=gnu"
+	export CXXFLAGS="$CXXFLAGS -mtls-dialect=gnu"
 else
 	EXTRA_ARGS="${EXTRA_ARGS} -Dtools=drm-shim,grate"
 fi
