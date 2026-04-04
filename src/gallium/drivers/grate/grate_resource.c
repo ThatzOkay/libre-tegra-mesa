@@ -8,6 +8,7 @@
 #include "util/u_inlines.h"
 
 #include "grate_common.h"
+#include "grate_bo.h"
 #include "grate_context.h"
 #include "grate_resource.h"
 #include "grate_screen.h"
@@ -15,8 +16,7 @@
 #include "host1x01_hardware.h"
 #include "tgr_3d.xml.h"
 
-#include "opentegra_drm.h"
-#include "opentegra_lib.h"
+#include "tegra.h"
 
 /*
  * XXX Required to access winsys_handle internals. Should go away in favour
@@ -34,29 +34,25 @@ grate_resource_get_handle(struct pipe_screen *pscreen,
                           unsigned usage)
 {
    struct grate_resource *resource;
-   int err;
+   int ret;
 
    if (presource->target == PIPE_BUFFER)
       return false;
 
    resource = grate_resource(presource);
 
-   if (handle->type == WINSYS_HANDLE_TYPE_SHARED) {
-      err = drm_tegra_bo_get_name(resource->bo, &handle->handle);
-      if (err < 0) {
-         fprintf(stderr, "drm_tegra_bo_get_name() failed: %d\n", err);
-         return false;
-      }
-   } else if (handle->type == WINSYS_HANDLE_TYPE_KMS) {
-      err = drm_tegra_bo_get_handle(resource->bo, &handle->handle);
-      if (err < 0) {
-         fprintf(stderr, "drm_tegra_bo_get_handle() failed: %d\n", err);
+   if (handle->type == WINSYS_HANDLE_TYPE_KMS) {
+      ret = grate_bo_get_handle(resource->bo, &handle->handle);
+      if (ret < 0) {
+         fprintf(stderr, "grate_bo_get_handle() failed: %d\n", ret);
          return false;
       }
    } else if (handle->type == WINSYS_HANDLE_TYPE_FD) {
-      err = drm_tegra_bo_to_dmabuf(resource->bo, &handle->handle);
-      if (err < 0) {
-         fprintf(stderr, "drm_tegra_bo_get_handle() failed: %d\n", err);
+      ret = grate_bo_export(resource->bo, 0);
+      if (0 < ret) {
+         handle->handle = ret;
+      } else {
+         fprintf(stderr, "grate_bo_export() failed: %d\n", ret);
          return false;
       }
    } else {
@@ -74,7 +70,7 @@ grate_resource_destroy(struct pipe_screen *pscreen,
 {
    struct grate_resource *resource = grate_resource(presource);
 
-   drm_tegra_bo_unref(resource->bo);
+   grate_bo_unref(resource->bo);
    FREE(resource);
 }
 
@@ -97,7 +93,7 @@ grate_resource_transfer_map(struct pipe_context *pcontext,
    if (!ptrans)
       return NULL;
 
-   if (drm_tegra_bo_map(resource->bo, &ret))
+   if (grate_bo_map(resource->bo, &ret))
       return NULL;
 
    memset(ptrans, 0, sizeof(*ptrans));
@@ -130,7 +126,7 @@ grate_resource_transfer_unmap(struct pipe_context *pcontext,
 {
    struct grate_context *context = grate_context(pcontext);
 
-   drm_tegra_bo_unmap(grate_resource(transfer->resource)->bo);
+   grate_bo_unmap(grate_resource(transfer->resource)->bo);
 
    pipe_resource_reference(&transfer->resource, NULL);
    slab_free(&context->transfer_pool, transfer);
@@ -173,7 +169,6 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
    struct grate_screen *screen = grate_screen(pscreen);
    struct grate_resource *resource;
    uint32_t flags = 0, height, size;
-   int err;
 
    resource = CALLOC_STRUCT(grate_resource);
    if (!resource)
@@ -207,9 +202,9 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
 
    size = resource->pitch * height;
 
-   err = drm_tegra_bo_new(&resource->bo, screen->drm, flags, size);
-   if (err < 0) {
-      fprintf(stderr, "drm_tegra_bo_new() failed: %d\n", err);
+   resource->bo = grate_bo_alloc(screen->drm, size, flags);
+   if (!resource->bo) {
+      fprintf(stderr, "grate_bo_alloc() failed\n");
       return NULL;
    }
 
@@ -224,7 +219,7 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
 {
    struct grate_screen *screen = grate_screen(pscreen);
    struct grate_resource *resource;
-   int err, format;
+   int format;
 
    resource = CALLOC_STRUCT(grate_resource);
    if (!resource)
@@ -235,13 +230,19 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
    pipe_reference_init(&resource->b.reference, 1);
    resource->b.screen = pscreen;
 
-   err = drm_tegra_bo_from_name(&resource->bo, screen->drm,
-                                handle->handle, 0);
-   if (err < 0) {
-      fprintf(stderr, "drm_tegra_bo_from_name() failed: %d\n", err);
-      FREE(resource);
-      return NULL;
+   switch (handle->type) {
+   case WINSYS_HANDLE_TYPE_FD:
+      resource->bo = grate_bo_import(screen->drm, handle->handle);
+      if (!resource->bo) {
+         fprintf(stderr, "grate_bo_import() failed\n");
+         goto fail;
+      }
+      break;
+   default:
+      UNREACHABLE("invalid winsys handle type");
    }
+   if (!resource->bo || handle->offset != 0)
+      goto fail;
 
    resource->pitch = handle->stride;
 
@@ -250,6 +251,10 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
    resource->format = format;
 
    return &resource->b;
+   
+fail:
+   FREE(resource);
+   return NULL;
 }
 
 void
@@ -291,8 +296,6 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
       fprintf(stderr, "grate_stream_begin() failed: %d\n", err);
       return;
    }
-
-   grate_stream_push_setclass(&gr2d->stream, HOST1X_CLASS_GR2D);
 
    grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x009, 0x9));
    grate_stream_push(&gr2d->stream, 0x0000003a);            /* 0x009 - trigger */
@@ -378,8 +381,6 @@ fill(struct grate_channel *gr2d,
       fprintf(stderr, "grate_stream_begin() failed: %d\n", err);
       return -1;
    }
-
-   grate_stream_push_setclass(&gr2d->stream, HOST1X_CLASS_GR2D);
 
    grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x09, 0x09));
    grate_stream_push(&gr2d->stream, 0x0000003a);           /* 0x009 - trigger */
@@ -497,7 +498,7 @@ grate_clear_depth_stencil(struct pipe_context *pipe,
 static void
 grate_flush_resource(struct pipe_context *ctx, struct pipe_resource *resource)
 {
-   grate_unimplemented();
+   //TODO grate_unimplemented();
 }
 
 void

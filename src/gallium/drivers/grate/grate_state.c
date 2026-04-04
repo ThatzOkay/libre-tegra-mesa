@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdio.h>
 #include <math.h>
 
@@ -36,51 +37,50 @@ grate_set_constant_buffer(struct pipe_context *pcontext, enum mesa_shader_stage 
    util_copy_constant_buffer(&context->constant_buffer[shader], buffer);
 }
 
+static void grate_add_render_target(struct grate_context *context,
+                                    const struct pipe_surface *ref) 
+{
+   if (!ref->texture) {
+      fprintf(stderr, "%s: texture at %p null!", __func__, ref);
+      assert(0);
+      return;
+   }
+   if (context->framebuffer.num_rts >= context->base.screen->caps.max_render_targets) {
+      fprintf(stderr, "%s: Reached max render targets!", __func__);
+      assert(0);
+      return;
+   }
+   struct grate_resource *res = grate_resource(ref->texture);
+   uint32_t rt_params;
+   
+   rt_params  = TGR3D_VAL(RT_PARAMS, FORMAT, res->format);
+   rt_params |= TGR3D_VAL(RT_PARAMS, PITCH, res->pitch);
+   rt_params |= TGR3D_BOOL(RT_PARAMS, TILED, res->tiled);
+   
+   context->framebuffer.rt_params[context->framebuffer.num_rts] = rt_params;
+   context->framebuffer.rt_bos[context->framebuffer.num_rts] = res->bo;
+   context->framebuffer.rt_mask |= 1 << context->framebuffer.num_rts;
+   context->framebuffer.num_rts++;
+}
+
 static void
 grate_set_framebuffer_state(struct pipe_context *pcontext,
                             const struct pipe_framebuffer_state *framebuffer)
 {
    struct grate_context *context = grate_context(pcontext);
    struct pipe_framebuffer_state *cso = &context->framebuffer.base;
-   unsigned int i;
-   uint32_t mask = 0;
-
-   if (framebuffer->zsbuf.texture) {
-      struct grate_resource *res = grate_resource(framebuffer->zsbuf.texture);
-      uint32_t rt_params;
-
-      rt_params  = TGR3D_VAL(RT_PARAMS, FORMAT, res->format);
-      rt_params |= TGR3D_VAL(RT_PARAMS, PITCH, res->pitch);
-      rt_params |= TGR3D_BOOL(RT_PARAMS, TILED, res->tiled);
-
-      context->framebuffer.rt_params[0] = rt_params;
-      context->framebuffer.bos[0] = res->bo;
-      mask |= 1;
-   } else {
-      context->framebuffer.rt_params[0] = 0;
-      context->framebuffer.bos[0] = NULL;
-   }
+   context->framebuffer.rt_mask = 0;
+   context->framebuffer.num_rts = 0;
 
    util_copy_framebuffer_state(cso, framebuffer);
 
-   for (i = 0; i < framebuffer->nr_cbufs; i++) {
-      if (!framebuffer->cbufs[i].texture)
-         continue;
-      const struct pipe_surface *ref = &framebuffer->cbufs[i];
-      struct grate_resource *res = grate_resource(ref->texture);
-      uint32_t rt_params;
-
-      rt_params  = TGR3D_VAL(RT_PARAMS, FORMAT, res->format);
-      rt_params |= TGR3D_VAL(RT_PARAMS, PITCH, res->pitch);
-      rt_params |= TGR3D_BOOL(RT_PARAMS, TILED, res->tiled);
-
-      context->framebuffer.rt_params[1 + i] = rt_params;
-      context->framebuffer.bos[1 + i] = res->bo;
-      mask |= 1 << (1 + i);
+   for (unsigned int i = 0; i < framebuffer->nr_cbufs; i++) {
+      grate_add_render_target(context, &framebuffer->cbufs[i]);
    }
-
-   context->framebuffer.num_rts = 1 + i;
-   context->framebuffer.mask = mask;
+   
+   if (framebuffer->zsbuf.texture) {
+      grate_add_render_target(context, &framebuffer->zsbuf);
+   }
 
    /* prepare the scissor-registers for the non-scissor case */
    context->no_scissor[0]  = host1x_opcode_incr(TGR3D_SCISSOR_HORIZ, 2);
@@ -117,7 +117,7 @@ grate_set_viewport_states(struct pipe_context *pcontext,
    static const float zeps = powf(2.0f, -21);
    unsigned int hw_scale;
 
-   if (context->soc_id == DRM_TEGRA114_SOC)
+   if (context->drm->soc_id == DRM_TEGRA_SOC_T114)
       hw_scale = 0xFFFFFF;
    else
       hw_scale = 0xFFFFF;
@@ -427,7 +427,7 @@ grate_create_zsa_state(struct pipe_context *pcontext,
    so->commands[1] = depth_test;
    so->num_commands = 2;
 
-   if (context->soc_id == DRM_TEGRA114_SOC) {
+   if (context->drm->soc_id == DRM_TEGRA_SOC_T114) {
       so->commands[2] = host1x_opcode_incr(0xe45, 1);
       so->commands[3] = depth_test;
       so->num_commands = 4;
@@ -599,11 +599,12 @@ emit_render_targets(struct grate_context *context)
    }
 
    grate_stream_push(stream, host1x_opcode_incr(TGR3D_RT_PTR(0), fb->num_rts));
-   for (i = 0; i < fb->num_rts; ++i)
-      grate_stream_push_reloc(stream, fb->bos[i], 0);
+   for (i = 0; i < fb->num_rts; ++i) {
+      grate_stream_push_reloc(stream, fb->rt_bos[i], 0);
+   }
 
    grate_stream_push(stream, host1x_opcode_incr(TGR3D_RT_ENABLE, 1));
-   grate_stream_push(stream, fb->mask);
+   grate_stream_push(stream, fb->rt_mask);
 }
 
 static void

@@ -59,6 +59,14 @@ static ioctl_fn_t driver_ioctls[] = {
    [DRM_TEGRA_GEM_GET_TILING] = tegra_ioctl_noop,
    [DRM_TEGRA_GEM_SET_FLAGS] = tegra_ioctl_noop,
    [DRM_TEGRA_GEM_GET_FLAGS] = tegra_ioctl_noop,
+   [DRM_COMMAND_BASE + 0x10] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_CHANNEL_OPEN
+   [DRM_COMMAND_BASE + 0x11] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_CHANNEL_CLOSE
+   [DRM_COMMAND_BASE + 0x12] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_CHANNEL_MAP
+   [DRM_COMMAND_BASE + 0x13] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_CHANNEL_UNMAP
+   [DRM_COMMAND_BASE + 0x14] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_CHANNEL_SUBMIT
+   [DRM_COMMAND_BASE + 0x20] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_SYNCPOINT_ALLOCATE
+   [DRM_COMMAND_BASE + 0x21] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_SYNCPOINT_FREE
+   [DRM_COMMAND_BASE + 0x22] = tegra_ioctl_noop, //DRM_IOCTL_TEGRA_SYNCPOINT_WAIT
 };
 
 void

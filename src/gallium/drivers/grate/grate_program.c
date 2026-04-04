@@ -11,6 +11,7 @@
 #include "tgsi/tgsi_scan.h"
 #include "tgsi/tgsi_transform.h"
 
+#include "grate_device.h"
 #include "host1x01_hardware.h"
 #include "grate_common.h"
 #include "grate_context.h"
@@ -167,8 +168,8 @@ grate_create_fs_state(struct pipe_context *pcontext,
 {
    grate_trace();
    struct grate_context *context = grate_context(pcontext);
-   struct grate_fragment_shader_state *so =
-      CALLOC_STRUCT(grate_fragment_shader_state);
+   struct grate_fragment_shader_state *so = CALLOC_STRUCT(grate_fragment_shader_state);
+   enum drm_tegra_soc_id soc_id = context->drm->soc_id;
 
    if (!so)
       return NULL;
@@ -216,7 +217,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
    PUSH(host1x_opcode_incr(TGR3D_FP_PSEQ_DW_CFG, 1));
    PUSH(0x00000040);
 
-   if (context->soc_id == DRM_TEGRA114_SOC) {
+   if (soc_id == DRM_TEGRA_SOC_T114) {
       /* XXX: maybe not needed */
       PUSH(host1x_opcode_incr(0x547, 0x0002));
       PUSH(0xc0000000);
@@ -251,7 +252,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
 
    PUSH(host1x_opcode_nonincr(TGR3D_FP_UPLOAD_ALU_SCHED, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link) {
-      if (context->soc_id == DRM_TEGRA114_SOC)
+      if (soc_id == DRM_TEGRA_SOC_T114)
          PUSH(grate_fp_pack_alu_sched_t114(&instr->alu_sched));
       else
          PUSH(grate_fp_pack_sched(&instr->alu_sched));

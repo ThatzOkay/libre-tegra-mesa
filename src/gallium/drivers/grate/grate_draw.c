@@ -13,6 +13,7 @@
 #include "grate_program.h"
 #include "grate_resource.h"
 #include "grate_state.h"
+#include "grate_device.h"
 
 #include "tgr_3d.xml.h"
 #include "host1x01_hardware.h"
@@ -51,8 +52,7 @@ static int
 grate_init_state(struct grate_context *context)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-
-   grate_stream_push_setclass(stream, HOST1X_CLASS_GR3D);
+   enum drm_tegra_soc_id soc_id = context->drm->soc_id;
 
    /* Tegra114 specific stuff */
    grate_stream_push(stream, host1x_opcode_imm(0xe44, 0x0000));
@@ -221,7 +221,7 @@ grate_init_state(struct grate_context *context)
 
    grate_stream_push(stream, host1x_opcode_imm(TGR3D_FP_PSEQ_UPLOAD_INST_BUFFER_FLUSH, 0));
 
-   if (context->soc_id == DRM_TEGRA114_SOC)
+   if (soc_id == DRM_TEGRA_SOC_T114)
       grate_stream_push(stream, host1x_opcode_imm(0x501, (0x2200 << 16) | 0x7));
    else
       grate_stream_push(stream, host1x_opcode_imm(0x501, 0x7));
@@ -271,7 +271,7 @@ grate_init_state(struct grate_context *context)
    grate_stream_push(stream, host1x_opcode_imm(0xe28, 0));
    grate_stream_push(stream, host1x_opcode_imm(0xe29, 0));
 
-   if (context->soc_id == DRM_TEGRA114_SOC) {
+   if (soc_id == DRM_TEGRA_SOC_T114) {
       grate_stream_push(stream, host1x_opcode_imm(0x41a, 0xa00));
       grate_stream_push(stream, host1x_opcode_imm(0x416, 0x140));
    }
@@ -302,7 +302,7 @@ grate_draw_vbo(struct pipe_context *pcontext,
 
    err = grate_stream_begin(stream);
    if (err < 0) {
-      fprintf(stderr, "grate_stream_begin() failed: %d\n", err);
+      fprintf(stderr, "%s: grate_stream_begin() failed: %d\n", __func__, err);
       return;
    }
 
@@ -324,7 +324,7 @@ grate_draw_vbo(struct pipe_context *pcontext,
       unsigned index_offset = 0;
       if (info->has_user_indices) {
          if (!util_upload_index_buffer(pcontext, info, draws, &index_buffer, &index_offset, 64)) {
-            fprintf(stderr, "util_upload_index_buffer() failed\n");
+            fprintf(stderr, "%s: util_upload_index_buffer() failed\n", __func__);
             return;
          }
       } else

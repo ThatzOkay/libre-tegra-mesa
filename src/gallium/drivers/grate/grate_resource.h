@@ -6,7 +6,7 @@
 
 struct grate_resource {
    struct pipe_resource b;
-   struct drm_tegra_bo *bo;
+   struct grate_bo *bo;
    unsigned int pitch;
    unsigned int tiled : 1;
    unsigned int format : 5;
