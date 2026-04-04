@@ -25,12 +25,16 @@
  *    Arto Merilainen <amerilainen@nvidia.com>
  */
 
+#include "drm-uapi/tegra_drm.h"
+#include "util/set.h"
+#include "util/u_dynarray.h"
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
 #include <assert.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -41,11 +45,12 @@
 
 #include "host1x01_hardware.h"
 #include "hw_host1x01_uclass.h"
+#include "tegra_private.h"
+#include "tegra.h"
+#include "grate_common.h"
+#include "grate_device.h"
+#include "grate_bo.h"
 #include "grate_stream.h"
-
-#define ErrorMsg(fmt, args...) \
-    fprintf(stderr, "%s:%d/%s(): " fmt, \
-            __FILE__, __LINE__, __func__, ##args)
 
 /*
  * grate_stream_create(channel)
@@ -57,16 +62,23 @@
  */
 
 int
-grate_stream_create(struct drm_tegra *drm,
+grate_stream_create(struct grate_device *drm,
                     struct drm_tegra_channel *channel,
                     struct grate_stream *stream,
                     uint32_t words_num)
 {
+   int ret = 0;
    stream->status    = GRATE_STREAM_FREE;
    stream->channel   = channel;
    stream->num_words = words_num;
+   
+   ret = drm_tegra_syncpoint_new(stream->channel->drm, &stream->syncpt);
+   if (ret < 0) {
+      fprintf(stderr, "%s: drm_tegra_syncpoint_new() failed %d\n", __func__, ret);
+      return ret;
+   }
 
-   return 0;
+   return ret;
 }
 
 /*
@@ -82,6 +94,7 @@ grate_stream_destroy(struct grate_stream *stream)
       return;
 
    drm_tegra_job_free(stream->job);
+   drm_tegra_syncpoint_free(stream->syncpt);
 }
 
 /*
@@ -96,7 +109,6 @@ grate_stream_destroy(struct grate_stream *stream)
 int
 grate_stream_flush(struct grate_stream *stream)
 {
-   struct drm_tegra_fence *fence;
    int result = 0;
 
    if (!stream)
@@ -112,22 +124,24 @@ grate_stream_flush(struct grate_stream *stream)
       goto cleanup;
    }
 
-   result = drm_tegra_job_submit(stream->job, &fence);
+   result = drm_tegra_job_submit(stream->job, NULL);
    if (result != 0) {
-      ErrorMsg("drm_tegra_job_submit() failed %d\n", result);
+      grate_msg("drm_tegra_job_submit() failed %d\n", result);
       result = -1;
       goto cleanup;
    }
 
-   result = drm_tegra_fence_wait_timeout(fence, 1000);
+   /*
+   result = drm_tegra_job_wait(stream->job, 1000000);
    if (result != 0) {
-      ErrorMsg("drm_tegra_fence_wait_timeout() failed %d\n", result);
+      grate_msg("drm_tegra_job_wait() failed %d\n", result);
       result = -1;
    }
-
-   drm_tegra_fence_free(fence);
+   */
 
 cleanup:
+   assert(result == 0);
+
    drm_tegra_job_free(stream->job);
 
    stream->job = NULL;
@@ -137,18 +151,7 @@ cleanup:
 }
 
 /*
- * grate_stream_begin(stream, num_words, fence, num_fences, num_syncpt_incrs,
- *          num_relocs, class_id)
- *
- * Start constructing a stream.
- *  - num_words refer to the maximum number of words the stream can contain.
- *  - fence is a pointer to a table that contains syncpoint preconditions
- *    before the stream execution can start.
- *  - num_fences indicate the number of elements in the fence table.
- *  - num_relocs indicate the number of memory references in the buffer.
- *  - class_id refers to the class_id that is selected in the beginning of a
- *    stream. If no class id is given, the default class id (=usually the
- *    client device's class) is selected.
+ * grate_stream_begin(stream)
  *
  * This function verifies that the current buffer has enough room for holding
  * the whole stream (this is computed using num_words and num_relocs). The
@@ -162,34 +165,87 @@ grate_stream_begin(struct grate_stream *stream)
 
    /* check stream and its state */
    if (!(stream && stream->status == GRATE_STREAM_FREE)) {
-      ErrorMsg("Stream status isn't FREE\n");
+      grate_msg("Stream status isn't FREE\n");
       return -1;
    }
 
-   ret = drm_tegra_job_new(&stream->job, stream->channel);
+   ret = drm_tegra_job_new(stream->channel, &stream->job);
    if (ret != 0) {
-      ErrorMsg("drm_tegra_job_new() failed %d\n", ret);
+      grate_msg("drm_tegra_job_new() failed %d\n", ret);
       return -1;
    }
 
-   ret = drm_tegra_pushbuf_new(&stream->buffer.pushbuf, stream->job);
+   ret = drm_tegra_job_get_pushbuf(stream->job, &stream->buffer.pushbuf);
    if (ret != 0) {
-      ErrorMsg("drm_tegra_pushbuf_new() failed %d\n", ret);
+      grate_msg("drm_tegra_job_get_pushbuf() failed %d\n", ret);
       drm_tegra_job_free(stream->job);
       return -1;
    }
 
-   ret = drm_tegra_pushbuf_prepare(stream->buffer.pushbuf, stream->num_words);
+   ret = drm_tegra_pushbuf_begin(stream->buffer.pushbuf, stream->num_words, &stream->buffer.ptr);
    if (ret != 0) {
-      ErrorMsg("drm_tegra_pushbuf_prepare() failed %d\n", ret);
+      grate_msg("drm_tegra_pushbuf_prepare() failed %d\n", ret);
       drm_tegra_job_free(stream->job);
       return -1;
    }
+   
+   /*
+   ret = drm_tegra_pushbuf_sync_cond(
+      stream->buffer.pushbuf,
+      &stream->buffer.ptr,
+      stream->syncpt,
+      DRM_TEGRA_SYNC_COND_OP_DONE
+   );
+   if (ret < 0) {
+      grate_msg("drm_tegra_pushbuf_sync_cond() failed: %d\n", -ret);
+      return 1;
+   }
+   */
 
-   stream->class_id = 0;
    stream->status = GRATE_STREAM_CONSTRUCT;
 
    return 0;
+}
+
+static int
+__grate_stream_get_channel_mapping(struct grate_stream *stream,
+                                   struct grate_bo *bo,
+                                   uint32_t flags,
+                                   struct drm_tegra_mapping **mapping)
+{
+   struct drm_tegra_mapping* bo_mapping = NULL;
+   int ret = 0;
+   if (!stream || !bo || !mapping) {
+       assert(0);
+       return -EINVAL;
+   }
+   assert((flags & !DRM_TEGRA_CHANNEL_MAP_READ_WRITE) == 0);
+   assert((flags & DRM_TEGRA_CHANNEL_MAP_READ_WRITE) != 0);
+
+   util_dynarray_foreach(&bo->channel_maps, struct drm_tegra_mapping *, mapping) {
+      if ((*mapping)->channel == stream->channel) {
+         uint32_t mapping_flags = (*mapping)->flags;
+         if (mapping_flags == flags) {
+            bo_mapping = *mapping;
+         }
+      }
+   }
+  
+   if (!bo_mapping) {
+      ret = drm_tegra_channel_map(stream->channel, bo, flags, &bo_mapping);
+      if (ret < 0) {
+         stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
+         grate_msg("drm_tegra_channel_map() failed: %d\n", ret);
+         return ret;
+      }
+      
+      util_dynarray_append(&bo->channel_maps, struct drm_tegra_mapping *, bo_mapping);
+   }
+   
+   if (ret == 0)
+      *mapping = bo_mapping;
+   
+   return ret;
 }
 
 /*
@@ -200,25 +256,30 @@ grate_stream_begin(struct grate_stream *stream)
 
 int
 grate_stream_push_reloc(struct grate_stream *stream,
-                        struct drm_tegra_bo *bo,
+                        struct grate_bo *bo,
                         unsigned offset)
 {
    int ret;
+   struct drm_tegra_mapping *mapping = NULL;
 
    if (!(stream && stream->status == GRATE_STREAM_CONSTRUCT)) {
-      ErrorMsg("Stream status isn't CONSTRUCT\n");
+      grate_msg("Stream status isn't CONSTRUCT\n");
       return -1;
    }
+   
+   ret = __grate_stream_get_channel_mapping(stream, bo, DRM_TEGRA_CHANNEL_MAP_READ_WRITE, &mapping);
+   if (ret < 0)
+      return ret;
 
    ret = drm_tegra_pushbuf_relocate(stream->buffer.pushbuf,
-                                    bo, offset, 0);
-   if (ret != 0) {
+                                    &stream->buffer.ptr, mapping, offset, 0, 0);
+   if (ret < 0) {
       stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-      ErrorMsg("drm_tegra_pushbuf_relocate() failed %d\n", ret);
-      return -1;
+      grate_msg("drm_tegra_pushbuf_relocate() failed %d\n", ret);
+      return ret;
    }
 
-   return 0;
+   return ret;
 }
 
 /*
@@ -230,47 +291,14 @@ grate_stream_push_reloc(struct grate_stream *stream,
 int
 grate_stream_push(struct grate_stream *stream, uint32_t word)
 {
-   int ret;
-
    if (!(stream && stream->status == GRATE_STREAM_CONSTRUCT)) {
-      ErrorMsg("Stream status isn't CONSTRUCT\n");
+      grate_msg("Stream status isn't CONSTRUCT\n");
       return -1;
    }
 
-   ret = drm_tegra_pushbuf_prepare(stream->buffer.pushbuf, 1);
-   if (ret != 0) {
-      stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-      ErrorMsg("drm_tegra_pushbuf_prepare() failed %d\n", ret);
-      return -1;
-   }
-
-   *stream->buffer.pushbuf->ptr++ = word;
+   *stream->buffer.ptr++ = word;
 
    return 0;
-}
-
-/*
- * grate_stream_push_setclass(stream, class_id)
- *
- * Push "set class" opcode to the stream. Do nothing if the class is already
- * active
- */
-
-int
-grate_stream_push_setclass(struct grate_stream *stream,
-                           enum host1x_class class_id)
-{
-   int result;
-
-   if (stream->class_id == class_id)
-      return 0;
-
-   result = grate_stream_push(stream, host1x_opcode_setclass(class_id, 0, 0));
-
-   if (result == 0)
-      stream->class_id = class_id;
-
-   return result;
 }
 
 /*
@@ -279,22 +307,40 @@ grate_stream_push_setclass(struct grate_stream *stream,
  * Mark end of stream. This function pushes last syncpoint increment for
  * marking end of stream.
  */
-
+ 
 int
 grate_stream_end(struct grate_stream *stream)
 {
    int ret;
 
    if (!(stream && stream->status == GRATE_STREAM_CONSTRUCT)) {
-      ErrorMsg("Stream status isn't CONSTRUCT\n");
+      grate_msg("Stream status isn't CONSTRUCT\n");
       return -1;
    }
+   
+   ret = drm_tegra_pushbuf_sync_cond(
+      stream->buffer.pushbuf,
+      &stream->buffer.ptr,
+      stream->syncpt,
+      DRM_TEGRA_SYNC_COND_IMMEDIATE
+   );
+   if (ret < 0) {
+      grate_msg("drm_tegra_pushbuf_sync_cond() failed: %d\n", -ret);
+      return 1;
+   }
+   
+   if (stream->buffer.ptr >= stream->buffer.pushbuf->end) {
+      grate_msg("ptr overflow %p end %p\n", stream->buffer.ptr, stream->buffer.pushbuf->end);
+      return 1;
+   }
+   assert(stream->buffer.pushbuf->start < stream->buffer.ptr);
 
-   ret = drm_tegra_pushbuf_sync(stream->buffer.pushbuf,
-                                DRM_TEGRA_SYNCPT_COND_OP_DONE);
+   ret = drm_tegra_pushbuf_end(stream->buffer.pushbuf,
+                                stream->buffer.ptr);
+   stream->buffer.ptr = 0;
    if (ret != 0) {
       stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-      ErrorMsg("drm_tegra_pushbuf_sync() failed %d\n", ret);
+      grate_msg("drm_tegra_pushbuf_sync() failed %d\n", ret);
       return -1;
    }
 
@@ -311,7 +357,7 @@ grate_stream_end(struct grate_stream *stream)
  */
 
 struct grate_reloc
-grate_reloc(const void *var_ptr, struct drm_tegra_bo *bo,
+grate_reloc(const void *var_ptr, struct grate_bo *bo,
             uint32_t offset, uint32_t var_offset)
 {
    struct grate_reloc reloc = {var_ptr, bo, offset, var_offset};
@@ -330,52 +376,43 @@ int grate_stream_push_words(struct grate_stream *stream, const void *addr,
                             unsigned words, int num_relocs, ...)
 {
    struct grate_reloc reloc_arg;
+   struct drm_tegra_mapping *mapping;
    va_list ap;
    uint32_t *pushbuf_ptr;
-   int ret;
+   int ret = 0;
 
    if (!(stream && stream->status == GRATE_STREAM_CONSTRUCT)) {
-      ErrorMsg("Stream status isn't CONSTRUCT\n");
-      return -1;
-   }
-
-   ret = drm_tegra_pushbuf_prepare(stream->buffer.pushbuf, words);
-   if (ret != 0) {
-      stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-      ErrorMsg("drm_tegra_pushbuf_prepare() failed %d\n", ret);
-      return -1;
-   }
-
-   /* Class id should be set explicitly, for simplicity. */
-   if (stream->class_id == 0) {
-      stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-      ErrorMsg("HOST1X class not specified\n");
+      grate_msg("Stream status isn't CONSTRUCT\n");
       return -1;
    }
 
    /* Copy the contents */
-   pushbuf_ptr = stream->buffer.pushbuf->ptr;
-   memcpy(pushbuf_ptr, addr, words * sizeof(uint32_t));
+   memcpy(stream->buffer.ptr, addr, words * sizeof(uint32_t));
 
    /* Copy relocs */
    va_start(ap, num_relocs);
    for (; num_relocs; num_relocs--) {
       reloc_arg = va_arg(ap, struct grate_reloc);
 
-      stream->buffer.pushbuf->ptr  = pushbuf_ptr;
-      stream->buffer.pushbuf->ptr += reloc_arg.var_offset / sizeof(uint32_t);
+      pushbuf_ptr = stream->buffer.ptr + (reloc_arg.var_offset / sizeof(uint32_t));
 
-      ret = drm_tegra_pushbuf_relocate(stream->buffer.pushbuf, reloc_arg.bo,
-                                       reloc_arg.offset, 0);
+      mapping = NULL;
+      ret = __grate_stream_get_channel_mapping(stream, reloc_arg.bo, DRM_TEGRA_CHANNEL_MAP_READ_WRITE, &mapping);
+      if (ret < 0)
+         break;
+
+      ret = drm_tegra_pushbuf_relocate(stream->buffer.pushbuf,
+                                       &pushbuf_ptr, mapping,
+                                       reloc_arg.offset, 0, 0);
       if (ret != 0) {
          stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-         ErrorMsg("drm_tegra_pushbuf_relocate() failed %d\n", ret);
+         grate_msg("__grate_stream_get_channel_mapping() failed %d\n", ret);
          break;
       }
    }
    va_end(ap);
 
-   stream->buffer.pushbuf->ptr = pushbuf_ptr + words;
+   stream->buffer.ptr += words;
 
    return ret ? -1 : 0;
 }

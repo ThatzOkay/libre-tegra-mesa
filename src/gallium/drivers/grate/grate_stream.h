@@ -30,8 +30,7 @@
 
 #include <stdint.h>
 
-#include "class_ids.h"
-#include "opentegra_lib.h"
+#include "tegra.h"
 
 enum grate_stream_status {
    GRATE_STREAM_FREE,
@@ -42,29 +41,30 @@ enum grate_stream_status {
 
 struct grate_command_buffer {
    struct drm_tegra_pushbuf *pushbuf;
-};
+   uint32_t *ptr;
+}; 
 
 struct grate_stream {
    enum grate_stream_status status;
 
    struct drm_tegra_job *job;
    struct drm_tegra_channel *channel;
+   struct drm_tegra_syncpoint *syncpt;
 
    struct grate_command_buffer buffer;
    int num_words;
-   uint32_t class_id;
 };
 
 struct grate_reloc {
    const void *addr;
-   struct drm_tegra_bo *bo;
+   struct grate_bo *bo;
    uint32_t offset;
    unsigned var_offset;
 };
 
 /* Stream operations */
 int
-grate_stream_create(struct drm_tegra *drm,
+grate_stream_create(struct grate_device *drm,
                     struct drm_tegra_channel *channel,
                     struct grate_stream *stream,
                     uint32_t words_num);
@@ -84,15 +84,11 @@ int
 grate_stream_push(struct grate_stream *stream, uint32_t word);
 
 int
-grate_stream_push_setclass(struct grate_stream *stream,
-                           enum host1x_class class_id);
-
-int
 grate_stream_push_reloc(struct grate_stream *stream,
-                        struct drm_tegra_bo *bo, unsigned offset);
+                        struct grate_bo *bo, unsigned offset);
 
 struct grate_reloc
-grate_reloc(const void *var_ptr, struct drm_tegra_bo *bo,
+grate_reloc(const void *var_ptr, struct grate_bo *bo,
             uint32_t offset, uint32_t var_offset);
 
 int

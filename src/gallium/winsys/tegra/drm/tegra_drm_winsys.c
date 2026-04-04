@@ -26,9 +26,10 @@
 #include "util/os_file.h"
 #include "util/u_screen.h"
 
-#include "tegra/tegra_screen.h"
+#ifdef GALLIUM_GRATE
+#include "grate/grate_device.h"
 #include "grate/grate_screen.h"
-#include "grate/drm/opentegra_lib.h"
+#endif
 #include "tegra_drm_public.h"
 
 static struct pipe_screen *
@@ -38,8 +39,8 @@ tegra_or_grate_screen_create(int fd, const struct pipe_screen_config *config,
    bool is_grate = false;
 
 #ifdef GALLIUM_GRATE
-   is_grate = drm_tegra_get_soc_id() != DRM_TEGRA_UNKNOWN_SOC
-           && drm_tegra_get_soc_id() != DRM_TEGRA_INVALID_SOC;
+   is_grate = drm_tegra_get_soc_id() != DRM_TEGRA_SOC_UNKNOWN
+      && drm_tegra_get_soc_id() != DRM_TEGRA_SOC_INVALID;
 
    if (is_grate) {
       screen = grate_screen_create(fd);

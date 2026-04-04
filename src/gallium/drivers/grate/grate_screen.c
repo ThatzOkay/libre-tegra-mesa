@@ -4,15 +4,18 @@
 
 #include "drm-uapi/drm_fourcc.h"
 
+#include "tegra.h"
+
+#include "util/hash_table.h"
+#include "util/macros.h"
 #include "util/u_memory.h"
 #include "util/u_screen.h"
 
 #include "grate_common.h"
+#include "grate_device.h"
 #include "grate_context.h"
 #include "grate_resource.h"
 #include "grate_screen.h"
-
-#include "opentegra_lib.h"
 
 static const struct debug_named_value debug_options[] = {
    { "unimplemented", GRATE_DEBUG_UNIMPLEMENTED,
@@ -35,7 +38,7 @@ grate_screen_destroy(struct pipe_screen *pscreen)
 
    slab_destroy_parent(&screen->transfer_pool);
 
-   drm_tegra_close(screen->drm);
+   grate_device_close(screen->drm);
    FREE(screen);
 }
 
@@ -239,7 +242,8 @@ grate_screen_init_caps(struct grate_screen *screen)
    caps->fragment_shader_derivatives = true;
    caps->min_texel_offset = 0;
    caps->max_texel_offset = 0;
-   caps->max_render_targets = 8; // ???
+   //- 1 so one is reserved for zsbuf if PIPE_MAX_COLOR_BUFS ever increases
+   caps->max_render_targets = MIN2(PIPE_MAX_COLOR_BUFS, (TGR3D_MAX_RENDER_TARGETS - 1));
    caps->max_texture_2d_size = 2048;
    caps->max_texture_3d_levels = 0;
    caps->max_texture_cube_levels = 16; // ???
@@ -437,7 +441,6 @@ static const nir_shader_compiler_options grate_base_compiler_options = {
    .lower_bitops = true,
    .lower_extract_byte = true,
    .lower_extract_word = true,
-   .lower_fdiv = true,
    .lower_fsat = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
@@ -445,13 +448,14 @@ static const nir_shader_compiler_options grate_base_compiler_options = {
    .lower_flrp32 = true,
    .lower_flrp64 = true,
    .lower_fmod = true,
-   .lower_fpow = true,
+   .lower_fpow = true, // In hardware as of nv40
    .lower_uniforms_to_ubo = true,
    .lower_vector_cmp = true,
    .force_indirect_unrolling = nir_var_all,
    .force_indirect_unrolling_sampler = true,
    .max_unroll_iterations = 32,
-   */
+    */
+   .lower_fdiv = true,
    .no_integers = true,
 };
 
@@ -476,7 +480,6 @@ grate_screen_is_dmabuf_modifier_supported(struct pipe_screen *pscreen,
 struct pipe_screen *
 grate_screen_create(int fd)
 {
-   struct drm_tegra_channel *drm_channel;
    struct grate_screen *screen;
    int err;
 
@@ -488,22 +491,12 @@ grate_screen_create(int fd)
       return NULL;
 
    screen->fd = fd;
-   err = drm_tegra_new(&screen->drm, fd);
+   err = grate_device_new(fd, &screen->drm);
    if (err) {
-      fprintf(stderr, "drm_tegra_new err: %d\n", err);
+      fprintf(stderr, "grate_device_new err: %d\n", err);
       FREE(screen);
       return NULL;
    }
-
-   err = drm_tegra_channel_open(&drm_channel, screen->drm, DRM_TEGRA_GR3D);
-   if (err) {
-      fprintf(stderr, "drm_tegra_channel_open err: %d\n", err);
-      drm_tegra_close(screen->drm);
-      FREE(screen);
-      return NULL;
-   }
-
-   drm_tegra_channel_close(drm_channel);
 
    screen->base.destroy = grate_screen_destroy;
    screen->base.get_name = grate_screen_get_name;

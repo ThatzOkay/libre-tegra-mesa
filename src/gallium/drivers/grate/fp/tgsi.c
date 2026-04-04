@@ -138,7 +138,7 @@ emit_vMOV(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
 
    if (dst->File == TGSI_FILE_OUTPUT) {
       inst->dw.enable = 1;
-      inst->dw.index = 1 + dst->Index;
+      inst->dw.index = dst->Index;
       inst->dw.stencil_write = 0;
       inst->dw.src_regs = FP_DW_REGS_R2_R3; // hard-coded for now
    }
@@ -159,7 +159,8 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
       break;
 
    default:
-      printf("GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x\n", inst->Instruction.Opcode);
+      fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x\n", inst->Instruction.Opcode);
+      assert(0);
    }
 }
 

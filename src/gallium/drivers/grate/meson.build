@@ -19,16 +19,12 @@
 # SOFTWARE.
 
 files_libgrate = files(
-  'drm/opentegra_drm.h',
-  'drm/opentegra_lib.h',
-  'drm/private.h',
-  'drm/tegra.c',
-  'drm/tegra_bo_cache.c',
-  'drm/uapi_v1/channel.c',
-  'drm/uapi_v1/fence.c',
-  'drm/uapi_v1/job.c',
-  'drm/uapi_v1/pushbuf.c',
-  'drm/uapi_v2/job.c',
+  'drm/channel.c',
+  'drm/job.c',
+  'drm/tegra_private.h',
+  'drm/pushbuf.c',
+  'drm/syncpt.c',
+  'drm/tegra.h',
   'fp/fpir.h',
   'fp/pack.c',
   'fp/tgsi.c',
@@ -36,7 +32,6 @@ files_libgrate = files(
   'vp/pack.c',
   'vp/tgsi.c',
   'vp/vpir.h',
-  'class_ids.h',
   'host1x01_hardware.h',
   'hw_host1x01_uclass.h',
   'grate_common.h',
@@ -57,6 +52,10 @@ files_libgrate = files(
   'grate_stream.h',
   'grate_surface.c',
   'grate_surface.h',
+  'grate_bo.c',
+  'grate_bo.h',
+  'grate_device.c',
+  'grate_device.h',
 )
 
 inc_libgrate = include_directories('drm')

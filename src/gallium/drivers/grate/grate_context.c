@@ -5,6 +5,7 @@
 #include "util/u_upload_mgr.h"
 
 #include "grate_common.h"
+#include "grate_device.h"
 #include "grate_context.h"
 #include "grate_draw.h"
 #include "grate_program.h"
@@ -12,8 +13,6 @@
 #include "grate_screen.h"
 #include "grate_state.h"
 #include "grate_surface.h"
-
-#include "opentegra_lib.h"
 
 #include "host1x01_hardware.h"
 #include "tgr_3d.xml.h"
@@ -29,26 +28,39 @@ grate_channel_create(struct grate_context *context,
    struct grate_channel *channel;
    grate_trace();
 
-   err = drm_tegra_channel_open(&drm_channel, screen->drm, class);
-   if (err < 0)
+   err = drm_tegra_channel_open(screen->drm, class, &drm_channel);
+   if (err < 0) {
+      fprintf(stderr, "%s: drm_tegra_channel_open() failed %d\n", __func__, err);
       return err;
+   }
 
    channel = CALLOC_STRUCT(grate_channel);
-   if (!channel)
-      return -ENOMEM;
+   if (!channel) {
+      err = -ENOMEM;
+      goto err_channel;
+   }
 
    channel->context = context;
 
-   err = grate_stream_create(screen->drm, drm_channel, &channel->stream, 32768);
+   err = grate_stream_create(
+      screen->drm,
+      drm_channel,
+      &channel->stream,
+      32768
+   );
    if (err < 0) {
       FREE(channel);
-      drm_tegra_channel_close(drm_channel);
-      return err;
+      goto err_channel;
    }
 
    *channelp = channel;
 
    return 0;
+   
+err_channel:
+   drm_tegra_channel_close(drm_channel);
+   
+   return err;
 }
 
 static void
@@ -64,6 +76,7 @@ static void
 grate_context_destroy(struct pipe_context *pcontext)
 {
    struct grate_context *context = grate_context(pcontext);
+   grate_trace();
 
    slab_destroy_child(&context->transfer_pool);
 
@@ -77,7 +90,7 @@ grate_context_flush(struct pipe_context *pcontext,
                     struct pipe_fence_handle **pfence,
                     enum pipe_flush_flags flags)
 {
-   grate_unimplemented();
+   //TODO grate_unimplemented();
 }
 
 struct pipe_context *
@@ -92,8 +105,7 @@ grate_screen_context_create(struct pipe_screen *pscreen,
    if (!context)
       return NULL;
 
-   context->soc_id = drm_tegra_get_soc_id();
-
+   context->drm = screen->drm;
    context->base.screen = pscreen;
    context->base.priv = priv;
 

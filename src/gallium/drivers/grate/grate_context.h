@@ -6,15 +6,17 @@
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 
+#include "grate_common.h"
+#include "grate_device.h"
 #include "grate_state.h"
 #include "grate_stream.h"
 
 struct grate_framebuffer_state {
    struct pipe_framebuffer_state base;
    int num_rts;
-   struct drm_tegra_bo *bos[16];
-   uint32_t rt_params[16];
-   uint32_t mask;
+   struct grate_bo *rt_bos[TGR3D_MAX_RENDER_TARGETS];
+   uint32_t rt_params[TGR3D_MAX_RENDER_TARGETS];
+   uint32_t rt_mask;
 };
 
 struct grate_channel {
@@ -25,6 +27,7 @@ struct grate_channel {
 struct grate_context {
    struct pipe_context base;
 
+   struct grate_device *drm;
    struct grate_channel *gr2d;
    struct grate_channel *gr3d;
 
@@ -46,7 +49,6 @@ struct grate_context {
    uint32_t viewport[10];
    uint32_t guardband[4];
    bool y_invert;
-   enum drm_tegra_soc_id soc_id;
 };
 
 static inline struct grate_context *

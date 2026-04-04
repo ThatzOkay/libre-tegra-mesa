@@ -4,7 +4,7 @@
 #include "pipe/p_screen.h"
 #include "util/slab.h"
 
-struct drm_tegra;
+struct grate_device;
 
 extern uint32_t grate_debug;
 
@@ -18,7 +18,7 @@ struct grate_screen {
    struct slab_parent_pool transfer_pool;
 
    int fd;
-   struct drm_tegra *drm;
+   struct grate_device *drm;
 };
 
 static inline struct grate_screen *

@@ -22,31 +22,36 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <errno.h>
-#include <string.h>
+#ifndef __GRATE_BO_H__
+#define __GRATE_BO_H__ 1
 
-#include <xf86drm.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <util/u_dynarray.h>
+#include <util/sparse_array.h>
 
-#include "uapi_v1.h"
+struct grate_bo {
+    struct grate_device *drm;
+    uint32_t handle;
+    uint64_t offset;
+    uint32_t flags;
+    uint32_t size;
+    int32_t refcnt;
+    void *map;
+    
+    /* List of channel mappings where made for this BO, for cleanup */
+    struct util_dynarray channel_maps;
+};
 
-int drm_tegra_fence_wait_timeout(struct drm_tegra_fence *fence,
-				 unsigned long timeout)
-{
-	struct drm_tegra_syncpt_wait args;
+struct grate_device;
 
-	if (!fence)
-		return -EINVAL;
+struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_t flags);
+struct grate_bo *grate_bo_ref(struct grate_bo *bo);
+void grate_bo_unref(struct grate_bo *bo);
+int grate_bo_get_handle(struct grate_bo *bo, uint32_t *handle);
+int grate_bo_map(struct grate_bo *bo, void **ptr);
+int grate_bo_unmap(struct grate_bo *bo);
 
-	memset(&args, 0, sizeof(args));
-	args.id = fence->syncpt;
-	args.thresh = fence->value;
-	args.timeout = timeout;
-
-	return drmCommandWriteRead(fence->drm->fd, DRM_TEGRA_SYNCPT_WAIT,
-				   &args, sizeof(args));
-}
-
-void drm_tegra_fence_free(struct drm_tegra_fence *fence)
-{
-	free(fence);
-}
+int grate_bo_export(struct grate_bo *bo, uint32_t flags);
+struct grate_bo* grate_bo_import(struct grate_device *drm, int fd);
+#endif /* __GRATE_BO_H__ */
