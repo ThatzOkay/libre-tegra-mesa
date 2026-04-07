@@ -197,6 +197,7 @@ emit_s ## OP (struct vp_dst_operand dst, struct vp_src_operand src) \
 }
 
 GEN_S_UNOP(RSQ)
+GEN_S_UNOP(RCP)
 
 static struct vp_instr *
 emit_packed(struct vp_vec_instr vec, struct vp_scalar_instr scalar)
@@ -311,6 +312,11 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
       return emit_packed(emit_vNOP(),
                          emit_sRSQ(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
                                    tgsi_src_to_vp(vp, &inst->Src[0].Register)));
+      
+   case TGSI_OPCODE_RCP:
+      return emit_packed(emit_vNOP(),
+                           emit_sRCP(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                                    tgsi_src_to_vp(vp, &inst->Src[0].Register)));
 
    default:
       printf("GRATE VERTEX TGSI UNIMPLEMENTED: 0x%02x\n", inst->Instruction.Opcode);
