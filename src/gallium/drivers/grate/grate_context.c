@@ -15,7 +15,6 @@
 #include "grate_surface.h"
 
 #include "host1x01_hardware.h"
-#include "tgr_3d.xml.h"
 
 static int
 grate_channel_create(struct grate_context *context,

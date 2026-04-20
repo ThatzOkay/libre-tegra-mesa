@@ -14,7 +14,6 @@
 #include "grate_screen.h"
 
 #include "host1x01_hardware.h"
-#include "tgr_3d.xml.h"
 
 #include "tegra.h"
 

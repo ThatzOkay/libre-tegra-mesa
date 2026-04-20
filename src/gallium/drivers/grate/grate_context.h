@@ -10,12 +10,13 @@
 #include "grate_device.h"
 #include "grate_state.h"
 #include "grate_stream.h"
+#include "tgr_3d.xml.h"
 
 struct grate_framebuffer_state {
    struct pipe_framebuffer_state base;
    int num_rts;
-   struct grate_bo *rt_bos[TGR3D_MAX_RENDER_TARGETS];
-   uint32_t rt_params[TGR3D_MAX_RENDER_TARGETS];
+   struct grate_bo *rt_bos[REG_TGR3D_GLOBAL_SURFDESC_LENGTH];
+   uint32_t rt_params[REG_TGR3D_GLOBAL_SURFDESC_LENGTH];
    uint32_t rt_mask;
 };
 
