@@ -20,7 +20,6 @@
 #include "grate_compiler.h"
 #include "fp/fpir.h"
 #include "vp/vpir.h"
-#include "tgr_3d.xml.h"
 
 struct grate_vs_tgsi_transform_context {
    struct tgsi_transform_context base;

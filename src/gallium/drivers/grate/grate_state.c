@@ -15,7 +15,6 @@
 #include "grate_resource.h"
 #include "grate_state.h"
 
-#include "tgr_3d.xml.h"
 #include "host1x01_hardware.h"
 
 static void
@@ -583,7 +582,7 @@ emit_render_targets(struct grate_context *context)
    struct grate_stream *stream = &context->gr3d->stream;
    const struct grate_framebuffer_state *fb = &context->framebuffer;
 
-   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC, fb->num_rts));
+   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(0), fb->num_rts));
    for (i = 0; i < fb->num_rts; ++i) {
       uint32_t rt_params = fb->rt_params[i];
       /* TODO: setup dither */
@@ -591,7 +590,7 @@ emit_render_targets(struct grate_context *context)
       grate_stream_push(stream, rt_params);
    }
 
-   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR, fb->num_rts));
+   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(0), fb->num_rts));
    for (i = 0; i < fb->num_rts; ++i) {
       grate_stream_push_reloc(stream, fb->rt_bos[i], 0);
    }

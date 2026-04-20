@@ -47,6 +47,4 @@
       printf("GRATE: %s()\n", __func__); \
 } while (0)
 
-#define TGR3D_MAX_RENDER_TARGETS 16
-
 #endif // GRATE_COMMON_H

@@ -15,7 +15,6 @@
 #include "grate_state.h"
 #include "grate_device.h"
 
-#include "tgr_3d.xml.h"
 #include "host1x01_hardware.h"
 
 static int
@@ -95,15 +94,16 @@ grate_init_state(struct grate_context *context)
                                                TGR3D_GSHIM_WRITE_MASK_GPU_B(TGR3D_STATE_ENABLED)));
 
    /*
-    * 0x75x should be written after 0xb00, otherwise non-pow2
+    * 0x75x should be written after REG_TGR3D_GSHIM_WRITE_MASK, otherwise non-pow2
     * textures are corrupted. Reason is unknown. Looks like
-    * combination of 0x75x register bits affects the texture size.
+    * combination of REG_TGR3D_TEX_TEXDESC_NPOT_AUX(*) register bits affects the texture size.
     *
-    * The 0x75x registers contain garbage after machine's power-off,
+    * The REG_TGR3D_TEX_TEXDESC_NPOT_AUX(*) registers contain garbage after machine's power-off,
     * but values are retained on soft reboot.
     */
-   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_NPOT_AUX, 0x10));
-   for (int i = 0; i < 16; i++)
+   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_NPOT_AUX(0),
+                                                      REG_TGR3D_TEX_TEXDESC_NPOT_AUX_LENGTH));
+   for (int i = 0; i < REG_TGR3D_TEX_TEXDESC_NPOT_AUX_LENGTH; i++)
       grate_stream_push(stream, 0x00000000);
 
    /*
@@ -120,16 +120,16 @@ grate_init_state(struct grate_context *context)
 
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_READ_SELECT, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_ENABLE, 0));
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_STALL, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0xb07, 0)); // TODO: no reg
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_WAIT, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0xb09, 0)); // TODO: no reg
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_COMB, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0xb0b, 0)); // TODO: no reg
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_STALL(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_STALL(1), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_WAIT(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_WAIT(1), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_COMB(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_COMB(1), 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_HWR_WAIT, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_HWR_XFER, 0));
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_SYNCPT_WAIT, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0xb0f, 0)); // TODO: no reg
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_SYNCPT_WAIT(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_STAT_SYNCPT_WAIT(1), 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_DLB_CONTROL, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_DLB_RANGE, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GSHIM_DLB_TRIGGER, 0));
@@ -138,15 +138,16 @@ grate_init_state(struct grate_context *context)
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_HORIZONTAL_SWATH_RENDERING, 0));
 
    /* Common stuff */
-   grate_stream_push(stream, host1x_opcode_imm(0x00d, 0)); // TODO: no reg
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_CLK_COUNT, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0x00f, 0)); // TODO: no reg
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_XFER_COUNT, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0x011, 0)); // TODO: no reg
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_WAIT_COUNT, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0x013, 0)); // TODO: no reg
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_EN_COUNT, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0x015, 0)); // TODO: no reg
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT(1), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_CLK_COUNT(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_CLK_COUNT(1), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_XFER_COUNT(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_XFER_COUNT(1), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_WAIT_COUNT(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_WAIT_COUNT(1), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_EN_COUNT(0), 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_CTL_STAT_EN_COUNT(1), 0));
 
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_IDX_ATTR_MASK, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_IDX_SET_PRIM, 0));
@@ -160,11 +161,11 @@ grate_init_state(struct grate_context *context)
 
    grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_VPE_MODE, 5));
    // TODO: document/convert these values
-   grate_stream_push(stream, 0x00000011); /* REG_TGR3D_VPE_MODE */
-   grate_stream_push(stream, 0x0000ffff);
-   grate_stream_push(stream, 0x00ff0000);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
+   grate_stream_push(stream, 0x00000011); // REG_TGR3D_VPE_MODE
+   grate_stream_push(stream, 0x0000ffff); // REG_TGR3D_VPE_TIMEOUT
+   grate_stream_push(stream, 0x00ff0000); // REG_TGR3D_VPE_CONST_READ_LIMIT
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_VPE_BRANCHBITS
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_VPE_START
 
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_VPE_GEOM_STALL, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_VPE_VPE_CTRL, 0));
@@ -176,63 +177,58 @@ grate_init_state(struct grate_context *context)
 
    grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_SU_PARAM, 25));
    // TODO: document/convert these values
-   grate_stream_push(stream, 0xb8e00000); /* REG_TGR3D_SU_PARAM */
-   grate_stream_push(stream, 0x00000000); /* TGR3D_POLYGON_OFFSET_UNITS */
-   grate_stream_push(stream, 0x00000000); /* TGR3D_POLYGON_OFFSET_FACTOR */
-   grate_stream_push(stream, 0x00000105); /* TGR3D_POINT_PARAMS */
-   grate_stream_push(stream, u_bitcast_f2u(0.5f)); /* TGR3D_POINT_SIZE */
-   grate_stream_push(stream, u_bitcast_f2u(1.0f)); /* TGR3D_POIN_COORD_RANGE_MAX_S */
-   grate_stream_push(stream, u_bitcast_f2u(1.0f)); /* TGR3D_POIN_COORD_RANGE_MAX_T */
-   grate_stream_push(stream, u_bitcast_f2u(0.0f)); /* TGR3D_POIN_COORD_RANGE_MIN_S */
-   grate_stream_push(stream, u_bitcast_f2u(0.0f)); /* TGR3D_POIN_COORD_RANGE_MIN_T */
-   grate_stream_push(stream, 0x00000000); /* TGR2D_LINE_PARAMS */
-   grate_stream_push(stream, u_bitcast_f2u(0.5f)); /* TGR3D_HALF_LINE_WIDTH */
-   grate_stream_push(stream, u_bitcast_f2u(1.0f)); /* 0x34e - unknonwn */
-   grate_stream_push(stream, 0x00000000); /* 0x34f - unknown */
-   grate_stream_push(stream, 0x00000000); /* TGR3D_SCISSOR_HORIZ */
-   grate_stream_push(stream, 0x00000000); /* TGR3D_SCISSOR_VERT */
-   grate_stream_push(stream, u_bitcast_f2u(0.0f)); /* TGR3D_VIEWPORT_X_BIAS */
-   grate_stream_push(stream, u_bitcast_f2u(0.0f)); /* TGR3D_VIEWPORT_Y_BIAS */
-   grate_stream_push(stream, u_bitcast_f2u(0.5f - powf(2.0, -21))); /* TGR3D_VIEWPORT_Z_BIAS */
-   grate_stream_push(stream, u_bitcast_f2u(0.0f)); /* TGR3D_VIEWPORT_X_SCALE */
-   grate_stream_push(stream, u_bitcast_f2u(0.0f)); /* TGR3D_VIEWPORT_Y_SCALE */
-   grate_stream_push(stream, u_bitcast_f2u(0.5f - powf(2.0, -21))); /* TGR3D_VIEWPORT_Z_SCALE */
-   grate_stream_push(stream, u_bitcast_f2u(1.0f)); /* TGR3D_GUARDBAND_WIDTH */
-   grate_stream_push(stream, u_bitcast_f2u(1.0f)); /* TGR3D_GUARDBAND_HEIGHT */
-   grate_stream_push(stream, u_bitcast_f2u(1.0f)); /* TGR3D_GUARDBAND_DEPTH */
-   grate_stream_push(stream, 0x00000205); /* 0x35b - unknown */
+   grate_stream_push(stream, 0xb8e00000); // REG_TGR3D_SU_PARAM
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_SU_ZBIAS
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_SU_ZFACTOR
+   grate_stream_push(stream, 0x00000105); // REG_TGR3D_SU_POINT_PARAM
+   grate_stream_push(stream, u_bitcast_f2u(0.5f)); // REG_TGR3D_SU_POINT_WIDTH_2
+   grate_stream_push(stream, u_bitcast_f2u(1.0f)); // REG_TGR3D_SU_POINT_MAX_S
+   grate_stream_push(stream, u_bitcast_f2u(1.0f)); // REG_TGR3D_SU_POINT_MAX_T
+   grate_stream_push(stream, u_bitcast_f2u(0.0f)); // REG_TGR3D_SU_POINT_MIN_S
+   grate_stream_push(stream, u_bitcast_f2u(0.0f)); // REG_TGR3D_SU_POINT_MIN_T
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_SU_LINE_PARAM
+   grate_stream_push(stream, u_bitcast_f2u(0.5f)); // REG_TGR3D_SU_LINE_WIDTH_2
+   grate_stream_push(stream, u_bitcast_f2u(1.0f)); // REG_TGR3D_SU_LINE_MAX_ATTR_W
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_SU_LINE_MIN_ATTR_W
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_SU_SCISSOR_X
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_SU_SCISSOR_Y
+   grate_stream_push(stream, u_bitcast_f2u(0.0f)); // REG_TGR3D_SU_VIEWPORT_X
+   grate_stream_push(stream, u_bitcast_f2u(0.0f)); // REG_TGR3D_SU_VIEWPORT_Y
+   grate_stream_push(stream, u_bitcast_f2u(0.5f - powf(2.0, -21))); // REG_TGR3D_SU_VIEWPORT_Z
+   grate_stream_push(stream, u_bitcast_f2u(0.0f)); // REG_TGR3D_SU_VIEWPORT_W
+   grate_stream_push(stream, u_bitcast_f2u(0.0f)); // REG_TGR3D_SU_VIEWPORT_H
+   grate_stream_push(stream, u_bitcast_f2u(0.5f - powf(2.0, -21))); // REG_TGR3D_SU_VIEWPORT_D
+   grate_stream_push(stream, u_bitcast_f2u(1.0f)); // REG_TGR3D_SU_GUARDBAND_W
+   grate_stream_push(stream, u_bitcast_f2u(1.0f)); // REG_TGR3D_SU_GUARDBAND_H
+   grate_stream_push(stream, u_bitcast_f2u(1.0f)); // REG_TGR3D_SU_GUARDBAND_D
+   grate_stream_push(stream, 0x00000205); // REG_TGR3D_SU_UCPLANE
 
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_SU_CLKEN_OVERRIDE, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_SU_CLIP_CLKEN_OVERRIDE, 0));
 
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_QR_S_TEST,
-                                               TGR3D_QR_S_TEST_S_MASK(0xff) |
-                                               TGR3D_QR_S_TEST_S_FUNC(0x07)));
-   grate_stream_push(stream, host1x_opcode_imm(TGR3D_STENCIL_BACK1, 0x07ff)); // TODO: no reg
-
-   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_QR_S_CTRL,
-                                                TGR3D_QR_S_CTRL_COVERAGE_MERGE(TGR3D_COVERAGE_MERGE_XOR) |
-                                                TGR3D_QR_S_CTRL_S_SURF_PTR(4)));
-   grate_stream_push(stream, 0x00000040); /* TGR3D_STENCIL_PARAMS */
-   // TODO: document/convert these values
-   grate_stream_push(stream, 0x00000040); /* REG_TGR3D_QR_S_CTRL */
-   grate_stream_push(stream, 0x00000310); /* TGR3D_DEPTH_TEST_PARAMS*/
-   grate_stream_push(stream, 0x00000000); /* TGR3D_DEPTH_RANGE_NEAR */
-   grate_stream_push(stream, 0x000fffff); /* TGR3D_DEPTH_RANGE_FAR */
-   grate_stream_push(stream, 0x00000001); /* 0x406 - unknown */
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x1fff1fff);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000006);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000008);
-   grate_stream_push(stream, 0x00000048);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
+   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_QR_S_TEST_FRONT, 20));
+   grate_stream_push(stream, TGR3D_QR_S_TEST_FRONT_S_MASK(0xff) |
+                                   TGR3D_QR_S_TEST_FRONT_S_FUNC(0x07)); // REG_TGR3D_QR_S_TEST_FRONT
+   grate_stream_push(stream, TGR3D_QR_S_TEST_BACK_S_MASK(0xff) |
+                                   TGR3D_QR_S_TEST_BACK_S_FUNC(0x07)); // REG_TGR3D_QR_S_TEST_BACK
+   grate_stream_push(stream, 0x00000040); // REG_TGR3D_QR_S_CTRL
+   grate_stream_push(stream, 0x00000310); // REG_TGR3D_QR_Z_TEST
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_Z_MIN
+   grate_stream_push(stream, 0x000fffff); // REG_TGR3D_QR_Z_MAX
+   grate_stream_push(stream, 0x00000001); // REG_TGR3D_QR_RAST_OPERATION
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_RAST_SCISSOR_SNAP
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_RAST_SCISSOR_MIN
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_RAST_SCISSOR_MAX
+   grate_stream_push(stream, 0x1fff1fff); // REG_TGR3D_QR_RAST_BBOX_MIN
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_RAST_BBOX_MAX
+   grate_stream_push(stream, 0x00000006); // REG_TGR3D_QR_SB_OPERATION
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_QRAST_CLKEN_OVERRIDE
+   grate_stream_push(stream, 0x00000008); // REG_TGR3D_QR_VCAA_OPERATION
+   grate_stream_push(stream, 0x00000048); // REG_TGR3D_QR_OUTPUT_TO_SHADER
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_QRAST_DEBUG
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_QRAST_LIMITS
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_PIXEL_COUNT_CTRL
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_QR_PIXEL_COUNT
 
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
 
@@ -269,20 +265,19 @@ grate_init_state(struct grate_context *context)
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_DW_ST_ENABLE, 0));
 
    grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_FDC_CONTROL, 13));
-   // TODO: document/convert these values
-   grate_stream_push(stream, 0x00000e00); /* REG_TGR3D_FDC_CONTROL */
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x000001ff);
-   grate_stream_push(stream, 0x000001ff);
-   grate_stream_push(stream, 0x000001ff);
-   grate_stream_push(stream, 0x00000030);
-   grate_stream_push(stream, 0x00000020);
-   grate_stream_push(stream, 0x000001ff);
-   grate_stream_push(stream, 0x00000100);
-   grate_stream_push(stream, 0x0f0f0f0f);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
-   grate_stream_push(stream, 0x00000000);
+   grate_stream_push(stream, 0x00000e00); // REG_TGR3D_FDC_CONTROL
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_FDC_STATUS
+   grate_stream_push(stream, 0x000001ff); // REG_TGR3D_FDC_MAX_QZ_LINES
+   grate_stream_push(stream, 0x000001ff); // REG_TGR3D_FDC_MAX_QV_LINES
+   grate_stream_push(stream, 0x000001ff); // REG_TGR3D_FDC_MAX_QS_LINES
+   grate_stream_push(stream, 0x00000030); // REG_TGR3D_FDC_MAX_PS_LINES
+   grate_stream_push(stream, 0x00000020); // REG_TGR3D_FDC_MAX_Q_LINES
+   grate_stream_push(stream, 0x000001ff); // REG_TGR3D_FDC_MAX_Q_P_LINES
+   grate_stream_push(stream, 0x00000100); // REG_TGR3D_FDC_FLUSH_CTL
+   grate_stream_push(stream, 0x0f0f0f0f); // REG_TGR3D_FDC_L1_TIMEOUT
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_FDC_INSTRUMENT
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_FDC_CLKEN_OVERRIDE
+   grate_stream_push(stream, 0x00000000); // REG_TGR3D_FDC_NV_MCCIF_FIFOCTRL_RO
 
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_PIX_ATTR, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_TRI_ATTR, 0));
@@ -290,8 +285,8 @@ grate_init_state(struct grate_context *context)
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_INSTRUMENT, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_DITHER_TABLE, 0));
    grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_FLUSH, 0));
-   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_S_OPERATION, 0));
-   grate_stream_push(stream, host1x_opcode_imm(0xe29, 0)); // TODO: no reg
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_S_OPERATION_FRONT, 0));
+   grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_GLOBAL_S_OPERATION_BACK, 0));
 
    if (soc_id == DRM_TEGRA_SOC_T114) {
       grate_stream_push(stream, host1x_opcode_imm(0x41a, 0xa00));
