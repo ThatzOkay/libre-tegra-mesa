@@ -404,6 +404,9 @@ class Reg(object):
 			tab_to("#define REG_%s" % self.full_name, "0x%08x" % offset)
 		else:
 			print("static inline uint32_t REG_%s(%s) { return 0x%08x + %s; }" % (self.full_name, proto, offset, strides))
+		
+		if self.length:
+			tab_to("#define REG_%s_LENGTH" % self.full_name, "%d" % self.length)
 
 		if self.bitset.inline:
 			self.bitset.dump(self.full_name)
@@ -572,7 +575,10 @@ class Parser(object):
 			print("lxml not found, skipping validation", file=sys.stderr)
 
 	def do_parse(self, filename):
+		curpath = os.path.abspath(os.path.curdir)
 		filepath = os.path.abspath(filename)
+		if filepath.startswith(curpath):
+			filepath = filepath.replace(curpath, ".")
 		if filepath in self.xml_files:
 			return
 		self.xml_files.append(filepath)

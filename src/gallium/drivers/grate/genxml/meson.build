@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: MIT
 
 
-rnn_src_path = dir_source_root + '/src/gallium/drivers/grate/genxml/rnndb'
+rnn_src_path = dir_source_root + '/src/gallium/drivers/grate/genxml'
 
-rules_file = 'rules-ng.xsd'
-freedreno_schema = files(rules_file)
-
-agx_pack = custom_target(
+t30_registers = custom_target(
   't30.xml.h',
-  input : ['gen_header.py', 't30.xml', freedreno_schema],
+  input : ['gen_header.py', 't30.xml'],
   output : 't30.xml.h',
   command : [prog_python, '@INPUT0@', '--rnn', rnn_src_path, '--xml', '@INPUT1@', 'c-defines'],
   capture : true,
@@ -20,7 +17,7 @@ agx_pack = custom_target(
 
 test = custom_target(
   'tegra.xml.h',
-  input : ['gen_header.py', 'tegra.xml', freedreno_schema],
+  input : ['gen_header.py', 'tegra.xml'],
   output : 'tegra.xml.h',
   command : [prog_python, '@INPUT0@', '--rnn', rnn_src_path, '--xml', '@INPUT1@', 'c-defines'],
   capture : true,
@@ -29,7 +26,7 @@ test = custom_target(
 )
 
 idep_grate_pack = declare_dependency(
-  sources : [agx_pack, test],
+  sources : [t30_registers, test],
   dependencies : dep_valgrind,
   include_directories : include_directories('.'),
 )
