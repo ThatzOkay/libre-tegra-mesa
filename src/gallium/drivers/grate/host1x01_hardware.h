@@ -40,46 +40,46 @@
 
 #define BIT(nr)	(1UL << (nr))
 
-static inline uint32_t host1x_class_host_wait_syncpt(unsigned indx,
-						      unsigned threshold)
+static inline uint32_t host1x_class_host_wait_syncpt(uint32_t indx,
+						      uint32_t threshold)
 {
 	return host1x_uclass_wait_syncpt_indx_f(indx) |
 		host1x_uclass_wait_syncpt_thresh_f(threshold);
 }
 
-static inline uint32_t host1x_class_host_load_syncpt_base(unsigned indx,
-							  unsigned threshold)
+static inline uint32_t host1x_class_host_load_syncpt_base(uint32_t indx,
+							  uint32_t threshold)
 {
 	return host1x_uclass_load_syncpt_base_base_indx_f(indx) |
 		host1x_uclass_load_syncpt_base_value_f(threshold);
 }
 
-static inline uint32_t host1x_class_host_wait_syncpt_base(unsigned indx,
-							  unsigned base_indx,
-							  unsigned offset)
+static inline uint32_t host1x_class_host_wait_syncpt_base(uint32_t indx,
+							  uint32_t base_indx,
+							  uint32_t offset)
 {
 	return host1x_uclass_wait_syncpt_base_indx_f(indx) |
 		host1x_uclass_wait_syncpt_base_base_indx_f(base_indx) |
 		host1x_uclass_wait_syncpt_base_offset_f(offset);
 }
 
-static inline uint32_t host1x_class_host_incr_syncpt_base(unsigned base_indx,
-							  unsigned offset)
+static inline uint32_t host1x_class_host_incr_syncpt_base(uint32_t base_indx,
+							  uint32_t offset)
 {
 	return host1x_uclass_incr_syncpt_base_base_indx_f(base_indx) |
 		host1x_uclass_incr_syncpt_base_offset_f(offset);
 }
 
-static inline uint32_t host1x_class_host_incr_syncpt(unsigned cond,
-						     unsigned indx)
+static inline uint32_t host1x_class_host_incr_syncpt(uint32_t cond,
+						     uint32_t indx)
 {
 	return host1x_uclass_incr_syncpt_cond_f(cond) |
 		host1x_uclass_incr_syncpt_indx_f(indx);
 }
 
-static inline uint32_t host1x_class_host_indoff_reg_write(unsigned mod_id,
-							  unsigned offset,
-							  int auto_inc)
+static inline uint32_t host1x_class_host_indoff_reg_write(uint32_t mod_id,
+							  uint32_t offset,
+							  bool auto_inc)
 {
 	uint32_t v = host1x_uclass_indoff_indbe_f(0xf) |
 		host1x_uclass_indoff_indmodid_f(mod_id) |
@@ -89,9 +89,9 @@ static inline uint32_t host1x_class_host_indoff_reg_write(unsigned mod_id,
 	return v;
 }
 
-static inline uint32_t host1x_class_host_indoff_reg_read(unsigned mod_id,
-							 unsigned offset,
-							 int auto_inc)
+static inline uint32_t host1x_class_host_indoff_reg_read(uint32_t mod_id,
+							 uint32_t offset,
+							 bool auto_inc)
 {
 	uint32_t v = host1x_uclass_indoff_indmodid_f(mod_id) |
 		host1x_uclass_indoff_indroffset_f(offset) |
@@ -103,33 +103,33 @@ static inline uint32_t host1x_class_host_indoff_reg_read(unsigned mod_id,
 
 
 /* cdma opcodes */
-static inline uint32_t host1x_opcode_setclass(unsigned class_id,
-					      unsigned offset, unsigned mask)
+static inline uint32_t host1x_opcode_setclass(uint32_t class_id,
+					      uint32_t offset, uint16_t mask)
 {
 	return (0 << 28) | (offset << 16) | (class_id << 6) | mask;
 }
 
-static inline uint32_t host1x_opcode_incr(unsigned offset, unsigned count)
+static inline uint32_t host1x_opcode_incr(uint32_t offset, uint16_t count)
 {
 	return (1 << 28) | (offset << 16) | count;
 }
 
-static inline uint32_t host1x_opcode_nonincr(unsigned offset, unsigned count)
+static inline uint32_t host1x_opcode_nonincr(uint32_t offset, uint16_t count)
 {
 	return (2 << 28) | (offset << 16) | count;
 }
 
-static inline uint32_t host1x_opcode_mask(unsigned offset, unsigned mask)
+static inline uint32_t host1x_opcode_mask(uint32_t offset, uint16_t mask)
 {
 	return (3 << 28) | (offset << 16) | mask;
 }
 
-static inline uint32_t host1x_opcode_imm(unsigned offset, unsigned value)
+static inline uint32_t host1x_opcode_imm(uint32_t offset, uint16_t value)
 {
 	return (4 << 28) | (offset << 16) | value;
 }
 
-static inline uint32_t host1x_mask2(unsigned x, unsigned y)
+static inline uint32_t host1x_mask2(uint8_t x, uint8_t y)
 {
 	return 1 | (1 << (y - x));
 }

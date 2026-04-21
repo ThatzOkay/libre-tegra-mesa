@@ -32,17 +32,14 @@
 
 #include "tegra.h"
 
+#define GRATE_PUSHBUF_WORD(ptr, value) *(ptr)++ = (value)
+
 enum grate_stream_status {
    GRATE_STREAM_FREE,
    GRATE_STREAM_CONSTRUCT,
    GRATE_STREAM_CONSTRUCTION_FAILED,
    GRATE_STREAM_READY,
 };
-
-struct grate_command_buffer {
-   struct drm_tegra_pushbuf *pushbuf;
-   uint32_t *ptr;
-}; 
 
 struct grate_stream {
    enum grate_stream_status status;
@@ -51,7 +48,8 @@ struct grate_stream {
    struct drm_tegra_channel *channel;
    struct drm_tegra_syncpoint *syncpt;
 
-   struct grate_command_buffer buffer;
+   struct drm_tegra_pushbuf *pushbuf;
+
    int num_words;
 };
 
@@ -72,19 +70,16 @@ void
 grate_stream_destroy(struct grate_stream *stream);
 
 int
-grate_stream_begin(struct grate_stream *stream);
+grate_stream_begin(struct grate_stream *stream, uint32_t **ptrp);
 
 int
-grate_stream_end(struct grate_stream *stream);
+grate_stream_end(struct grate_stream *stream, uint32_t **ptrp);
 
 int
 grate_stream_flush(struct grate_stream *stream);
 
 int
-grate_stream_push(struct grate_stream *stream, uint32_t word);
-
-int
-grate_stream_push_reloc(struct grate_stream *stream,
+grate_stream_push_reloc(struct grate_stream *stream, uint32_t **ptrp,
                         struct grate_bo *bo, unsigned offset);
 
 struct grate_reloc
@@ -92,7 +87,7 @@ grate_reloc(const void *var_ptr, struct grate_bo *bo,
             uint32_t offset, uint32_t var_offset);
 
 int
-grate_stream_push_words(struct grate_stream *stream, const void *addr,
-                        unsigned words, int num_relocs, ...);
+grate_stream_push_words(struct grate_stream *stream, uint32_t **ptrp, const uint32_t *src_buf,
+                        unsigned src_words, int num_relocs, ...);
 
 #endif

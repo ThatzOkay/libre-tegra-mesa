@@ -548,7 +548,7 @@ grate_delete_vertex_state(struct pipe_context *pcontext, void *so)
 }
 
 static void
-emit_attribs(struct grate_context *context)
+emit_attribs(struct grate_context *context, uint32_t **ptrp)
 {
    unsigned int i;
    struct grate_stream *stream = &context->gr3d->stream;
@@ -569,67 +569,66 @@ emit_attribs(struct grate_context *context)
       assert(e->stride < 1 << 24);
       attrib |= TGR3D_IDX_ATTRIBUTE_MODE_ATTR_STRIDE(e->stride);
 
-      grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_IDX_ATTRIBUTE_BASE(i), 2));
-      grate_stream_push_reloc(stream, r->bo, vb->buffer_offset + e->offset);
-      grate_stream_push(stream, attrib);
+      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_IDX_ATTRIBUTE_BASE(i), 2));
+      grate_stream_push_reloc(stream, ptrp, r->bo, vb->buffer_offset + e->offset);
+      GRATE_PUSHBUF_WORD(*ptrp, attrib);
    }
 }
 
 static void
-emit_render_targets(struct grate_context *context)
+emit_render_targets(struct grate_context *context, uint32_t **ptrp)
 {
    unsigned int i;
    struct grate_stream *stream = &context->gr3d->stream;
    const struct grate_framebuffer_state *fb = &context->framebuffer;
 
-   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(0), fb->num_rts));
+   *(*ptrp)++ = host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(0), fb->num_rts);
    for (i = 0; i < fb->num_rts; ++i) {
       uint32_t rt_params = fb->rt_params[i];
       /* TODO: setup dither */
       /* rt_params |= TGR3D_GLOBAL_SURFDESC_DITHER(enable_dither); */
-      grate_stream_push(stream, rt_params);
+      *(*ptrp)++ = rt_params;
    }
 
-   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(0), fb->num_rts));
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(0), fb->num_rts));
    for (i = 0; i < fb->num_rts; ++i) {
-      grate_stream_push_reloc(stream, fb->rt_bos[i], 0);
+      grate_stream_push_reloc(stream, ptrp, fb->rt_bos[i], 0);
    }
 
-   grate_stream_push(stream, host1x_opcode_incr(REG_TGR3D_DW_ST_ENABLE, 1));
-   grate_stream_push(stream, fb->rt_mask);
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_DW_ST_ENABLE, 1));
+   GRATE_PUSHBUF_WORD(*ptrp, fb->rt_mask);
 }
 
 static void
-emit_scissor(struct grate_context *context)
+emit_scissor(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-   grate_stream_push_words(stream, context->no_scissor, 3, 0);
+   grate_stream_push_words(stream, ptrp, context->no_scissor, 3, 0);
 }
 
 static void
-emit_viewport(struct grate_context *context)
+emit_viewport(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-   grate_stream_push_words(stream, context->viewport, 10, 0);
+   grate_stream_push_words(stream, ptrp, context->viewport, 10, 0);
 }
 
 static void
-emit_guardband(struct grate_context *context)
+emit_guardband(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-   grate_stream_push_words(stream, context->guardband, 4, 0);
+   grate_stream_push_words(stream, ptrp, context->guardband, 4, 0);
 }
 
 static void
-emit_zsa_state(struct grate_context *context)
+emit_zsa_state(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-   grate_stream_push_words(stream, context->zsa->commands,
-                           context->zsa->num_commands, 0);
+   grate_stream_push_words(stream, ptrp, context->zsa->commands, context->zsa->num_commands, 0);
 }
 
 static void
-emit_vs_uniforms(struct grate_context *context)
+emit_vs_uniforms(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
    struct pipe_constant_buffer *constbuf = &context->constant_buffer[MESA_SHADER_VERTEX];
@@ -641,27 +640,26 @@ emit_vs_uniforms(struct grate_context *context)
       len = constbuf->buffer_size / 4;
       assert(len < 256 * 4);
 
-      grate_stream_push(stream, host1x_opcode_imm(REG_TGR3D_VPE_CONST_OFFSET, 0));
-      grate_stream_push(stream, host1x_opcode_nonincr(REG_TGR3D_VPE_CONST_DATA, len));
-      grate_stream_push_words(stream, constbuf->user_buffer, len, 0);
+      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_imm(REG_TGR3D_VPE_CONST_OFFSET, 0));
+      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_nonincr(REG_TGR3D_VPE_CONST_DATA, len));
+      grate_stream_push_words(stream, ptrp, constbuf->user_buffer, len, 0);
    }
 }
 
 static void
-emit_shader(struct grate_stream *stream, struct grate_shader_blob *blob)
+emit_shader(struct grate_stream *stream, uint32_t **ptrp, struct grate_shader_blob *blob)
 {
-   grate_stream_push_words(stream, blob->commands, blob->num_commands, 0);
+   grate_stream_push_words(stream, ptrp, blob->commands, blob->num_commands, 0);
 }
 
 static void
-emit_program(struct grate_context *context)
+emit_program(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
    uint32_t cull_face_linker_setup;
 
-
-   emit_shader(stream, &context->vshader->blob);
-   emit_shader(stream, &context->fshader->blob);
+   emit_shader(stream, ptrp, &context->vshader->blob);
+   emit_shader(stream, ptrp, &context->fshader->blob);
 
    cull_face_linker_setup = TGR3D_SU_PARAM_SUBPIX_XOFF(0x38) |
                             TGR3D_SU_PARAM_SUBPIX_YOFF(0x38) |
@@ -689,20 +687,20 @@ emit_program(struct grate_context *context)
    if (context->rast->base.flatshade && info->color_input >= 0)
       linker_insts[3 + info->color_input * 2 + 1] |= 0xf << 16;
 
-   grate_stream_push_words(stream, linker_insts, ARRAY_SIZE(linker_insts), 0);
+   grate_stream_push_words(stream, ptrp, linker_insts, ARRAY_SIZE(linker_insts), 0);
 }
 
 void
-grate_emit_state(struct grate_context *context)
+grate_emit_state(struct grate_context *context, uint32_t **ptrp)
 {
-   emit_render_targets(context);
-   emit_viewport(context);
-   emit_guardband(context);
-   emit_scissor(context);
-   emit_zsa_state(context);
-   emit_attribs(context);
-   emit_vs_uniforms(context);
-   emit_program(context);
+   emit_render_targets(context, ptrp);
+   emit_viewport(context, ptrp);
+   emit_guardband(context, ptrp);
+   emit_scissor(context, ptrp);
+   emit_zsa_state(context, ptrp);
+   emit_attribs(context, ptrp);
+   emit_vs_uniforms(context, ptrp);
+   emit_program(context, ptrp);
 }
 
 void

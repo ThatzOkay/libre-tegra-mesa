@@ -15,8 +15,6 @@
 
 #include "host1x01_hardware.h"
 
-#include "tegra.h"
-
 /*
  * XXX Required to access winsys_handle internals. Should go away in favour
  * of some abstraction to handle handles in a Tegra-specific winsys
@@ -282,7 +280,9 @@ grate_resource_copy_region(struct pipe_context *pcontext,
 static void
 grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
 {
-   int err, value;
+   int err;
+   uint32_t value;
+   uint32_t *ptr;
    struct grate_context *context = grate_context(pcontext);
    struct grate_channel *gr2d = context->gr2d;
    struct grate_resource *dst, *src;
@@ -290,18 +290,18 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
    dst = grate_resource(info->dst.resource);
    src = grate_resource(info->src.resource);
 
-   err = grate_stream_begin(&gr2d->stream);
+   err = grate_stream_begin(&gr2d->stream, &ptr);
    if (err < 0) {
       fprintf(stderr, "grate_stream_begin() failed: %d\n", err);
       return;
    }
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x009, 0x9));
-   grate_stream_push(&gr2d->stream, 0x0000003a);            /* 0x009 - trigger */
-   grate_stream_push(&gr2d->stream, 0x00000000);            /* 0x00c - cmdsel */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x009, 0x9));
+   GRATE_PUSHBUF_WORD(ptr, 0x0000003a);            /* 0x009 - trigger */
+   GRATE_PUSHBUF_WORD(ptr, 0x00000000);            /* 0x00c - cmdsel */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x01e, 0x7));
-   grate_stream_push(&gr2d->stream, 0x00000000);            /* 0x01e - controlsecond */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x01e, 0x7));
+   GRATE_PUSHBUF_WORD(ptr, 0x00000000);            /* 0x01e - controlsecond */
    /*
     * [20:20] source color depth (0: mono, 1: same)
     * [17:16] destination color depth (0: 8 bpp, 1: 16 bpp, 2: 32 bpp)
@@ -322,37 +322,37 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
       assert(0);
    }
 
-   grate_stream_push(&gr2d->stream, value);                 /* 0x01f - controlmain */
-   grate_stream_push(&gr2d->stream, 0x000000cc);            /* 0x020 - ropfade */
+   GRATE_PUSHBUF_WORD(ptr, value);                 /* 0x01f - controlmain */
+   GRATE_PUSHBUF_WORD(ptr, 0x000000cc);            /* 0x020 - ropfade */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_nonincr(0x046, 1));
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x046, 1));
 
    /*
     * [20:20] destination write tile mode (0: linear, 1: tiled)
     * [ 0: 0] tile mode Y/RGB (0: linear, 1: tiled)
     */
    value = (dst->tiled << 20) | src->tiled;
-   grate_stream_push(&gr2d->stream, value);                 /* 0x046 - tilemode */
+   GRATE_PUSHBUF_WORD(ptr, value);                 /* 0x046 - tilemode */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x02b, 0xe149));
-   grate_stream_push_reloc(&gr2d->stream, dst->bo, 0);      /* 0x02b - dstba */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x02b, 0xe149));
+   grate_stream_push_reloc(&gr2d->stream, &ptr, dst->bo, 0);      /* 0x02b - dstba */
 
-   grate_stream_push(&gr2d->stream, dst->pitch);            /* 0x02e - dstst */
+   GRATE_PUSHBUF_WORD(ptr, dst->pitch);            /* 0x02e - dstst */
 
-   grate_stream_push_reloc(&gr2d->stream, src->bo, 0);      /* 0x031 - srcba */
+   grate_stream_push_reloc(&gr2d->stream, &ptr, src->bo, 0);      /* 0x031 - srcba */
 
-   grate_stream_push(&gr2d->stream, src->pitch);            /* 0x033 - srcst */
+   GRATE_PUSHBUF_WORD(ptr, src->pitch);            /* 0x033 - srcst */
 
    value = info->dst.box.height << 16 | info->dst.box.width;
-   grate_stream_push(&gr2d->stream, value);                 /* 0x038 - dstsize */
+   GRATE_PUSHBUF_WORD(ptr, value);                 /* 0x038 - dstsize */
 
    value = info->src.box.y << 16 | info->src.box.x;
-   grate_stream_push(&gr2d->stream, value);                 /* 0x039 - srcps */
+   GRATE_PUSHBUF_WORD(ptr, value);                 /* 0x039 - srcps */
 
    value = info->dst.box.y << 16 | info->dst.box.x;
-   grate_stream_push(&gr2d->stream, value);                 /* 0x03a - dstps */
+   GRATE_PUSHBUF_WORD(ptr, value);                 /* 0x03a - dstps */
 
-   grate_stream_end(&gr2d->stream);
+   grate_stream_end(&gr2d->stream, &ptr);
 
    grate_stream_flush(&gr2d->stream);
 }
@@ -373,20 +373,21 @@ fill(struct grate_channel *gr2d,
            unsigned width, unsigned height)
 {
    uint32_t value;
+   uint32_t *ptr;
    int err;
 
-   err = grate_stream_begin(&gr2d->stream);
+   err = grate_stream_begin(&gr2d->stream, &ptr);
    if (err < 0) {
       fprintf(stderr, "grate_stream_begin() failed: %d\n", err);
       return -1;
    }
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x09, 0x09));
-   grate_stream_push(&gr2d->stream, 0x0000003a);           /* 0x009 - trigger */
-   grate_stream_push(&gr2d->stream, 0x00000000);           /* 0x00C - cmdsel */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x09, 0x09));
+   GRATE_PUSHBUF_WORD(ptr, 0x0000003a);           /* 0x009 - trigger */
+   GRATE_PUSHBUF_WORD(ptr, 0x00000000);           /* 0x00C - cmdsel */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x1e, 0x07));
-   grate_stream_push(&gr2d->stream, 0x00000000);           /* 0x01e - controlsecond */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x1e, 0x07));
+   GRATE_PUSHBUF_WORD(ptr, 0x00000000);           /* 0x01e - controlsecond */
 
    value  = 1 << 6; /* fill mode */
    value |= 1 << 2; /* turbofill */
@@ -403,25 +404,26 @@ fill(struct grate_channel *gr2d,
    default:
       UNREACHABLE("invalid blocksize");
    }
-   grate_stream_push(&gr2d->stream, value);           /* 0x01f - controlmain */
+   GRATE_PUSHBUF_WORD(ptr, value);           /* 0x01f - controlmain */
 
-   grate_stream_push(&gr2d->stream, 0x000000cc);      /* 0x020 - ropfade */
+   GRATE_PUSHBUF_WORD(ptr, 0x000000cc);      /* 0x020 - ropfade */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x2b, 0x09));
-   grate_stream_push_reloc(&gr2d->stream, dst->bo, 0);/* 0x02b - dstba */
-   grate_stream_push(&gr2d->stream, dst->pitch);      /* 0x02e - dstst */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x2b, 0x09));
+   grate_stream_push_reloc(&gr2d->stream, &ptr, dst->bo, 0);/* 0x02b - dstba */
+   GRATE_PUSHBUF_WORD(ptr, dst->pitch);      /* 0x02e - dstst */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_nonincr(0x35, 1));
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x35, 1));
 
-   grate_stream_push(&gr2d->stream, fill_value);           /* 0x035 - srcfgc */
+   GRATE_PUSHBUF_WORD(ptr, fill_value);           /* 0x035 - srcfgc */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_nonincr(0x46, 1));
-   grate_stream_push(&gr2d->stream, dst->tiled << 20);     /* 0x046 - tilemode */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x46, 1));
+   GRATE_PUSHBUF_WORD(ptr, dst->tiled << 20);     /* 0x046 - tilemode */
 
-   grate_stream_push(&gr2d->stream, host1x_opcode_mask(0x38, 0x05));
-   grate_stream_push(&gr2d->stream, height << 16 | width); /* 0x038 - dstsize */
-   grate_stream_push(&gr2d->stream, dsty << 16 | dstx);    /* 0x03a - dstps */
-   grate_stream_end(&gr2d->stream);
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x38, 0x05));
+   GRATE_PUSHBUF_WORD(ptr, height << 16 | width); /* 0x038 - dstsize */
+   GRATE_PUSHBUF_WORD(ptr, dsty << 16 | dstx);    /* 0x03a - dstps */
+   
+   grate_stream_end(&gr2d->stream, &ptr);
 
    grate_stream_flush(&gr2d->stream);
 
