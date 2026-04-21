@@ -38,7 +38,7 @@ struct grate_vertex_state {
 };
 
 void
-grate_emit_state(struct grate_context *context);
+grate_emit_state(struct grate_context *context, uint32_t **ptrp);
 
 void
 grate_context_state_init(struct pipe_context *pcontext);
