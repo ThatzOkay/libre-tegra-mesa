@@ -107,7 +107,7 @@ grate_stream_destroy(struct grate_stream *stream)
  */
 
 int
-grate_stream_flush(struct grate_stream *stream)
+grate_stream_flush(struct grate_stream *stream, bool wait)
 {
    int result = 0;
 
@@ -131,13 +131,13 @@ grate_stream_flush(struct grate_stream *stream)
       goto cleanup;
    }
 
-   /*
-   result = drm_tegra_job_wait(stream->job, 1000000);
-   if (result != 0) {
-      grate_msg("drm_tegra_job_wait() failed %d\n", result);
-      result = -1;
+   if (wait) {
+      result = drm_tegra_job_wait(stream->job, 1000000);
+      if (result != 0) {
+         grate_msg("drm_tegra_job_wait() failed %d\n", result);
+         result = -1;
+      }
    }
-   */
 
 cleanup:
    assert(result == 0);
@@ -188,19 +188,6 @@ grate_stream_begin(struct grate_stream *stream, uint32_t **ptrp)
       drm_tegra_job_free(stream->job);
       return -1;
    }
-   
-   /*
-   ret = drm_tegra_pushbuf_sync_cond(
-      stream->pushbuf,
-      &stream->ptr,
-      stream->syncpt,
-      DRM_TEGRA_SYNC_COND_OP_DONE
-   );
-   if (ret < 0) {
-      grate_msg("drm_tegra_pushbuf_sync_cond() failed: %d\n", -ret);
-      return 1;
-   }
-   */
 
    stream->status = GRATE_STREAM_CONSTRUCT;
 
@@ -261,11 +248,6 @@ grate_stream_push_reloc(struct grate_stream *stream, uint32_t **ptrp,
 {
    int ret;
    struct drm_tegra_mapping *mapping = NULL;
-
-   if (!(stream && stream->status == GRATE_STREAM_CONSTRUCT)) {
-      grate_msg("Stream status isn't CONSTRUCT\n");
-      return -1;
-   }
    
    ret = __grate_stream_get_channel_mapping(stream, bo, DRM_TEGRA_CHANNEL_MAP_READ_WRITE, &mapping);
    if (ret < 0)
@@ -279,6 +261,21 @@ grate_stream_push_reloc(struct grate_stream *stream, uint32_t **ptrp,
       return ret;
    }
 
+   return ret;
+}
+
+int grate_stream_push_sync_cond(struct grate_stream *stream, uint32_t **ptrp,
+                                enum drm_tegra_sync_cond cond)
+{
+   int ret;
+
+   assert(stream && stream->status == GRATE_STREAM_CONSTRUCT);
+
+   ret = drm_tegra_pushbuf_sync_cond(stream->pushbuf, ptrp, stream->syncpt, cond);
+   if (ret < 0) {
+      stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
+   }
+   
    return ret;
 }
 
@@ -299,15 +296,10 @@ grate_stream_end(struct grate_stream *stream, uint32_t **ptrp)
       return -1;
    }
    
-   ret = drm_tegra_pushbuf_sync_cond(
-      stream->pushbuf,
-      ptrp,
-      stream->syncpt,
-      DRM_TEGRA_SYNC_COND_IMMEDIATE
-   );
+   ret = grate_stream_push_sync_cond(stream, ptrp, DRM_TEGRA_SYNC_COND_OP_DONE);
    if (ret < 0) {
-      grate_msg("drm_tegra_pushbuf_sync_cond() failed: %d\n", -ret);
-      return 1;
+      grate_msg("grate_stream_push_sync_cond() failed: %d\n", ret);
+      return ret;
    }
    
    if (*ptrp >= stream->pushbuf->end) {

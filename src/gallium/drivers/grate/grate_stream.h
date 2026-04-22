@@ -76,11 +76,15 @@ int
 grate_stream_end(struct grate_stream *stream, uint32_t **ptrp);
 
 int
-grate_stream_flush(struct grate_stream *stream);
+grate_stream_flush(struct grate_stream *stream, bool wait);
 
 int
 grate_stream_push_reloc(struct grate_stream *stream, uint32_t **ptrp,
                         struct grate_bo *bo, unsigned offset);
+
+int
+grate_stream_push_sync_cond(struct grate_stream *stream, uint32_t **ptrp,
+                            enum drm_tegra_sync_cond cond);
 
 struct grate_reloc
 grate_reloc(const void *var_ptr, struct grate_bo *bo,
