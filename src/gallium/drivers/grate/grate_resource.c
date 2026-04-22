@@ -354,7 +354,7 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
 
    grate_stream_end(&gr2d->stream, &ptr);
 
-   grate_stream_flush(&gr2d->stream);
+   grate_stream_flush(&gr2d->stream, true);
 }
 
 static uint32_t
@@ -365,22 +365,15 @@ pack_color(enum pipe_format format, const float *rgba)
    return uc.ui[0];
 }
 
-static int
-fill(struct grate_channel *gr2d,
+static void
+fill(struct grate_stream *stream, uint32_t **ptrp,
            struct grate_resource *dst,
            uint32_t fill_value, int blocksize,
            unsigned dstx, unsigned dsty,
            unsigned width, unsigned height)
 {
    uint32_t value;
-   uint32_t *ptr;
-   int err;
-
-   err = grate_stream_begin(&gr2d->stream, &ptr);
-   if (err < 0) {
-      fprintf(stderr, "grate_stream_begin() failed: %d\n", err);
-      return -1;
-   }
+   uint32_t *ptr = *ptrp;
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x09, 0x09));
    GRATE_PUSHBUF_WORD(ptr, 0x0000003a);           /* 0x009 - trigger */
@@ -409,7 +402,7 @@ fill(struct grate_channel *gr2d,
    GRATE_PUSHBUF_WORD(ptr, 0x000000cc);      /* 0x020 - ropfade */
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x2b, 0x09));
-   grate_stream_push_reloc(&gr2d->stream, &ptr, dst->bo, 0);/* 0x02b - dstba */
+   grate_stream_push_reloc(stream, &ptr, dst->bo, 0);/* 0x02b - dstba */
    GRATE_PUSHBUF_WORD(ptr, dst->pitch);      /* 0x02e - dstst */
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x35, 1));
@@ -423,11 +416,7 @@ fill(struct grate_channel *gr2d,
    GRATE_PUSHBUF_WORD(ptr, height << 16 | width); /* 0x038 - dstsize */
    GRATE_PUSHBUF_WORD(ptr, dsty << 16 | dstx);    /* 0x03a - dstps */
    
-   grate_stream_end(&gr2d->stream, &ptr);
-
-   grate_stream_flush(&gr2d->stream);
-
-   return 0;
+   *ptrp = ptr;
 }
 
 static void
@@ -437,32 +426,44 @@ grate_clear(struct pipe_context *pcontext, unsigned int buffers,
             unsigned int stencil)
 {
    struct grate_context *context = grate_context(pcontext);
+   struct grate_stream *stream = &context->gr2d->stream;
+   uint32_t *ptr;
+   int err;
    struct pipe_framebuffer_state *fb;
 
    fb = &context->framebuffer.base;
+
+   err = grate_stream_begin(stream, &ptr);
+   if (err < 0) {
+      grate_msg("grate_stream_begin() failed: %d\n", err);
+      return;
+   }
 
    if (buffers & PIPE_CLEAR_COLOR) {
       int i;
       for (i = 0; i < fb->nr_cbufs; ++i) {
          struct pipe_surface *dst = &fb->cbufs[i];
-         if (fill(context->gr2d, grate_resource(dst->texture),
+         fill(stream, &ptr, 
+                  grate_resource(dst->texture),
                   pack_color(dst->format, color->f),
                   util_format_get_blocksize(dst->format),
-                  0, 0, fb->width, fb->height) < 0)
-            return;
+                  0, 0, fb->width, fb->height);
       }
    }
 
    if (buffers & PIPE_CLEAR_DEPTH || buffers & PIPE_CLEAR_STENCIL) {
-      //if (fb->zsbuf) {
+      if (fb->zsbuf.texture) {
          /* TODO: handle the case where both are not set! */
-         if (fill(context->gr2d, grate_resource(fb->zsbuf.texture),
+         fill(stream, &ptr, 
+                  grate_resource(fb->zsbuf.texture),
                   util_pack_z_stencil(fb->zsbuf.format, depth, stencil),
                   util_format_get_blocksize(fb->zsbuf.format),
-                  0, 0, fb->width, fb->height) < 0)
-            return;
-      //}
+                  0, 0, fb->width, fb->height);
+      }
    }
+   
+   grate_stream_end(stream, &ptr);
+   grate_stream_flush(stream, true);
 }
 
 static void
@@ -473,10 +474,26 @@ grate_clear_render_target(struct pipe_context *pipe,
                           unsigned width, unsigned height,
                           bool render_condition_enabled)
 {
+   struct grate_context *context = grate_context(pipe);
+   struct grate_stream *stream = &context->gr2d->stream;
+   uint32_t *ptr;
+   int err;
    assert(!render_condition_enabled);
-   fill(grate_context(pipe)->gr2d, grate_resource(dst->texture),
-        pack_color(dst->format, color->f), util_format_get_blocksize(dst->format),
+   
+   err = grate_stream_begin(stream, &ptr);
+   if (err < 0) {
+      grate_msg("grate_stream_begin() failed: %d\n", err);
+      return;
+   }
+   
+   fill(&context->gr2d->stream, &ptr,
+        grate_resource(dst->texture),
+        pack_color(dst->format, color->f),
+        util_format_get_blocksize(dst->format),
         dstx, dsty, width, height);
+   
+   grate_stream_end(stream, &ptr);
+   grate_stream_flush(stream, true);
 }
 
 static void
@@ -489,11 +506,26 @@ grate_clear_depth_stencil(struct pipe_context *pipe,
                           unsigned width, unsigned height,
                           bool render_condition_enabled)
 {
+   struct grate_context *context = grate_context(pipe);
+   struct grate_stream *stream = &context->gr2d->stream;
+   uint32_t *ptr;
+   int err;
    assert(!render_condition_enabled);
-   fill(grate_context(pipe)->gr2d, grate_resource(dst->texture),
+   
+   err = grate_stream_begin(stream, &ptr);
+   if (err < 0) {
+      grate_msg("grate_stream_begin() failed: %d\n", err);
+      return;
+   }
+   
+   fill(&context->gr2d->stream, &ptr,
+        grate_resource(dst->texture),
         util_pack_z_stencil(dst->format, depth, stencil),
         util_format_get_blocksize(dst->format),
         dstx, dsty, width, height);
+   
+   grate_stream_end(stream, &ptr);
+   grate_stream_flush(stream, true);
 }
 
 static void

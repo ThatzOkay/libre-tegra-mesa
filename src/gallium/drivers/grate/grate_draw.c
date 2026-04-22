@@ -323,7 +323,7 @@ grate_draw_vbo(struct pipe_context *pcontext,
 
    err = grate_stream_begin(stream, &ptr);
    if (err < 0) {
-      fprintf(stderr, "%s: grate_stream_begin() failed: %d\n", __func__, err);
+      grate_msg("grate_stream_begin() failed: %d\n", err);
       return;
    }
 
@@ -389,6 +389,12 @@ grate_draw_vbo(struct pipe_context *pcontext,
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_IDX_SET_PRIM, 1));
    GRATE_PUSHBUF_WORD(ptr, value);
+   
+   err = grate_stream_push_sync_cond(stream, &ptr, DRM_TEGRA_SYNC_COND_RD_DONE);
+   if (err < 0) {
+      grate_msg("grate_stream_push_sync_cond() failed: %d\n", err);
+      return;
+   }
 
    unsigned count = draws[0].count;
    assert(count > 0 && count < (1 << 11));
@@ -399,7 +405,7 @@ grate_draw_vbo(struct pipe_context *pcontext,
 
    grate_stream_end(stream, &ptr);
 
-   grate_stream_flush(stream);
+   grate_stream_flush(stream, false);
 }
 
 void
