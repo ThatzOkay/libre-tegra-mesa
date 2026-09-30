@@ -421,6 +421,7 @@ fill(struct grate_stream *stream, uint32_t **ptrp,
 
 static void
 grate_clear(struct pipe_context *pcontext, unsigned int buffers,
+            uint32_t color_clear_mask, uint8_t stencil_clear_mask,
             const struct pipe_scissor_state *scissor_state,
             const union pipe_color_union *color, double depth,
             unsigned int stencil)

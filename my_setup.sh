@@ -22,7 +22,6 @@ meson setup \
 	-Dgallium-va=disabled \
 	-Dlibunwind=disabled \
 	-Dllvm=disabled \
-	-Degl-native-platform=drm \
 	-Dprefix="${INSTALL_DIR}" \
 	${EXTRA_SETUP_ARGS} \
 	${@} \
