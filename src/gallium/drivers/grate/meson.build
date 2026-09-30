@@ -50,8 +50,6 @@ files_libgrate = files(
   'grate_state.h',
   'grate_stream.c',
   'grate_stream.h',
-  'grate_surface.c',
-  'grate_surface.h',
   'grate_bo.c',
   'grate_bo.h',
   'grate_device.c',

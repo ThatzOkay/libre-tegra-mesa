@@ -12,9 +12,6 @@
 #include "grate_resource.h"
 #include "grate_screen.h"
 #include "grate_state.h"
-#include "grate_surface.h"
-
-#include "host1x01_hardware.h"
 
 static int
 grate_channel_create(struct grate_context *context,
@@ -134,7 +131,6 @@ grate_screen_context_create(struct pipe_screen *pscreen,
    context->base.const_uploader = context->base.stream_uploader;
 
    grate_context_resource_init(&context->base);
-   grate_context_surface_init(&context->base);
    grate_context_state_init(&context->base);
    grate_context_blend_init(&context->base);
    grate_context_sampler_init(&context->base);

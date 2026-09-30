@@ -226,7 +226,7 @@ __grate_stream_get_channel_mapping(struct grate_stream *stream,
          return ret;
       }
       
-      util_dynarray_append(&bo->channel_maps, struct drm_tegra_mapping *, bo_mapping);
+      util_dynarray_append(&bo->channel_maps, bo_mapping);
    }
    
    if (ret == 0)
