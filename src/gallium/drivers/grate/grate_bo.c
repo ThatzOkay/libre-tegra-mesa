@@ -60,6 +60,9 @@ static void grate_bo_free(struct grate_bo *bo)
        drm_tegra_channel_unmap(*mapping);
     }
     util_dynarray_fini(&bo->channel_maps);
+
+    //Clear BO as GEM handles are reused and we are not removing from bo_map
+    memset(bo, 0, sizeof(*bo));
 }
 
 static void grate_bo_prepare(struct grate_bo *bo)
@@ -92,6 +95,11 @@ struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_
     pthread_mutex_lock(&drm->bo_map_lock);
     bo = grate_lookup_bo(drm, args.handle);
     pthread_mutex_unlock(&drm->bo_map_lock);
+    if (!bo) {
+       mesa_loge("failed to allocate bo slot in the bo_map array");
+       drmCloseBufferHandle(drm->fd, bo->handle);
+       return NULL;
+    }
     
     /* Fresh handle */
     assert(!memcmp(bo, &((struct grate_bo){}), sizeof(*bo)));
@@ -100,16 +108,12 @@ struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_
     bo->drm = drm;
     bo->size = args.size;
     bo->flags = flags;
-    
+
+    grate_bo_prepare(bo);
+
     VDBG_BO(bo, "%s", "success new\n");
 
     return bo;
-
-/*
-free:
-    grate_bo_free(bo);
-    return NULL;
-*/
 }
 
 struct grate_bo *grate_bo_ref(struct grate_bo *bo)
@@ -128,6 +132,7 @@ void grate_bo_unref(struct grate_bo *bo)
    if (!bo)
       return;
 
+   struct grate_device *drm = bo->drm;
    int refcnt = p_atomic_dec_return(&bo->refcnt);
    assert(refcnt >= 0);
 
@@ -135,7 +140,7 @@ void grate_bo_unref(struct grate_bo *bo)
    if (refcnt)
       return;
 
-   pthread_mutex_lock(&bo->drm->bo_map_lock);
+   pthread_mutex_lock(&drm->bo_map_lock);
 
    /* Someone might have imported this BO while we were waiting for the
     * lock, let's make sure it's still not referenced before freeing it.
@@ -145,7 +150,7 @@ void grate_bo_unref(struct grate_bo *bo)
       grate_bo_free(bo);
    }
    
-   pthread_mutex_unlock(&bo->drm->bo_map_lock);
+   pthread_mutex_unlock(&drm->bo_map_lock);
 }
 
 int
@@ -234,19 +239,14 @@ int grate_bo_export(struct grate_bo *bo, uint32_t flags)
 
 static ssize_t fd_get_size(int fd)
 {
-    ssize_t size, offset;
-    int err;
-
-    offset = lseek(fd, 0, SEEK_CUR);
-    if (offset < 0)
-        return -errno;
+    ssize_t size, err;
 
     size = lseek(fd, 0, SEEK_END);
-    if (size < 0)
+    if (size <= 0)
         return -errno;
 
-    err = lseek(fd, offset, SEEK_SET);
-    if (err < 0)
+    err = lseek(fd, 0, SEEK_SET);
+    if (err != 0)
         return -errno;
 
     return size;
@@ -273,8 +273,10 @@ grate_bo_import(struct grate_device *drm, int fd)
 
    if (!bo->size) {
       size = fd_get_size(fd);
-      if (size < 0)
+      if (size < 0) {
+         VDBG_DRM(drm, "failed err %d strerror(%s)\n", (int) size, strerror((int) -size));
          goto error;
+      }
    
       bo->drm = drm;
       bo->size = (uint32_t) size;
