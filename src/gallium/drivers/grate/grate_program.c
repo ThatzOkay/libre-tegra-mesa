@@ -198,7 +198,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
    struct util_dynarray buf;
    util_dynarray_init(&buf, NULL);
 
-#define PUSH(x) util_dynarray_append(&buf, (x))
+#define PUSH(x) util_dynarray_append_typed(&buf, uint32_t, (x))
    PUSH(host1x_opcode_incr(REG_TGR3D_GLOBAL_PIX_ATTR, 1));
    // TODO: document/convert these values
    PUSH(0x58000000);

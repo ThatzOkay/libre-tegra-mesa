@@ -426,6 +426,8 @@ grate_clear(struct pipe_context *pcontext, unsigned int buffers,
             const union pipe_color_union *color, double depth,
             unsigned int stencil)
 {
+   (void) color_clear_mask;
+   (void) stencil_clear_mask;
    struct grate_context *context = grate_context(pcontext);
    struct grate_stream *stream = &context->gr2d->stream;
    uint32_t *ptr;
