@@ -49,7 +49,7 @@ static void grate_bo_free(struct grate_bo *bo)
 {
     struct grate_device *drm = bo->drm;
 
-    VDBG_BO(bo, "\n");
+    grate_bo_logd(bo, "");
 
     if (bo->map)
         munmap(bo->map, bo->size);
@@ -87,7 +87,7 @@ struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_
     err = drmCommandWriteRead(drm->fd, DRM_TEGRA_GEM_CREATE, &args,
                               sizeof(args));
     if (err < 0) {
-        VDBG_DRM(drm, "failed size %u bytes flags 0x%08X err %d (%s)\n",
+        grate_loge("failed size %u bytes flags 0x%08X err %d (%s)\n",
            size, flags, err, strerror(-err));
         return NULL;
     }
@@ -96,7 +96,7 @@ struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_
     bo = grate_lookup_bo(drm, args.handle);
     pthread_mutex_unlock(&drm->bo_map_lock);
     if (!bo) {
-       mesa_loge("failed to allocate bo slot in the bo_map array");
+       grate_loge("failed to allocate bo slot in the bo_map array");
        drmCloseBufferHandle(drm->fd, bo->handle);
        return NULL;
     }
@@ -111,7 +111,7 @@ struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_
 
     grate_bo_prepare(bo);
 
-    VDBG_BO(bo, "%s", "success new\n");
+    grate_bo_logd(bo, "");
 
     return bo;
 }
@@ -119,7 +119,7 @@ struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_
 struct grate_bo *grate_bo_ref(struct grate_bo *bo)
 {
    if (bo) {
-      VDBG_BO(bo, "\n");
+      grate_bo_loge(bo, "");
       ASSERTED int count = p_atomic_inc_return(&bo->refcnt);
       assert(count != 1);
    }
@@ -146,7 +146,7 @@ void grate_bo_unref(struct grate_bo *bo)
     * lock, let's make sure it's still not referenced before freeing it.
     */
    if (p_atomic_read(&bo->refcnt) == 0) {
-      VDBG_BO(bo, "\n");
+      grate_bo_logd(bo, "");
       grate_bo_free(bo);
    }
    
@@ -178,7 +178,7 @@ int grate_bo_map(struct grate_bo *bo, void **ptr)
         err = drmCommandWriteRead(drm->fd, DRM_TEGRA_GEM_MMAP, &args,
                                   sizeof(args));
         if (err < 0) {
-            VDBG_BO(bo, "failed get mapping offset err %d (%s)\n",
+            grate_bo_loge(bo, "failed get mapping offset err %d (%s)\n",
                err, strerror(-err));
             return -errno;
         }
@@ -188,13 +188,13 @@ int grate_bo_map(struct grate_bo *bo, void **ptr)
         bo->map = os_mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
                            drm->fd, bo->offset);
         if (bo->map == MAP_FAILED) {
-            VDBG_BO(bo, "failed to map offset 0x%llX err %d (%s)\n",
+            grate_bo_loge(bo, "failed to map offset 0x%llX err %d (%s)\n",
                args.offset, -errno, strerror(errno));
             bo->map = NULL;
             return -errno;
         }
 
-        VDBG_BO(bo, "success\n");
+        grate_bo_logd(bo, "success\n");
     }
 
     if (ptr)
@@ -211,7 +211,7 @@ int grate_bo_unmap(struct grate_bo *bo)
     if (!bo->map)
         return 0;
 
-    VDBG_BO(bo, "\n");
+    grate_bo_logd(bo, "\n");
 
     if (munmap(bo->map, bo->size))
         return -errno;
@@ -229,7 +229,7 @@ int grate_bo_export(struct grate_bo *bo, uint32_t flags)
 
     err = drmPrimeHandleToFD(bo->drm->fd, bo->handle, flags, &fd);
     if (err < 0) {
-        VDBG_BO(bo, "failed err %d strerror(%s)\n",
+        grate_bo_loge(bo, "failed err %d strerror(%s)\n",
             err, strerror(-err));
         return err;
     }
@@ -264,7 +264,7 @@ grate_bo_import(struct grate_device *drm, int fd)
 
    err = drmPrimeFDToHandle(drm->fd, fd, &gem_handle);
    if (err < 0) {
-      VDBG_DRM(drm, "failed err %d strerror(%s)\n", err, strerror(-err));
+      grate_loge("drmPrimeFDToHandle err %d strerror(%s)\n", err, strerror(-err));
       pthread_mutex_unlock(&drm->bo_map_lock);
       return NULL;
    }
@@ -274,7 +274,7 @@ grate_bo_import(struct grate_device *drm, int fd)
    if (!bo->size) {
       size = fd_get_size(fd);
       if (size < 0) {
-         VDBG_DRM(drm, "failed err %d strerror(%s)\n", (int) size, strerror((int) -size));
+         grate_loge("fd_get_size err %d strerror(%s)\n", (int) size, strerror((int) -size));
          goto error;
       }
    

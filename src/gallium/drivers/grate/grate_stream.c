@@ -126,7 +126,7 @@ grate_stream_flush(struct grate_stream *stream, bool wait)
 
    result = drm_tegra_job_submit(stream->job, NULL);
    if (result != 0) {
-      grate_msg("drm_tegra_job_submit() failed %d\n", result);
+      grate_loge("drm_tegra_job_submit() failed %d\n", result);
       result = -1;
       goto cleanup;
    }
@@ -134,7 +134,7 @@ grate_stream_flush(struct grate_stream *stream, bool wait)
    if (wait) {
       result = drm_tegra_job_wait(stream->job, 1000000);
       if (result != 0) {
-         grate_msg("drm_tegra_job_wait() failed %d\n", result);
+         grate_loge("drm_tegra_job_wait() failed %d\n", result);
          result = -1;
       }
    }
@@ -165,26 +165,26 @@ grate_stream_begin(struct grate_stream *stream, uint32_t **ptrp)
 
    /* check stream and its state */
    if (!(stream && stream->status == GRATE_STREAM_FREE)) {
-      grate_msg("Stream status isn't FREE\n");
+      grate_loge("Stream status isn't FREE\n");
       return -1;
    }
 
    ret = drm_tegra_job_new(stream->channel, &stream->job);
    if (ret != 0) {
-      grate_msg("drm_tegra_job_new() failed %d\n", ret);
+      grate_loge("drm_tegra_job_new() failed %d\n", ret);
       return -1;
    }
 
    ret = drm_tegra_job_get_pushbuf(stream->job, &stream->pushbuf);
    if (ret != 0) {
-      grate_msg("drm_tegra_job_get_pushbuf() failed %d\n", ret);
+      grate_loge("drm_tegra_job_get_pushbuf() failed %d\n", ret);
       drm_tegra_job_free(stream->job);
       return -1;
    }
 
    ret = drm_tegra_pushbuf_begin(stream->pushbuf, stream->num_words, ptrp);
    if (ret != 0) {
-      grate_msg("drm_tegra_pushbuf_prepare() failed %d\n", ret);
+      grate_loge("drm_tegra_pushbuf_prepare() failed %d\n", ret);
       drm_tegra_job_free(stream->job);
       return -1;
    }
@@ -222,7 +222,7 @@ __grate_stream_get_channel_mapping(struct grate_stream *stream,
       ret = drm_tegra_channel_map(stream->channel, bo, flags, &bo_mapping);
       if (ret < 0) {
          stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-         grate_msg("drm_tegra_channel_map() failed: %d\n", ret);
+         grate_loge("drm_tegra_channel_map() failed: %d\n", ret);
          return ret;
       }
       
@@ -257,7 +257,7 @@ grate_stream_push_reloc(struct grate_stream *stream, uint32_t **ptrp,
                                     offset, 0, 0);
    if (ret < 0) {
       stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-      grate_msg("drm_tegra_pushbuf_relocate() failed %d\n", ret);
+      grate_loge("drm_tegra_pushbuf_relocate() failed %d\n", ret);
       return ret;
    }
 
@@ -292,18 +292,18 @@ grate_stream_end(struct grate_stream *stream, uint32_t **ptrp)
    int ret;
 
    if (!(stream && stream->status == GRATE_STREAM_CONSTRUCT)) {
-      grate_msg("Stream status isn't CONSTRUCT\n");
+      grate_loge("Stream status isn't CONSTRUCT\n");
       return -1;
    }
    
    ret = grate_stream_push_sync_cond(stream, ptrp, DRM_TEGRA_SYNC_COND_OP_DONE);
    if (ret < 0) {
-      grate_msg("grate_stream_push_sync_cond() failed: %d\n", ret);
+      grate_loge("grate_stream_push_sync_cond() failed: %d\n", ret);
       return ret;
    }
    
    if (*ptrp >= stream->pushbuf->end) {
-      grate_msg("pushbuf ptr overflow %p pushbuf end %p\n", *ptrp, stream->pushbuf->end);
+      grate_loge("pushbuf ptr overflow %p pushbuf end %p\n", *ptrp, stream->pushbuf->end);
       return 1;
    }
    assert(stream->pushbuf->start < *ptrp);
@@ -312,7 +312,7 @@ grate_stream_end(struct grate_stream *stream, uint32_t **ptrp)
    *ptrp = 0;
    if (ret != 0) {
       stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-      grate_msg("drm_tegra_pushbuf_sync() failed %d\n", ret);
+      grate_loge("drm_tegra_pushbuf_sync() failed %d\n", ret);
       return -1;
    }
 
@@ -354,7 +354,7 @@ int grate_stream_push_words(struct grate_stream *stream, uint32_t **ptrp, const 
    int ret = 0;
 
    if (!(stream && stream->status == GRATE_STREAM_CONSTRUCT)) {
-      grate_msg("Stream status isn't CONSTRUCT\n");
+      grate_loge("Stream status isn't CONSTRUCT\n");
       return -1;
    }
 
@@ -378,7 +378,7 @@ int grate_stream_push_words(struct grate_stream *stream, uint32_t **ptrp, const 
                                        reloc_arg.offset, 0, 0);
       if (ret != 0) {
          stream->status = GRATE_STREAM_CONSTRUCTION_FAILED;
-         grate_msg("__grate_stream_get_channel_mapping() failed %d\n", ret);
+         grate_loge("__grate_stream_get_channel_mapping() failed %d\n", ret);
          break;
       }
    }
