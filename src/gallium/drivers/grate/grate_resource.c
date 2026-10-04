@@ -438,7 +438,7 @@ grate_clear(struct pipe_context *pcontext, unsigned int buffers,
 
    err = grate_stream_begin(stream, &ptr);
    if (err < 0) {
-      grate_msg("grate_stream_begin() failed: %d\n", err);
+      grate_loge("grate_stream_begin() failed: %d\n", err);
       return;
    }
 
@@ -485,7 +485,7 @@ grate_clear_render_target(struct pipe_context *pipe,
    
    err = grate_stream_begin(stream, &ptr);
    if (err < 0) {
-      grate_msg("grate_stream_begin() failed: %d\n", err);
+      grate_loge("grate_stream_begin() failed: %d\n", err);
       return;
    }
    
@@ -517,7 +517,7 @@ grate_clear_depth_stencil(struct pipe_context *pipe,
    
    err = grate_stream_begin(stream, &ptr);
    if (err < 0) {
-      grate_msg("grate_stream_begin() failed: %d\n", err);
+      grate_loge("grate_stream_begin() failed: %d\n", err);
       return;
    }
    
