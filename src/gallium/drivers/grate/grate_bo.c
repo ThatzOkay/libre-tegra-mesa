@@ -225,7 +225,14 @@ int grate_bo_export(struct grate_bo *bo, uint32_t flags)
 {
     int fd, err;
 
-    flags |= DRM_CLOEXEC;
+    /* DRM_RDWR: the importer (e.g. the compositor) needs to be able to
+     * write through this fd too, not just read it -- without it, CPU
+     * access to an imported scanout buffer (cursor updates, clears) fails.
+     * Ported from grate-surface-rt-48283c9.patch (github.com/grate-driver/
+     * mesa#19), which added the same flag at the old drm_tegra_bo_to_dmabuf()
+     * call site before that wrapper was folded into this file.
+     */
+    flags |= DRM_CLOEXEC | DRM_RDWR;
 
     err = drmPrimeHandleToFD(bo->drm->fd, bo->handle, flags, &fd);
     if (err < 0) {
@@ -237,16 +244,23 @@ int grate_bo_export(struct grate_bo *bo, uint32_t flags)
     return fd;
 }
 
-static ssize_t fd_get_size(int fd)
+/* off_t, not ssize_t: on a 32-bit build with large-file support, lseek()'s
+ * return is 64-bit, and a DMA-BUF (unlike a regular GEM BO fd) has no
+ * imposed upper bound on that -- truncating it into ssize_t here would
+ * silently wrap before the caller ever gets a chance to range-check it
+ * against bo->size's uint32_t. See the overflow check at the grate_bo_import()
+ * call site. Ported from grate-surface-rt-48283c9.patch (github.com/
+ * grate-driver/mesa#19); this file's own version of that patch's fix.
+ */
+static off_t fd_get_size(int fd)
 {
-    ssize_t size, err;
+    off_t size;
 
     size = lseek(fd, 0, SEEK_END);
     if (size <= 0)
         return -errno;
 
-    err = lseek(fd, 0, SEEK_SET);
-    if (err != 0)
+    if (lseek(fd, 0, SEEK_SET) != 0)
         return -errno;
 
     return size;
@@ -256,7 +270,7 @@ struct grate_bo*
 grate_bo_import(struct grate_device *drm, int fd)
 {
    struct grate_bo *bo;
-   ssize_t size;
+   off_t size;
    int err;
    unsigned gem_handle;
 
@@ -277,7 +291,11 @@ grate_bo_import(struct grate_device *drm, int fd)
          grate_loge("fd_get_size err %d strerror(%s)\n", (int) size, strerror((int) -size));
          goto error;
       }
-   
+      if ((uint64_t) size > UINT32_MAX) {
+         grate_loge("fd_get_size %lld overflows bo->size (uint32_t)\n", (long long) size);
+         goto error;
+      }
+
       bo->drm = drm;
       bo->size = (uint32_t) size;
       bo->handle = gem_handle;
