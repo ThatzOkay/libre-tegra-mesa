@@ -189,7 +189,9 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
       else if (template->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT))
          resource->pitch = align(resource->pitch, 32);
 
-      flags = DRM_TEGRA_GEM_CREATE_BOTTOM_UP;
+      /* The kernel reflects BOTTOM_UP framebuffers at scanout. GBM/KMS
+       * buffers already use the display's normal row order. */
+      flags = (template->bind & PIPE_BIND_SCANOUT) ? 0 : DRM_TEGRA_GEM_CREATE_BOTTOM_UP;
    }
 
    if (template->target != PIPE_BUFFER) {
@@ -204,6 +206,13 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
       }
       resource->format = format;
    }
+
+   /* Textures use either tight POT rows or 64-byte NPOT rows. Renderable
+    * textures can be sampled later, so allocate a native NPOT-compatible
+    * stride rather than the framebuffer-only 32-byte alignment.
+    */
+   if (template->target != PIPE_BUFFER && (template->bind & PIPE_BIND_SAMPLER_VIEW))
+      resource->pitch = align(resource->pitch, 64);
 
    size = resource->pitch * height;
 

@@ -778,10 +778,20 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
       struct grate_resource *res = grate_resource(view->texture);
       assert(view->target == PIPE_TEXTURE_2D && view->u.tex.first_level == 0);
       assert(view->u.tex.last_level == 0 && sampler->min_mip_filter == PIPE_TEX_MIPFILTER_NONE);
-      /* A single-row texture never advances to another row. Its allocation
-       * may be padded for rendering/import without changing sampler layout. */
-      assert(res->pitch == res->b.width0 * util_format_get_blocksize(res->b.format) ||
-             (res->b.height0 == 1 && res->pitch >= res->b.width0 * util_format_get_blocksize(res->b.format)));
+      unsigned row_bytes = res->b.width0 * util_format_get_blocksize(res->b.format);
+      /* POT layout is tightly packed. NPOT layout rounds rows to 64 bytes,
+       * even when the logical dimensions themselves are powers of two.
+       */
+      bool pot_layout = util_is_power_of_two_or_zero(res->b.width0) &&
+                        util_is_power_of_two_or_zero(res->b.height0) &&
+                        (res->pitch == row_bytes || res->b.height0 == 1);
+      unsigned native_pitch = pot_layout ? row_bytes : align(row_bytes, 64);
+      bool native_layout = res->pitch == native_pitch ||
+                           (res->b.height0 == 1 && res->pitch >= row_bytes);
+      if (!native_layout)
+         fprintf(stderr, "GRATE unsupported sampler layout: %s %ux%u pitch=%u native=%u\n",
+                 util_format_name(res->b.format),res->b.width0,res->b.height0,res->pitch,native_pitch);
+      assert(native_layout);
       if (grate_debug & GRATE_DEBUG_TRACE)
          fprintf(stderr, "GRATE sampler: %s view %s swizzle=%u,%u,%u,%u size=%ux%u pitch=%u format=%u\n",
                  util_format_name(res->b.format), util_format_name(view->format),
@@ -814,7 +824,7 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
       if (sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR) lo |= TGR3D_TEX_TEXDESC_LO_LERP_MIN;
       if (sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR) lo |= TGR3D_TEX_TEXDESC_LO_LERP_MAG;
       uint32_t hi = 0x80; /* base level only */
-      if (util_is_power_of_two_or_zero(res->b.width0) && util_is_power_of_two_or_zero(res->b.height0)) {
+      if (pot_layout) {
          hi |= TGR3D_TEX_TEXDESC_HI_LOG2_WIDTH(util_logbase2(res->b.width0));
          hi |= TGR3D_TEX_TEXDESC_HI_LOG2_HEIGHT(util_logbase2(res->b.height0));
       } else {
