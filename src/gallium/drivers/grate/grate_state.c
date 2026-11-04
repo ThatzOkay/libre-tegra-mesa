@@ -110,8 +110,8 @@ grate_set_scissor_states(struct pipe_context *pcontext,
                          unsigned num_scissors,
                          const struct pipe_scissor_state * scissors)
 {
-   assert(num_scissors == 1);
-   grate_unimplemented();
+   assert(start_slot == 0 && num_scissors == 1);
+   grate_context(pcontext)->scissor = scissors[0];
 }
 
 static void
@@ -640,7 +640,22 @@ static void
 emit_scissor(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-   grate_stream_push_words(stream, ptrp, context->no_scissor, 3, 0);
+   if (!context->rast->base.scissor) {
+      grate_stream_push_words(stream, ptrp, context->no_scissor, 3, 0);
+      return;
+   }
+
+   /* Gallium scissor coordinates already use the framebuffer's orientation;
+    * do not invert them again for a negative viewport Y scale.
+    */
+   const struct pipe_scissor_state *s = &context->scissor;
+   unsigned width = context->framebuffer.base.width;
+   unsigned height = context->framebuffer.base.height;
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_SU_SCISSOR_X, 2));
+   GRATE_PUSHBUF_WORD(*ptrp, TGR3D_SU_SCISSOR_X_MIN(MIN2(s->minx, width)) |
+                           TGR3D_SU_SCISSOR_X_MAX(MIN2(s->maxx, width)));
+   GRATE_PUSHBUF_WORD(*ptrp, TGR3D_SU_SCISSOR_Y_MIN(MIN2(s->miny, height)) |
+                           TGR3D_SU_SCISSOR_Y_MAX(MIN2(s->maxy, height)));
 }
 
 static void
