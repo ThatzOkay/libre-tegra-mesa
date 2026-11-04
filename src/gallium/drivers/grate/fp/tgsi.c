@@ -155,7 +155,10 @@ emit_vMOV(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
 
    if (dst->File == TGSI_FILE_OUTPUT) {
       inst->dw.enable = 1;
-      inst->dw.index = dst->Index;
+      /* Hardware target 0 is reserved for depth, with or without a
+       * depth attachment. Match grate_set_framebuffer_state().
+       */
+      inst->dw.index = dst->Index + 1;
       inst->dw.stencil_write = 0;
       inst->dw.src_regs = FP_DW_REGS_R2_R3; // hard-coded for now
    }
