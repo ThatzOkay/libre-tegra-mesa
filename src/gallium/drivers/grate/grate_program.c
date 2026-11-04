@@ -202,8 +202,17 @@ grate_create_fs_state(struct pipe_context *pcontext,
 
 #define PUSH(x) util_dynarray_append_typed(&buf, uint32_t, (x))
    PUSH(host1x_opcode_incr(REG_TGR3D_GLOBAL_PIX_ATTR, 1));
-   // TODO: document/convert these values
-   PUSH(0x58000000);
+   /* One pixel row, with the matching sequencer capacity used by libgrate.
+    * The old capacity/flow-control combination only worked reliably for a
+    * single pipeline batch. MUL with independently interpolated operands
+    * needs more than one batch.
+    */
+   PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID((0x12c - 1) / 4));
+   PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_CTL, 1));
+   PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(0x12c) |
+        TGR3D_PSEQ_CTL_MIN_OUT(0xc8) |
+        TGR3D_PSEQ_CTL_MERGE_SPAN_STARTS | TGR3D_PSEQ_CTL_MERGE_REGISTERS |
+        TGR3D_PSEQ_CTL_REMOVE_KILLED_PIXELS | TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS);
 
    PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_QUAD_ID, 0));
    PUSH(host1x_opcode_imm(REG_TGR3D_GLOBAL_INST_OFFSET, 0));
@@ -219,7 +228,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
 
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_DWR_IF_STATE, 1));
    // TODO: document/convert these values
-   PUSH(0x00000040);
+   PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(num_fp_instrs));
 
    if (soc_id == DRM_TEGRA_SOC_T114) {
       // TODO: document/convert these values
