@@ -120,8 +120,30 @@ drm_tegra_channel_open(struct grate_device *drm,
         return -ENOTSUP;
     }
 
+    util_dynarray_init(&channel->pending_bos, NULL);
     *channelp = channel;
 
+    return 0;
+}
+
+/* Complete all submitted work before presentation, channel close, or a bounded
+ * queue rollover. Retaining BOs prevents GEM handle reuse while jobs are queued.
+ */
+int drm_tegra_channel_drain(struct drm_tegra_channel *channel)
+{
+    if (!channel->pending_jobs)
+        return 0;
+    int err = drm_tegra_fence_wait(&channel->pending, 1000000000UL);
+    if (err)
+        return err;
+    util_dynarray_foreach(&channel->pending_bos, struct grate_bo *, item) {
+        struct grate_bo *bo = *item;
+        if (bo->pending_channel == channel)
+            bo->pending_channel = NULL;
+        grate_bo_unref(bo);
+    }
+    util_dynarray_clear(&channel->pending_bos);
+    channel->pending_jobs = 0;
     return 0;
 }
 
@@ -134,6 +156,9 @@ int drm_tegra_channel_close(struct drm_tegra_channel *channel)
     if (!channel)
         return -EINVAL;
 
+    err = drm_tegra_channel_drain(channel);
+    if (err)
+        return err;
     drm = channel->drm;
 
     memset(&args, 0, sizeof(args));
@@ -143,6 +168,7 @@ int drm_tegra_channel_close(struct drm_tegra_channel *channel)
     if (err < 0)
         return -errno;
 
+    util_dynarray_fini(&channel->pending_bos);
     grate_bo_unref(channel->gather);
     free(channel);
 

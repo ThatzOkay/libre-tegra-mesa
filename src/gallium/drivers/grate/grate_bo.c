@@ -164,8 +164,18 @@ grate_bo_get_handle(struct grate_bo *bo, uint32_t *handle)
     return 0;
 }
 
+int grate_bo_wait(struct grate_bo *bo)
+{
+    if (!bo->pending_channel)
+        return 0;
+    return drm_tegra_fence_wait(&bo->pending, 1000000000UL);
+}
+
 int grate_bo_map(struct grate_bo *bo, void **ptr)
 {
+    int wait_err = grate_bo_wait(bo);
+    if (wait_err)
+        return wait_err;
     struct grate_device *drm = bo->drm;
 
     if (!bo->map) {
@@ -223,6 +233,9 @@ int grate_bo_unmap(struct grate_bo *bo)
 
 int grate_bo_export(struct grate_bo *bo, uint32_t flags)
 {
+    int wait_err = grate_bo_wait(bo);
+    if (wait_err)
+        return wait_err;
     int fd, err;
 
     /* DRM_RDWR: the importer (e.g. the compositor) needs to be able to

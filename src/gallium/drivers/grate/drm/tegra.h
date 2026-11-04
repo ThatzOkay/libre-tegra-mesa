@@ -63,6 +63,7 @@ struct drm_tegra_fence {
 int drm_tegra_channel_open(struct grate_device *drm,
                            enum drm_tegra_class client,
                            struct drm_tegra_channel **channelp);
+int drm_tegra_channel_drain(struct drm_tegra_channel *channel);
 int drm_tegra_channel_close(struct drm_tegra_channel *channel);
 unsigned int drm_tegra_channel_get_version(struct drm_tegra_channel *channel);
 int drm_tegra_channel_map(struct drm_tegra_channel *channel,

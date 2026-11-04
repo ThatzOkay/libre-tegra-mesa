@@ -90,7 +90,15 @@ grate_context_flush(struct pipe_context *pcontext,
                     struct pipe_fence_handle **pfence,
                     enum pipe_flush_flags flags)
 {
-   //TODO grate_unimplemented();
+   struct grate_context *context = grate_context(pcontext);
+   int err = drm_tegra_channel_drain(context->gr3d->stream.channel);
+   if (!err)
+      err = drm_tegra_channel_drain(context->gr2d->stream.channel);
+   if (err)
+      grate_loge("context drain failed: %d\n", err);
+   /* Work is complete on return; there is no outstanding pipe fence. */
+   if (pfence)
+      *pfence = NULL;
 }
 
 struct pipe_context *

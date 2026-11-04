@@ -421,12 +421,10 @@ grate_draw_vbo(struct pipe_context *pcontext,
 
    grate_stream_end(stream, &ptr);
 
-   /* Draws are submitted immediately, but resource maps and context flushes
-    * do not track/wait their fences yet. Complete the draw before releasing
-    * its job so CPU readback and subsequent gr2d clears cannot race it.
-    * Replace this synchronous fallback with resource fence tracking later.
+   /* BO maps, cross-channel use and context flush wait on the recorded fences.
+    * Consecutive draws on this channel can therefore run without CPU waits.
     */
-   err = grate_stream_flush(stream, true);
+   err = grate_stream_flush(stream, false);
    if (err < 0)
       grate_loge("grate_stream_flush() failed: %d\n", err);
 }

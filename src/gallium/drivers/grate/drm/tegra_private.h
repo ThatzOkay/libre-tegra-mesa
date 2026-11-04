@@ -31,6 +31,7 @@
 
 #include "drm-uapi/tegra_drm.h"
 #include "tegra.h"
+#include "util/u_dynarray.h"
 
 enum host1x_class {
     HOST1X_CLASS_HOST1X = 0x01,
@@ -51,6 +52,10 @@ struct drm_tegra_channel {
      * mapped staging BO rather than allocating one for every draw.
      */
     struct grate_bo *gather;
+
+    struct drm_tegra_fence pending;
+    struct util_dynarray pending_bos;
+    unsigned int pending_jobs;
 
     unsigned int cond_shift;
 };

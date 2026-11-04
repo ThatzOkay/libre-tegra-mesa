@@ -26,6 +26,7 @@
 #define __GRATE_BO_H__ 1
 
 #include <stdint.h>
+#include "tegra.h"
 #include <stdlib.h>
 #include <util/u_dynarray.h>
 #include <util/sparse_array.h>
@@ -38,6 +39,9 @@ struct grate_bo {
     uint32_t size;
     int32_t refcnt;
     void *map;
+    /* Last GPU use, including reads. The channel retains this BO until drain. */
+    struct drm_tegra_channel *pending_channel;
+    struct drm_tegra_fence pending;
     
     /* List of channel mappings where made for this BO, for cleanup */
     struct util_dynarray channel_maps;
@@ -49,6 +53,7 @@ struct grate_bo *grate_bo_alloc(struct grate_device *drm, uint32_t size, uint32_
 struct grate_bo *grate_bo_ref(struct grate_bo *bo);
 void grate_bo_unref(struct grate_bo *bo);
 int grate_bo_get_handle(struct grate_bo *bo, uint32_t *handle);
+int grate_bo_wait(struct grate_bo *bo);
 int grate_bo_map(struct grate_bo *bo, void **ptr);
 int grate_bo_unmap(struct grate_bo *bo);
 
