@@ -171,6 +171,22 @@ drm_tegra_job_submit(struct drm_tegra_job *job, struct drm_tegra_fence *fence)
     void *map;
     int err;
 
+    if (channel->pending_jobs >= 128) {
+        err = drm_tegra_channel_drain(channel);
+        if (err)
+            return err;
+    }
+    /* Same-channel submissions execute in order. Across channels (especially
+     * gr3d draw -> gr2d clear/copy), finish the previous use first.
+     */
+    for (i = 0; i < job->num_buffers; i++) {
+        struct grate_bo *bo = grate_lookup_bo(drm, job->buffers[i].mapping);
+        if (bo->pending_channel && bo->pending_channel != channel) {
+            err = grate_bo_wait(bo);
+            if (err)
+                return err;
+        }
+    }
     words = job->pushbuf->ptr - job->pushbuf->start;
 
     /* waiting for another job's sync point is a per-command feature the classic interface does not have */
@@ -272,6 +288,17 @@ drm_tegra_job_submit(struct drm_tegra_job *job, struct drm_tegra_fence *fence)
     }
 
     job->syncpt.fence = args.fence;
+    channel->pending = (struct drm_tegra_fence){drm, job->syncpt.id, args.fence};
+    channel->pending_jobs++;
+    for (i = 0; i < job->num_buffers; i++) {
+        struct grate_bo *bo = grate_lookup_bo(drm, job->buffers[i].mapping);
+        if (bo->pending_channel != channel) {
+            grate_bo_ref(bo);
+            util_dynarray_append_typed(&channel->pending_bos, struct grate_bo *, bo);
+        }
+        bo->pending_channel = channel;
+        bo->pending = channel->pending;
+    }
 
     if (fence) {
         fence->drm = drm;

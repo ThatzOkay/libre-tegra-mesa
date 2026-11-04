@@ -37,6 +37,8 @@ grate_resource_get_handle(struct pipe_screen *pscreen,
       return false;
 
    resource = grate_resource(presource);
+   if (grate_bo_wait(resource->bo))
+      return false;
 
    if (handle->type == WINSYS_HANDLE_TYPE_KMS) {
       ret = grate_bo_get_handle(resource->bo, &handle->handle);
@@ -557,7 +559,9 @@ grate_clear_depth_stencil(struct pipe_context *pipe,
 static void
 grate_flush_resource(struct pipe_context *ctx, struct pipe_resource *resource)
 {
-   //TODO grate_unimplemented();
+   int err = grate_bo_wait(grate_resource(resource)->bo);
+   if (err)
+      grate_loge("resource wait failed: %d\n", err);
 }
 
 void
