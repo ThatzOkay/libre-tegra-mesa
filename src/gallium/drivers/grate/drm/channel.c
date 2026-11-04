@@ -27,6 +27,7 @@
 #endif
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <sys/ioctl.h>
@@ -133,7 +134,9 @@ int drm_tegra_channel_drain(struct drm_tegra_channel *channel)
 {
     if (!channel->pending_jobs)
         return 0;
-    int err = drm_tegra_fence_wait(&channel->pending, 1000000000UL);
+    if (drm_trace_level())
+        fprintf(stderr, "grate-drm: drain %u pending jobs\n", channel->pending_jobs);
+    int err = drm_tegra_fence_wait(&channel->pending, 1000000000UL, "drain");
     if (err)
         return err;
     util_dynarray_foreach(&channel->pending_bos, struct grate_bo *, item) {

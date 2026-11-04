@@ -45,7 +45,7 @@
  * GRATE_DRM_TRACE=1 logs every submit and wait to stderr; =2 also dumps the command words of each submit. For finding
  * out whether the driver's jobs reach the kernel and complete (there is no other trace of draws).
  */
-static int
+int
 drm_trace_level(void)
 {
     static int level = -1;
@@ -338,11 +338,13 @@ drm_tegra_job_wait(struct drm_tegra_job *job, unsigned long timeout)
     args.thresh = job->syncpt.fence;
     args.timeout = ms;
 
+    unsigned long long t0 = drm_trace_level() ? drm_tegra_now_us() : 0;
+
     err = ioctl(drm->fd, GRATE_CLASSIC_IOCTL_SYNCPT_WAIT, &args);
 
     if (drm_trace_level())
-        fprintf(stderr, "grate-drm: wait id %u thresh %u (%lu ms) -> %d\n", args.id, args.thresh, ms,
-                err < 0 ? -errno : 0);
+        fprintf(stderr, "grate-drm: wait id %u thresh %u (%lu ms) -> %d, blocked %llu us\n", args.id, args.thresh, ms,
+                err < 0 ? -errno : 0, drm_tegra_now_us() - t0);
 
     if (err < 0)
         return -errno;

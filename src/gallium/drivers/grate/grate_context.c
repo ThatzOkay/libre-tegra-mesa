@@ -91,6 +91,8 @@ grate_context_flush(struct pipe_context *pcontext,
                     enum pipe_flush_flags flags)
 {
    struct grate_context *context = grate_context(pcontext);
+   if (drm_trace_level())
+      fprintf(stderr, "grate-drm: flush flags 0x%x\n", (unsigned)flags);
    int err = drm_tegra_channel_drain(context->gr3d->stream.channel);
    if (!err)
       err = drm_tegra_channel_drain(context->gr2d->stream.channel);
