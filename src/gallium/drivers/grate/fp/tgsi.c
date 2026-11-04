@@ -261,10 +261,20 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
          }
       }
    }
+   bool direct_pack = output_stage && opcode == TGSI_OPCODE_MOV &&
+      dst->WriteMask == TGSI_WRITEMASK_XYZW && src->File == TGSI_FILE_TEMPORARY &&
+      src->SwizzleX == TGSI_SWIZZLE_X && src->SwizzleY == TGSI_SWIZZLE_Y &&
+      src->SwizzleZ == TGSI_SWIZZLE_Z && src->SwizzleW == TGSI_SWIZZLE_W;
+   for (unsigned c = 0; direct_pack && c < 4; c++)
+      direct_pack = fp->temp_src[src->Index][c] == (int)c;
+   if (direct_pack)
+      output_stage = false;
    struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
    int alu_instrs = 0;
    list_inithead(&alu->link);
-   for (int i = 0; i < 4; ++i) {
+   for (int slot = 0; slot < 4; ++slot) {
+      static const unsigned pack_order[] = {2,3,0,1};
+      int i = direct_pack ? pack_order[slot] : slot;
       if ((dst->WriteMask & (1 << i)) == 0)
          continue;
 
@@ -520,6 +530,73 @@ emit_tgsi_input(struct grate_fp_shader *fp, const struct tgsi_full_declaration *
    fp->info.num_inputs++;
 }
 
+/* Stream a direct product of two varyings through R0/R1. The linker places
+ * the selected A component in TRAM.x and B in TRAM.y, so each MFU fetch can
+ * read both operands without a persistent global-register temporary. Keep
+ * the accumulated packed output in R2/R3 until the final component.
+ */
+static bool
+emit_direct_varying_product(struct grate_fp_shader *fp,
+                            const struct tgsi_full_instruction *code,
+                            unsigned count)
+{
+   if (count != 1 || code->Instruction.Opcode != TGSI_OPCODE_MUL ||
+       code->Instruction.NumDstRegs != 1 || code->Instruction.NumSrcRegs != 2 ||
+       code->Dst[0].Register.File != TGSI_FILE_OUTPUT ||
+       code->Dst[0].Register.WriteMask != TGSI_WRITEMASK_XYZW)
+      return false;
+   const struct tgsi_src_register *a = &code->Src[0].Register;
+   const struct tgsi_src_register *b = &code->Src[1].Register;
+   if (a->File != TGSI_FILE_INPUT || b->File != TGSI_FILE_INPUT ||
+       a->Index == b->Index || a->Index >= 15 || b->Index >= 15 ||
+       a->Indirect || b->Indirect)
+      return false;
+   unsigned swizzle[2][4] = {
+      {a->SwizzleX,a->SwizzleY,a->SwizzleZ,a->SwizzleW},
+      {b->SwizzleX,b->SwizzleY,b->SwizzleZ,b->SwizzleW},
+   };
+   fp->info.num_inputs = 8;
+   fp->info.max_tram_row = 8;
+   for (unsigned c = 0; c < 4; c++) {
+      for (unsigned operand = 0; operand < 2; operand++) {
+         unsigned row = c * 2 + operand;
+         unsigned export = operand ? b->Index : a->Index;
+         fp->info.inputs[row].src = LINK_SRC(export + 1) | (row << 9);
+         fp->info.inputs[row].dst = LINK_DST(swizzle[operand][c], operand, LINK_DST_FP20);
+      }
+      struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
+      struct fp_mfu_instr *mfu = CALLOC_STRUCT(fp_mfu_instr);
+      struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&inst->link);
+      list_inithead(&mfu->link);
+      list_inithead(&alu->link);
+      setup_interpolation(mfu);
+      mfu->var[0].op = mfu->var[1].op = FP_VAR_OP_FP20;
+      mfu->var[0].tram_row = c * 2;
+      mfu->var[1].tram_row = c * 2 + 1;
+      inst->mfu_sched.address = list_length(&fp->mfu_instructions);
+      inst->mfu_sched.num_instructions = 1;
+      inst->alu_sched.address = list_length(&fp->alu_instructions);
+      inst->alu_sched.num_instructions = 1;
+      struct fp_alu_src_operand va = fp_alu_src_row(0);
+      struct fp_alu_src_operand vb = fp_alu_src_row(1);
+      va.negate = a->Negate; va.absolute_value = a->Absolute;
+      vb.negate = b->Negate; vb.absolute_value = b->Absolute;
+      alu->slots[0] = fp_alu_sMOV(fp_alu_dst(fp, &code->Dst[0].Register, c,
+                                           code->Instruction.Saturate), va);
+      alu->slots[0].src[1] = vb;
+      if (c == 3) {
+         inst->dw.enable = 1;
+         inst->dw.index = code->Dst[0].Register.Index + 1;
+         inst->dw.src_regs = FP_DW_REGS_R2_R3;
+      }
+      list_addtail(&mfu->link, &fp->mfu_instructions);
+      list_addtail(&alu->link, &fp->alu_instructions);
+      list_addtail(&inst->link, &fp->fp_instructions);
+   }
+   return true;
+}
+
 static void
 emit_tgsi_declaration(struct grate_fp_shader *fp, const struct tgsi_full_declaration *decl)
 {
@@ -576,6 +653,12 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
             util_dynarray_append_typed(&instructions, struct tgsi_full_instruction, tgsi->FullToken.FullInstruction);
          break;
       }
+   }
+
+   if (emit_direct_varying_product(fp, instructions.data,
+            util_dynarray_num_elements(&instructions, struct tgsi_full_instruction))) {
+      util_dynarray_fini(&instructions);
+      return;
    }
 
    /* Fragment output values stay virtual until all shader operations have
@@ -640,7 +723,15 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
    }
    for (unsigned n = 0; n < count; n++) {
       const struct tgsi_full_instruction *inst = &code[n];
-      fp->late_rows = (int)n > last_fetch;
+      bool single_input = true;
+      int input = -1;
+      for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++) {
+         const struct tgsi_src_register *reg = &inst->Src[src].Register;
+         if (reg->File != TGSI_FILE_INPUT) continue;
+         if (input >= 0 && input != reg->Index) single_input = false;
+         input = reg->Index;
+      }
+      fp->late_rows = (int)n > last_fetch || ((int)n == last_fetch && single_input);
       fp->texture_rows = (int)n == last_fetch && inst->Instruction.Opcode == TGSI_OPCODE_TEX;
       memset(fp->claimed, 0, sizeof(fp->claimed));
       memset(fp->reusable, 0, sizeof(fp->reusable));
