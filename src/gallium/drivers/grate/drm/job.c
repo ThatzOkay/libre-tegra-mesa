@@ -179,9 +179,15 @@ drm_tegra_job_submit(struct drm_tegra_job *job, struct drm_tegra_fence *fence)
             return -ENOTSUP;
     }
 
-    gather = grate_bo_alloc(drm, align(words * 4, job->page_size), 0);
-    if (!gather)
-        return -ENOMEM;
+    unsigned int gather_size = align(words * 4, job->page_size);
+    if (!channel->gather || channel->gather->size < gather_size) {
+        gather = grate_bo_alloc(drm, gather_size, 0);
+        if (!gather)
+            return -ENOMEM;
+        grate_bo_unref(channel->gather);
+        channel->gather = gather;
+    }
+    gather = channel->gather;
 
     err = grate_bo_map(gather, &map);
     if (err < 0)
@@ -280,8 +286,6 @@ drm_tegra_job_submit(struct drm_tegra_job *job, struct drm_tegra_fence *fence)
 out_relocs:
     free(relocs);
 out_bo:
-    grate_bo_unref(gather);
-
     return err;
 }
 
