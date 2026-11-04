@@ -181,7 +181,13 @@ grate_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
                         unsigned unbind_num_trailing_slots,
                         struct pipe_sampler_view **views)
 {
-   grate_unimplemented();
+   struct grate_context *ctx = grate_context(pctx);
+   assert(shader == MESA_SHADER_FRAGMENT);
+   assert(start_slot + num_views + unbind_num_trailing_slots <= 16);
+   for (unsigned i = 0; i < num_views; i++)
+      pipe_sampler_view_reference(&ctx->sampler_views[start_slot + i], views ? views[i] : NULL);
+   for (unsigned i = 0; i < unbind_num_trailing_slots; i++)
+      pipe_sampler_view_reference(&ctx->sampler_views[start_slot + num_views + i], NULL);
 }
 
 static void
@@ -279,7 +285,11 @@ grate_bind_sampler_states(struct pipe_context *pcontext,
                           unsigned start_slot, unsigned num_samplers,
                           void **samplers)
 {
-   grate_unimplemented();
+   struct grate_context *ctx = grate_context(pcontext);
+   assert(shader == MESA_SHADER_FRAGMENT);
+   assert(start_slot + num_samplers <= 16);
+   for (unsigned i = 0; i < num_samplers; i++)
+      ctx->samplers[start_slot + i] = samplers ? samplers[i] : NULL;
 }
 
 static void
@@ -714,6 +724,47 @@ emit_program(struct grate_context *context, uint32_t **ptrp)
    grate_stream_push_words(stream, ptrp, linker_insts, ARRAY_SIZE(linker_insts), 0);
 }
 
+/* Base-level linear 2D textures. The texture engine derives row stride from
+ * width; sampler-only resources therefore have tightly packed rows.
+ */
+static void
+emit_textures(struct grate_context *ctx, uint32_t **ptrp)
+{
+   struct grate_stream *stream = &ctx->gr3d->stream;
+   uint32_t *ptr = *ptrp;
+   for (unsigned i = 0; i < 16; i++) {
+      struct pipe_sampler_view *view = ctx->sampler_views[i];
+      struct pipe_sampler_state *sampler = ctx->samplers[i];
+      if (!view || !sampler)
+         continue;
+      struct grate_resource *res = grate_resource(view->texture);
+      assert(view->target == PIPE_TEXTURE_2D && view->u.tex.first_level == 0);
+      assert(view->u.tex.last_level == 0 && sampler->min_mip_filter == PIPE_TEX_MIPFILTER_NONE);
+      assert(res->pitch == res->b.width0 * util_format_get_blocksize(res->b.format));
+      uint32_t lo = TGR3D_TEX_TEXDESC_LO_SURF_FORMAT(res->format);
+      if (sampler->wrap_s == PIPE_TEX_WRAP_CLAMP_TO_EDGE) lo |= 2;
+      else assert(sampler->wrap_s == PIPE_TEX_WRAP_REPEAT);
+      if (sampler->wrap_t == PIPE_TEX_WRAP_CLAMP_TO_EDGE) lo |= 1;
+      else assert(sampler->wrap_t == PIPE_TEX_WRAP_REPEAT);
+      if (sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR) lo |= TGR3D_TEX_TEXDESC_LO_LERP_MIN;
+      if (sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR) lo |= TGR3D_TEX_TEXDESC_LO_LERP_MAG;
+      uint32_t hi = 0x80; /* base level only */
+      if (util_is_power_of_two_or_zero(res->b.width0) && util_is_power_of_two_or_zero(res->b.height0)) {
+         hi |= TGR3D_TEX_TEXDESC_HI_LOG2_WIDTH(util_logbase2(res->b.width0));
+         hi |= TGR3D_TEX_TEXDESC_HI_LOG2_HEIGHT(util_logbase2(res->b.height0));
+      } else {
+         hi |= 0x40 | TGR3D_TEX_TEXDESC_HI_WIDTH(res->b.width0) |
+                      TGR3D_TEX_TEXDESC_HI_HEIGHT(res->b.height0);
+      }
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXADDR(i), 1));
+      grate_stream_push_reloc(stream, &ptr, res->bo, 0);
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_LO(i), 2));
+      GRATE_PUSHBUF_WORD(ptr, lo);
+      GRATE_PUSHBUF_WORD(ptr, hi);
+   }
+   *ptrp = ptr;
+}
+
 void
 grate_emit_state(struct grate_context *context, uint32_t **ptrp)
 {
@@ -725,6 +776,7 @@ grate_emit_state(struct grate_context *context, uint32_t **ptrp)
    emit_attribs(context, ptrp);
    emit_vs_uniforms(context, ptrp);
    emit_program(context, ptrp);
+   emit_textures(context, ptrp);
 }
 
 void
