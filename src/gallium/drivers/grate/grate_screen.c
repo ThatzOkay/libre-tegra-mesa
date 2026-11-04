@@ -340,7 +340,7 @@ grate_screen_init_shader_caps(struct grate_screen *screen)
    caps->max_tex_indirections = 128;
    caps->max_inputs = 16;
    caps->max_outputs = 16;
-   caps->max_const_buffer0_size = 32;
+   caps->max_const_buffer0_size = 32 * sizeof(float);
    caps->max_const_buffers = 1;
    caps->max_temps = 16; // scalars
    caps->max_texture_samplers = 16;
