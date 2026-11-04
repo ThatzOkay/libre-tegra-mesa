@@ -382,6 +382,21 @@ grate_screen_is_format_supported(struct pipe_screen *pscreen,
                                  unsigned storage_sample_count,
                                  unsigned usage)
 {
+   if (MAX2(1, sample_count) != 1 || MAX2(1, storage_sample_count) != 1)
+      return false;
+
+   if (target != PIPE_BUFFER && grate_pixel_format(format) < 0)
+      return false;
+
+   /* RGBA storage is needed for sampler uploads.  Advertising it as a render
+    * target also enables Mesa's GPU readback conversion path, which this
+    * driver cannot yet execute (fragment uniforms and blits are incomplete).
+    */
+   if ((usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT)) &&
+       (format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+        format == PIPE_FORMAT_R8G8B8X8_UNORM))
+      return false;
+
    if (usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL)) {
       if (grate_pixel_format(format) < 0)
          return false;

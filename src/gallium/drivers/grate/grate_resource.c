@@ -152,8 +152,10 @@ grate_pixel_format(enum pipe_format format)
    case PIPE_FORMAT_B8G8R8A8_UNORM:
    case PIPE_FORMAT_B8G8R8X8_UNORM:
       return TGR3D_SURF_FORMAT_R8G8B8A8;
-   case PIPE_FORMAT_R32G32B32A32_FLOAT:
-      return TGR3D_SURF_FORMAT_R16G16B16A16_float;
+   /* Surface names use the opposite byte order to Gallium's format names. */
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R8G8B8X8_UNORM:
+      return TGR3D_SURF_FORMAT_B8G8R8A8;
    default:
       return -1;
    }
@@ -193,7 +195,13 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
    if (template->target != PIPE_BUFFER) {
       /* pick pixel-format */
       int format = grate_pixel_format(template->format);
-      assert(format >= 0);
+      if (format < 0) {
+         grate_loge("unsupported resource format %s (target=%u bind=0x%x)\n",
+                    util_format_name(template->format), template->target,
+                    template->bind);
+         FREE(resource);
+         return NULL;
+      }
       resource->format = format;
    }
 
@@ -202,6 +210,7 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
    resource->bo = grate_bo_alloc(screen->drm, size, flags);
    if (!resource->bo) {
       fprintf(stderr, "grate_bo_alloc() failed\n");
+      FREE(resource);
       return NULL;
    }
 
@@ -244,12 +253,17 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
    resource->pitch = handle->stride;
 
    format = grate_pixel_format(template->format);
-   assert(format >= 0);
+   if (format < 0) {
+      grate_loge("unsupported imported format %s\n",
+                 util_format_name(template->format));
+      goto fail;
+   }
    resource->format = format;
 
    return &resource->b;
    
 fail:
+   grate_bo_unref(resource->bo);
    FREE(resource);
    return NULL;
 }
