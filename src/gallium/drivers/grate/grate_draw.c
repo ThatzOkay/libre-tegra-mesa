@@ -382,6 +382,19 @@ grate_draw_vbo(struct pipe_context *pcontext,
       UNREACHABLE("invalid index_size");
    }
 
+   /* Tegra30 has two pixel pipelines. Assign alternating horizontal swaths
+    * to GPU A (even) and GPU B (odd), as in libgrate's draw setup. Leaving
+    * both at the common reset value can corrupt depth-tested face interiors.
+    * Restore broadcast writes before emitting the remaining draw state.
+    */
+   if (context->drm->soc_id == DRM_TEGRA_SOC_T30) {
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_GSHIM_WRITE_MASK, 1));
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_GLOBAL_HORIZONTAL_SWATH_RENDERING, 1));
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_GSHIM_WRITE_MASK, 2));
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_GLOBAL_HORIZONTAL_SWATH_RENDERING, 3));
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_GSHIM_WRITE_MASK, 3));
+   }
+
    /* draw params */
    value  = TGR3D_IDX_SET_PRIM_DRAW_MODE(index_size);
    value |= context->rast->draw_params;
