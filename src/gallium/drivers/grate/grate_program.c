@@ -143,6 +143,8 @@ grate_create_vs_state(struct pipe_context *pcontext,
    so->blob.commands = commands;
    so->blob.num_commands = num_commands;
    so->output_mask = vp.output_mask;
+   memcpy(so->immediates, vp.immediates, sizeof(so->immediates));
+   so->num_immediates = vp.num_immediates;
 
    return so;
 }

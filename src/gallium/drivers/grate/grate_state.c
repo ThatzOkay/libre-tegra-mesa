@@ -1,5 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 #include "util/format/u_format.h"
@@ -9,6 +11,7 @@
 #include "util/u_memory.h"
 #include "util/u_framebuffer.h"
 
+#include "grate_compiler.h"
 #include "grate_common.h"
 #include "grate_context.h"
 #include "grate_program.h"
@@ -635,18 +638,27 @@ emit_vs_uniforms(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
    struct pipe_constant_buffer *constbuf = &context->constant_buffer[MESA_SHADER_VERTEX];
-   int len;
+   unsigned num_imm = context->vshader ? context->vshader->num_immediates : 0;
+   unsigned user_words = 0;
 
    if (constbuf->user_buffer != NULL) {
       assert(constbuf->buffer_size % sizeof(uint32_t) == 0);
-
-      len = constbuf->buffer_size / 4;
-      assert(len < 256 * 4);
-
-      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_imm(REG_TGR3D_VPE_CONST_OFFSET, 0));
-      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_nonincr(REG_TGR3D_VPE_CONST_DATA, len));
-      grate_stream_push_words(stream, ptrp, constbuf->user_buffer, len, 0);
+      user_words = constbuf->buffer_size / 4;
    }
+
+   /* one block from slot 0: the shader's immediates, then the application's uniforms; see grate_compiler.h */
+   unsigned len = num_imm * 4 + user_words;
+   if (len == 0)
+      return;
+
+   assert(len <= 256 * 4);
+
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_imm(REG_TGR3D_VPE_CONST_OFFSET, 0));
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_nonincr(REG_TGR3D_VPE_CONST_DATA, len));
+   if (num_imm)
+      grate_stream_push_words(stream, ptrp, context->vshader->immediates[0], num_imm * 4, 0);
+   if (user_words)
+      grate_stream_push_words(stream, ptrp, constbuf->user_buffer, user_words, 0);
 }
 
 static void

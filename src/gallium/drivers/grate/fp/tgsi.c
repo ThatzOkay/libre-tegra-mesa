@@ -122,6 +122,23 @@ emit_vMOV(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
          mfu->var[i].tram_row = src->Index;
          fp->info.max_tram_row = MAX2(fp->info.max_tram_row, src->Index);
          src0 = fp_alu_src_row(comp);
+      } else if (src->File == TGSI_FILE_IMMEDIATE) {
+         /*
+          * The only constants this compiler can put into an ALU instruction are the hardware's zero and one. Any other
+          * value would need the hardware's constant mechanism, which is not understood here yet: say so and use zero
+          * instead of reading an undefined register.
+          */
+         float value = fp->immediates[src->Index][comp];
+         if (value == 1.0f)
+            src0 = fp_alu_src_one();
+         else {
+            if (value != 0.0f)
+               fprintf(stderr, "GRATE FRAG: immediate %f is not supported (only 0.0 and 1.0), using 0.0\n", value);
+            src0 = fp_alu_src_zero();
+         }
+      } else if (src->File == TGSI_FILE_CONSTANT) {
+         fprintf(stderr, "GRATE FRAG: constants (uniforms) are not supported in fragment shaders yet, using 0.0\n");
+         src0 = fp_alu_src_zero();
       } else
          src0 = fp_alu_src_reg(src->Index + comp);
 
@@ -211,10 +228,22 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
    fp->info.num_inputs = 0;
    fp->info.color_input = -1;
    fp->info.max_tram_row = 1;
+   fp->num_immediates = 0;
 
    while (!tgsi_parse_end_of_tokens(tgsi)) {
       tgsi_parse_token(tgsi);
       switch (tgsi->FullToken.Token.Type) {
+      case TGSI_TOKEN_TYPE_IMMEDIATE: {
+         const struct tgsi_full_immediate *imm = &tgsi->FullToken.FullImmediate;
+         unsigned n = imm->Immediate.NrTokens - 1; /* number of 32-bit values: 1 to 4 */
+
+         assert(fp->num_immediates < GRATE_FP_MAX_IMMEDIATES);
+         for (unsigned i = 0; i < 4; ++i)
+            fp->immediates[fp->num_immediates][i] = i < n ? imm->u[i].Float : 0.0f;
+         fp->num_immediates++;
+         break;
+      }
+
       case TGSI_TOKEN_TYPE_DECLARATION:
          emit_tgsi_declaration(fp, &tgsi->FullToken.FullDeclaration);
          break;
@@ -231,6 +260,9 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
     * This will overwrite instructions in some cases, need proper scheduler
     * to fix properly
     */
+    if (list_is_empty(&fp->mfu_instructions))
+       return; /* nothing is interpolated (for example a constant colour): no setup, and no first entry to write to */
+
     struct fp_mfu_instr *first = list_first_entry(&fp->mfu_instructions, struct fp_mfu_instr, link);
     first->sfu.op = FP_SFU_OP_RCP;
     first->sfu.reg = 4;
