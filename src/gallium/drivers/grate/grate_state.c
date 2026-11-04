@@ -778,8 +778,35 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
       struct grate_resource *res = grate_resource(view->texture);
       assert(view->target == PIPE_TEXTURE_2D && view->u.tex.first_level == 0);
       assert(view->u.tex.last_level == 0 && sampler->min_mip_filter == PIPE_TEX_MIPFILTER_NONE);
-      assert(res->pitch == res->b.width0 * util_format_get_blocksize(res->b.format));
-      uint32_t lo = TGR3D_TEX_TEXDESC_LO_SURF_FORMAT(res->format);
+      /* A single-row texture never advances to another row. Its allocation
+       * may be padded for rendering/import without changing sampler layout. */
+      assert(res->pitch == res->b.width0 * util_format_get_blocksize(res->b.format) ||
+             (res->b.height0 == 1 && res->pitch >= res->b.width0 * util_format_get_blocksize(res->b.format)));
+      if (grate_debug & GRATE_DEBUG_TRACE)
+         fprintf(stderr, "GRATE sampler: %s view %s swizzle=%u,%u,%u,%u size=%ux%u pitch=%u format=%u\n",
+                 util_format_name(res->b.format), util_format_name(view->format),
+                 view->swizzle_r,view->swizzle_g,view->swizzle_b,view->swizzle_a,
+                 res->b.width0,res->b.height0,res->pitch,res->format);
+      /* Texture channels follow GL order, independently of the framebuffer
+       * store's BGRA packing. Use the view's format for reinterpretation. */
+      unsigned texture_format = grate_pixel_format(view->format);
+      switch (view->format) {
+      case PIPE_FORMAT_B8G8R8A8_UNORM:
+         texture_format = TGR3D_SURF_FORMAT_B8G8R8A8;
+         break;
+      case PIPE_FORMAT_B8G8R8X8_UNORM:
+         texture_format = TGR3D_SURF_FORMAT_B8G8R8X8;
+         break;
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+         texture_format = TGR3D_SURF_FORMAT_R8G8B8A8;
+         break;
+      case PIPE_FORMAT_R8G8B8X8_UNORM:
+         texture_format = TGR3D_SURF_FORMAT_R8G8B8X8;
+         break;
+      default:
+         break;
+      }
+      uint32_t lo = TGR3D_TEX_TEXDESC_LO_SURF_FORMAT(texture_format);
       if (sampler->wrap_s == PIPE_TEX_WRAP_CLAMP_TO_EDGE) lo |= 2;
       else assert(sampler->wrap_s == PIPE_TEX_WRAP_REPEAT);
       if (sampler->wrap_t == PIPE_TEX_WRAP_CLAMP_TO_EDGE) lo |= 1;

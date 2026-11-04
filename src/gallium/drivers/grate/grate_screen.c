@@ -251,7 +251,8 @@ grate_screen_init_caps(struct grate_screen *screen)
    caps->glsl_feature_level_compatibility = 120; // no clue
    caps->essl_feature_level = 100; // no clue
    caps->constant_buffer_offset_alignment = 4; // DWORD aligned, can do pure data GATHER 
-   caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
+   /* gr2d blits currently copy bytes without format conversion. */
+   caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_DEFAULT;
    caps->vendor_id = 0x10de;
    caps->device_id = 0xFFFFFFFF;
    caps->video_memory = 0;
