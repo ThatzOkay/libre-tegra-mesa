@@ -163,6 +163,26 @@ grate_delete_vs_state(struct pipe_context *pcontext, void *so)
    FREE(so);
 }
 
+static void
+free_fragment_ir(struct grate_fp_shader *fp)
+{
+   while (!list_is_empty(&fp->fp_instructions)) {
+      struct fp_instr *inst = list_first_entry(&fp->fp_instructions, struct fp_instr, link);
+      list_del(&inst->link);
+      FREE(inst);
+   }
+   while (!list_is_empty(&fp->mfu_instructions)) {
+      struct fp_mfu_instr *inst = list_first_entry(&fp->mfu_instructions, struct fp_mfu_instr, link);
+      list_del(&inst->link);
+      FREE(inst);
+   }
+   while (!list_is_empty(&fp->alu_instructions)) {
+      struct fp_alu_instr_packet *inst = list_first_entry(&fp->alu_instructions, struct fp_alu_instr_packet, link);
+      list_del(&inst->link);
+      FREE(inst);
+   }
+}
+
 static void *
 grate_create_fs_state(struct pipe_context *pcontext,
                       const struct pipe_shader_state *template)
@@ -196,6 +216,14 @@ grate_create_fs_state(struct pipe_context *pcontext,
 
    struct grate_fp_shader fp;
    grate_tgsi_to_fp(&fp, &parser);
+   tgsi_parse_free(&parser);
+   if (fp.allocation_failed) {
+      free_fragment_ir(&fp);
+      if (template->type == PIPE_SHADER_IR_NIR)
+         FREE((void *)so->base.tokens);
+      FREE(so);
+      return NULL;
+   }
 
    struct util_dynarray buf;
    util_dynarray_init(&buf, NULL);
@@ -303,6 +331,7 @@ grate_create_fs_state(struct pipe_context *pcontext,
    so->blob.num_commands = buf.size / sizeof(uint32_t);
    so->blob.commands = buf.data;
    so->info = fp.info;
+   free_fragment_ir(&fp);
    return so;
 }
 
