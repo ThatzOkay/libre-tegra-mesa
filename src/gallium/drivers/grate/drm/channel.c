@@ -143,6 +143,7 @@ int drm_tegra_channel_close(struct drm_tegra_channel *channel)
     if (err < 0)
         return -errno;
 
+    grate_bo_unref(channel->gather);
     free(channel);
 
     return 0;

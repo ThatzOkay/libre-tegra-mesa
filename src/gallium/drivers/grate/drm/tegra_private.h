@@ -47,6 +47,11 @@ struct drm_tegra_channel {
     unsigned int version;
     uint64_t context;
 
+    /* Classic submit copies command words before returning. Reuse the
+     * mapped staging BO rather than allocating one for every draw.
+     */
+    struct grate_bo *gather;
+
     unsigned int cond_shift;
 };
 
