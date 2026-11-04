@@ -23,8 +23,8 @@ enum fp_scale {
 enum fp_condition {
    FP_CONDITION_ALWAYS = 0,
    FP_CONDITION_EQUAL = 1,
-   FP_CONDITION_GEQUAL = 2,
-   FP_CONDITION_GREATER = 3
+   FP_CONDITION_GEQUAL = 3,
+   FP_CONDITION_GREATER = 2
 };
 
 struct fp_alu_dst_operand {

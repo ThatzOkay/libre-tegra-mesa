@@ -164,13 +164,15 @@ setup_interpolation(struct fp_mfu_instr *mfu)
 static void
 emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
           bool saturate, const struct tgsi_src_register *src,
-          const struct tgsi_src_register *rhs)
+          const struct tgsi_src_register *rhs,
+          const struct tgsi_src_register *third, unsigned opcode)
 {
    struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
    list_inithead(&inst->link);
 
    struct fp_mfu_instr *mfu = NULL;
-   if (src->File == TGSI_FILE_INPUT || (rhs && rhs->File == TGSI_FILE_INPUT)) {
+   if (src->File == TGSI_FILE_INPUT || (rhs && rhs->File == TGSI_FILE_INPUT) ||
+       (third && third->File == TGSI_FILE_INPUT)) {
       mfu = CALLOC_STRUCT(fp_mfu_instr);
       list_inithead(&mfu->link);
       setup_interpolation(mfu);
@@ -186,7 +188,34 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       struct fp_alu_src_operand a = fp_tgsi_src(fp, src, i, mfu);
       struct fp_alu_src_operand b = rhs ? fp_tgsi_src(fp, rhs, i, mfu) : fp_alu_src_one();
       struct fp_alu_instr op = fp_alu_sMOV(fp_alu_dst(dst, i, saturate), a);
-      op.src[1] = b; /* MAD(a, b, zero, one) implements MOV or MUL. */
+      op.src[1] = b;
+      switch (opcode) {
+      case TGSI_OPCODE_ADD:
+         op.src[1] = fp_alu_src_one();
+         op.src[2] = b;
+         break;
+      case TGSI_OPCODE_SLT:
+         /* SLT(a,b) = (b-a > 0). */
+         op.src[0] = b;
+         op.src[1] = fp_alu_src_one();
+         op.src[2] = a;
+         op.src[2].negate = !a.negate;
+         op.condition = FP_CONDITION_GREATER;
+         break;
+      case TGSI_OPCODE_SGE:
+      case TGSI_OPCODE_SEQ:
+         op.src[1] = fp_alu_src_one();
+         op.src[2] = b;
+         op.src[2].negate = !b.negate;
+         op.condition = opcode == TGSI_OPCODE_SGE ? FP_CONDITION_GEQUAL : FP_CONDITION_EQUAL;
+         break;
+      case TGSI_OPCODE_CMP:
+         op.op = FP_ALU_OP_CSEL;
+         op.src[2] = fp_tgsi_src(fp, third, i, mfu);
+         break;
+      default:
+         break;
+      }
       alu->slots[alu_instrs++] = op;
    }
    inst->alu_sched.num_instructions = 1;
@@ -213,7 +242,8 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       struct fp_instr *previous = list_last_entry(&fp->fp_instructions, struct fp_instr, link);
       if (!previous->dw.enable && previous->alu_sched.num_instructions < 3) {
          if (previous->alu_sched.num_instructions == 1 &&
-             (src->File == TGSI_FILE_TEMPORARY || (rhs && rhs->File == TGSI_FILE_TEMPORARY))) {
+             (src->File == TGSI_FILE_TEMPORARY || (rhs && rhs->File == TGSI_FILE_TEMPORARY) ||
+              (third && third->File == TGSI_FILE_TEMPORARY))) {
             struct fp_alu_instr_packet *nop = CALLOC_STRUCT(fp_alu_instr_packet);
             list_inithead(&nop->link);
             /* Allow the GPR result to become available before it is read. */
@@ -303,9 +333,13 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
       break;
    case TGSI_OPCODE_MOV:
       emit_vALU(fp, &inst->Dst[0].Register, saturate,
-                    &inst->Src[0].Register, NULL);
+                    &inst->Src[0].Register, NULL, NULL, TGSI_OPCODE_MOV);
       break;
 
+   case TGSI_OPCODE_ADD:
+   case TGSI_OPCODE_SLT:
+   case TGSI_OPCODE_SGE:
+   case TGSI_OPCODE_SEQ:
    case TGSI_OPCODE_MUL: {
       const struct tgsi_src_register *a = &inst->Src[0].Register;
       const struct tgsi_src_register *b = &inst->Src[1].Register;
@@ -320,7 +354,7 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
          scratch.File = TGSI_FILE_TEMPORARY;
          scratch.Index = fp->num_temporaries;
          scratch.WriteMask = TGSI_WRITEMASK_XYZW;
-         emit_vALU(fp, &scratch, false, a, NULL);
+         emit_vALU(fp, &scratch, false, a, NULL, NULL, TGSI_OPCODE_MOV);
          staged.File = TGSI_FILE_TEMPORARY;
          staged.Index = fp->num_temporaries;
          staged.SwizzleX = TGSI_SWIZZLE_X;
@@ -329,8 +363,41 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
          staged.SwizzleW = TGSI_SWIZZLE_W;
          a = &staged;
       }
-      emit_vALU(fp, &inst->Dst[0].Register, saturate, a, b);
+      emit_vALU(fp, &inst->Dst[0].Register, saturate, a, b, NULL, inst->Instruction.Opcode);
 
+      break;
+   }
+
+   case TGSI_OPCODE_CMP: {
+      const struct tgsi_src_register *a = &inst->Src[0].Register;
+      const struct tgsi_src_register *b = &inst->Src[1].Register;
+      const struct tgsi_src_register *c = &inst->Src[2].Register;
+      struct tgsi_src_register staged = {0};
+      /* An MFU packet can fetch one varying row. Preserve the first of
+       * two different rows before fetching the second for selection. */
+      const struct tgsi_src_register **inputs[] = {&a, &b, &c};
+      for (unsigned i = 0; i < 3; i++) {
+         bool needs_stage = false;
+         for (unsigned j = i + 1; j < 3; j++)
+            needs_stage |= (*inputs[i])->File == TGSI_FILE_INPUT &&
+                           (*inputs[j])->File == TGSI_FILE_INPUT &&
+                           (*inputs[i])->Index != (*inputs[j])->Index;
+         if (!needs_stage) continue;
+         assert(fp->num_temporaries <= 1 && !staged.File);
+         struct tgsi_dst_register scratch = {0};
+         scratch.File = TGSI_FILE_TEMPORARY;
+         scratch.Index = fp->num_temporaries;
+         scratch.WriteMask = TGSI_WRITEMASK_XYZW;
+         emit_vALU(fp, &scratch, false, *inputs[i], NULL, NULL, TGSI_OPCODE_MOV);
+         staged.File = TGSI_FILE_TEMPORARY;
+         staged.Index = scratch.Index;
+         staged.SwizzleX = TGSI_SWIZZLE_X;
+         staged.SwizzleY = TGSI_SWIZZLE_Y;
+         staged.SwizzleZ = TGSI_SWIZZLE_Z;
+         staged.SwizzleW = TGSI_SWIZZLE_W;
+         *inputs[i] = &staged;
+      }
+      emit_vALU(fp, &inst->Dst[0].Register, saturate, a, b, c, TGSI_OPCODE_CMP);
       break;
    }
 
