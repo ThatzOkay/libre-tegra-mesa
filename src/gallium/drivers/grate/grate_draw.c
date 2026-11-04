@@ -266,7 +266,10 @@ grate_init_state(struct grate_context *context, uint32_t **ptrp)
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_DW_ST_ENABLE, 0));
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_FDC_CONTROL, 13));
-   GRATE_PUSHBUF_WORD(ptr, 0x00000e00); // REG_TGR3D_FDC_CONTROL
+   /* Clears use gr2d, which does not invalidate gr3d's framebuffer/depth
+    * cache. Invalidate before drawing so depth tests see the cleared surface.
+    */
+   GRATE_PUSHBUF_WORD(ptr, 0x00000e00 | TGR3D_FDC_CONTROL_INVALIDATE);
    GRATE_PUSHBUF_WORD(ptr, 0x00000000); // REG_TGR3D_FDC_STATUS
    GRATE_PUSHBUF_WORD(ptr, 0x000001ff); // REG_TGR3D_FDC_MAX_QZ_LINES
    GRATE_PUSHBUF_WORD(ptr, 0x000001ff); // REG_TGR3D_FDC_MAX_QV_LINES
