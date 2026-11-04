@@ -3,6 +3,8 @@
 #include "fpir.h"
 
 #include "tgsi/tgsi_parse.h"
+#include "tgsi/tgsi_util.h"
+#include "util/u_dynarray.h"
 
 #include "util/u_memory.h"
 
@@ -12,16 +14,6 @@ fp_alu_src_row(int index)
    assert(index >= 0 && index < 16);
    struct fp_alu_src_operand src = {
       .index = index
-   };
-   return src;
-}
-
-static struct fp_alu_src_operand
-fp_alu_src_reg(int index)
-{
-   assert(index >= 0 && index < 8);
-   struct fp_alu_src_operand src = {
-      .index = 16 + index
    };
    return src;
 }
@@ -64,12 +56,76 @@ fp_alu_sMOV(struct fp_alu_dst_operand dst, struct fp_alu_src_operand src)
    return ret;
 }
 
+#define TEMP_FX10 0x100
+#define TEMP_HIGH 0x200
+
+/* Comparison results have their own boolean bank. Sampled UNORM colours
+ * retain their exact FX10 representation through MOV/CMP, while arithmetic
+ * uses FP20. R0-R3 become available after the last interpolation/TEX fetch.
+ */
+static int
+allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
+{
+   if (kind == 2) {
+      for (unsigned reg = 64; reg < 72; reg++) {
+         if (!fp->occupied[reg]) {
+            fp->occupied[reg] = fp->claimed[reg] = 1;
+            return reg | TEMP_FX10;
+         }
+      }
+   } else {
+      const unsigned globals[] = {16,17,18,19,20,21,22,23};
+      const unsigned rows[] = {0,1,2,3};
+      const unsigned *pool = fp->late_rows ? rows : globals;
+      unsigned pool_size = fp->late_rows ? ARRAY_SIZE(rows) : ARRAY_SIZE(globals);
+      /* Prefer an operand whose last read is this scalar instruction. */
+      for (unsigned n = 0; n < pool_size; n++) {
+         unsigned reg = pool[n];
+         if (!kind && fp->reusable[reg] == 3 && !fp->claimed[reg]) {
+            fp->occupied[reg] = fp->claimed[reg] = 3;
+            return reg;
+         }
+         if (kind == 1) {
+            for (unsigned half = 0; half < 2; half++) {
+               unsigned mask = 1 << half;
+               if ((fp->reusable[reg] & mask) && !(fp->claimed[reg] & mask)) {
+                  fp->occupied[reg] |= mask;
+                  fp->claimed[reg] |= mask;
+                  return reg | TEMP_FX10 | (half ? TEMP_HIGH : 0);
+               }
+            }
+         }
+      }
+      for (unsigned n = 0; n < pool_size; n++) {
+         unsigned reg = pool[n];
+         if (!kind && !fp->occupied[reg]) {
+            fp->occupied[reg] = fp->claimed[reg] = 3;
+            return reg;
+         }
+         if (kind == 1) {
+            for (unsigned half = 0; half < 2; half++) {
+               unsigned mask = 1 << half;
+               if (!(fp->occupied[reg] & mask)) {
+                  fp->occupied[reg] |= mask;
+                  fp->claimed[reg] |= mask;
+                  return reg | TEMP_FX10 | (half ? TEMP_HIGH : 0);
+               }
+            }
+         }
+      }
+   }
+   if (!fp->allocation_failed)
+      fprintf(stderr, "GRATE FRAG: scalar register bank exhausted (spilling unsupported)\n");
+   fp->allocation_failed = true;
+   return 31;
+}
+
 static struct fp_alu_dst_operand
-fp_alu_dst(const struct tgsi_dst_register *dst, int subreg, bool saturate)
+fp_alu_dst(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst, int subreg, bool saturate)
 {
    struct fp_alu_dst_operand ret = { 0 };
 
-   ret.index = 16 + dst->Index * 4;
+
    if (dst->File == TGSI_FILE_OUTPUT) {
       ret.index = 2; // HACK: r2+r3 to match hard-coded store shader for now
 
@@ -80,10 +136,17 @@ fp_alu_dst(const struct tgsi_dst_register *dst, int subreg, bool saturate)
       ret.write_low_sub_reg = (o % 2) == 0;
       ret.write_high_sub_reg = (o % 2) != 0;
    } else {
-      assert(dst->File == TGSI_FILE_TEMPORARY && dst->Index < 2);
-      ret.index += subreg;
-      ret.write_low_sub_reg = true;
-      ret.write_high_sub_reg = true;
+      assert(dst->File == TGSI_FILE_TEMPORARY && dst->Index <= GRATE_FP_MAX_TEMPS);
+      if (fp->temp_dst[dst->Index][subreg] < 0) {
+         /* Internal interpolation staging lives only within this instruction. */
+         assert(dst->Index == fp->num_temporaries);
+         fp->temp_dst[dst->Index][subreg] = allocate_scalar(fp, false);
+         fp->temp_src[dst->Index][subreg] = fp->temp_dst[dst->Index][subreg];
+      }
+      int location = fp->temp_dst[dst->Index][subreg];
+      ret.index = location & 0x7f;
+      ret.write_low_sub_reg = !(location & TEMP_HIGH);
+      ret.write_high_sub_reg = !(location & TEMP_FX10) || (location & TEMP_HIGH);
    }
 
    ret.saturate = saturate;
@@ -139,7 +202,13 @@ fp_tgsi_src(struct grate_fp_shader *fp, const struct tgsi_src_register *src,
       value = fp_constant(fp, src->Index * 4 + comp, 0.0f);
       break;
    case TGSI_FILE_TEMPORARY:
-      value = fp_alu_src_reg(src->Index * 4 + comp);
+      assert(src->Index <= GRATE_FP_MAX_TEMPS);
+      int reg = fp->temp_src[src->Index][comp];
+      assert(reg >= 0 || fp->allocation_failed);
+      value = fp_alu_src_row(0);
+      value.index = reg >= 0 ? reg & 0x7f : 31;
+      value.datatype = (reg & TEMP_FX10) ? FP_DATATYPE_FIXED10 : FP_DATATYPE_FP20;
+      value.sub_reg_select_high = !!(reg & TEMP_HIGH);
       break;
    default:
       UNREACHABLE("unsupported fragment ALU source");
@@ -178,6 +247,20 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       setup_interpolation(mfu);
    }
 
+   bool output_stage = false;
+   const struct tgsi_src_register *operands[] = {src, rhs, third};
+   if (dst->File == TGSI_FILE_OUTPUT) {
+      for (unsigned s = 0; s < 3; s++) {
+         const struct tgsi_src_register *operand = operands[s];
+         if (!operand || operand->File != TGSI_FILE_TEMPORARY) continue;
+         unsigned swizzle[] = {operand->SwizzleX, operand->SwizzleY, operand->SwizzleZ, operand->SwizzleW};
+         for (unsigned c = 0; c < 4; c++) {
+            int loc = fp->temp_src[operand->Index][swizzle[c]];
+            if ((dst->WriteMask & (1 << c)) && loc >= 0 && (loc & 0x7f) < 4)
+               output_stage = true;
+         }
+      }
+   }
    struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
    int alu_instrs = 0;
    list_inithead(&alu->link);
@@ -187,7 +270,7 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
 
       struct fp_alu_src_operand a = fp_tgsi_src(fp, src, i, mfu);
       struct fp_alu_src_operand b = rhs ? fp_tgsi_src(fp, rhs, i, mfu) : fp_alu_src_one();
-      struct fp_alu_instr op = fp_alu_sMOV(fp_alu_dst(dst, i, saturate), a);
+      struct fp_alu_instr op = fp_alu_sMOV(fp_alu_dst(fp, dst, i, saturate), a);
       op.src[1] = b;
       switch (opcode) {
       case TGSI_OPCODE_ADD:
@@ -216,6 +299,11 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       default:
          break;
       }
+      if (output_stage) {
+         op.dst.index = 16 + i;
+         op.dst.write_low_sub_reg = true;
+         op.dst.write_high_sub_reg = true;
+      }
       alu->slots[alu_instrs++] = op;
    }
    inst->alu_sched.num_instructions = 1;
@@ -238,26 +326,22 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
    }
 
    list_addtail(&alu->link, &fp->alu_instructions);
-   if (!mfu && !list_is_empty(&fp->fp_instructions)) {
-      struct fp_instr *previous = list_last_entry(&fp->fp_instructions, struct fp_instr, link);
-      if (!previous->dw.enable && previous->alu_sched.num_instructions < 3) {
-         if (previous->alu_sched.num_instructions == 1 &&
-             (src->File == TGSI_FILE_TEMPORARY || (rhs && rhs->File == TGSI_FILE_TEMPORARY) ||
-              (third && third->File == TGSI_FILE_TEMPORARY))) {
-            struct fp_alu_instr_packet *nop = CALLOC_STRUCT(fp_alu_instr_packet);
-            list_inithead(&nop->link);
-            /* Allow the GPR result to become available before it is read. */
-            struct fp_alu_dst_operand discard = {.index = 31};
-            for (unsigned n = 0; n < 4; n++)
-               nop->slots[n] = fp_alu_sMOV(discard, fp_alu_src_zero());
-            list_addtail(&nop->link, &alu->link);
-            previous->alu_sched.num_instructions++;
-         }
-         previous->alu_sched.num_instructions++;
-         previous->dw = inst->dw;
-         FREE(inst);
-         return;
+   if (output_stage) {
+      struct fp_alu_instr_packet *nop = CALLOC_STRUCT(fp_alu_instr_packet);
+      struct fp_alu_instr_packet *store = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&nop->link);
+      list_inithead(&store->link);
+      unsigned slot = 0;
+      for (unsigned c = 0; c < 4; c++) {
+         struct fp_alu_dst_operand discard = {.index = 31};
+         nop->slots[c] = fp_alu_sMOV(discard, fp_alu_src_zero());
+         if (!(dst->WriteMask & (1 << c))) continue;
+         struct fp_alu_src_operand value = {.index = 16 + c};
+         store->slots[slot++] = fp_alu_sMOV(fp_alu_dst(fp, dst, c, saturate), value);
       }
+      list_addtail(&nop->link, &fp->alu_instructions);
+      list_addtail(&store->link, &fp->alu_instructions);
+      inst->alu_sched.num_instructions = 3;
    }
    list_addtail(&inst->link, &fp->fp_instructions);
 }
@@ -294,6 +378,10 @@ emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    struct fp_instr *sample = CALLOC_STRUCT(fp_instr);
    list_inithead(&sample->link);
    sample->tex = (1 << 10) | (1 << 5) | sampler->Index;
+   if (dst->File == TGSI_FILE_TEMPORARY && fp->texture_rows) {
+      list_addtail(&sample->link, &fp->fp_instructions);
+      return;
+   }
    struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
    list_inithead(&alu->link);
    unsigned slot = 0;
@@ -305,7 +393,7 @@ emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
          .datatype = FP_DATATYPE_FIXED10,
          .sub_reg_select_high = channel % 2,
       };
-      alu->slots[slot++] = fp_alu_sMOV(fp_alu_dst(dst, i, tgsi->Instruction.Saturate), src);
+      alu->slots[slot++] = fp_alu_sMOV(fp_alu_dst(fp, dst, i, tgsi->Instruction.Saturate), src);
    }
    sample->alu_sched.address = list_length(&fp->alu_instructions);
    sample->alu_sched.num_instructions = 1;
@@ -345,11 +433,9 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
       const struct tgsi_src_register *b = &inst->Src[1].Register;
       struct tgsi_src_register staged = {0};
       if (a->File == TGSI_FILE_INPUT && b->File == TGSI_FILE_INPUT && a->Index != b->Index) {
-         /* One MFU packet can interpolate one vec4. Preserve A in an unused general-purpose vec4
-          * before loading B. Scratch registers must not alias a live
-          * TGSI temporary. General register allocation is still missing.
-          */
-         assert(fp->num_temporaries <= 1);
+         /* One MFU packet interpolates one vec4. Stage A in allocator-owned
+          * scratch scalars before loading B. */
+         assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
          struct tgsi_dst_register scratch = {0};
          scratch.File = TGSI_FILE_TEMPORARY;
          scratch.Index = fp->num_temporaries;
@@ -383,7 +469,7 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
                            (*inputs[j])->File == TGSI_FILE_INPUT &&
                            (*inputs[i])->Index != (*inputs[j])->Index;
          if (!needs_stage) continue;
-         assert(fp->num_temporaries <= 1 && !staged.File);
+         assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS && !staged.File);
          struct tgsi_dst_register scratch = {0};
          scratch.File = TGSI_FILE_TEMPORARY;
          scratch.Index = fp->num_temporaries;
@@ -460,6 +546,12 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
    fp->info.max_tram_row = 1;
    fp->num_immediates = 0;
    fp->num_temporaries = 0;
+   fp->allocation_failed = false;
+   memset(fp->occupied, 0, sizeof(fp->occupied));
+   memset(fp->temp_src, -1, sizeof(fp->temp_src));
+   memset(fp->temp_dst, -1, sizeof(fp->temp_dst));
+   struct util_dynarray instructions;
+   util_dynarray_init(&instructions, NULL);
 
    while (!tgsi_parse_end_of_tokens(tgsi)) {
       tgsi_parse_token(tgsi);
@@ -481,9 +573,171 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
 
       case TGSI_TOKEN_TYPE_INSTRUCTION:
          if (tgsi->FullToken.FullInstruction.Instruction.Opcode != TGSI_OPCODE_END)
-            emit_tgsi_instr(fp, &tgsi->FullToken.FullInstruction);
+            util_dynarray_append_typed(&instructions, struct tgsi_full_instruction, tgsi->FullToken.FullInstruction);
          break;
       }
    }
+
+   /* Fragment output values stay virtual until all shader operations have
+    * consumed the sampled pixel. Early masked DW stores alias R2/R3 and
+    * would destroy still-live texture channels. */
+   int output_temps[16];
+   unsigned output_masks[16] = {0};
+   memset(output_temps, -1, sizeof(output_temps));
+   util_dynarray_foreach(&instructions, struct tgsi_full_instruction, instruction) {
+      for (unsigned d = 0; d < instruction->Instruction.NumDstRegs; d++) {
+         struct tgsi_dst_register *dst = &instruction->Dst[d].Register;
+         if (dst->File != TGSI_FILE_OUTPUT) continue;
+         unsigned index = dst->Index;
+         assert(index < 16);
+         if (output_temps[index] < 0)
+            output_temps[index] = fp->num_temporaries++;
+         output_masks[index] |= dst->WriteMask;
+         dst->File = TGSI_FILE_TEMPORARY;
+         dst->Index = output_temps[index];
+      }
+   }
+   for (unsigned out = 0; out < 16; out++) {
+      if (output_temps[out] < 0) continue;
+      struct tgsi_full_instruction store = {0};
+      store.Instruction.Opcode = TGSI_OPCODE_MOV;
+      store.Instruction.NumDstRegs = 1;
+      store.Instruction.NumSrcRegs = 1;
+      store.Dst[0].Register.File = TGSI_FILE_OUTPUT;
+      store.Dst[0].Register.Index = out;
+      store.Dst[0].Register.WriteMask = output_masks[out];
+      store.Src[0].Register.File = TGSI_FILE_TEMPORARY;
+      store.Src[0].Register.Index = output_temps[out];
+      store.Src[0].Register.SwizzleX = TGSI_SWIZZLE_X;
+      store.Src[0].Register.SwizzleY = TGSI_SWIZZLE_Y;
+      store.Src[0].Register.SwizzleZ = TGSI_SWIZZLE_Z;
+      store.Src[0].Register.SwizzleW = TGSI_SWIZZLE_W;
+      util_dynarray_append_typed(&instructions, struct tgsi_full_instruction, store);
+   }
+   assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
+   unsigned count = util_dynarray_num_elements(&instructions, struct tgsi_full_instruction);
+   struct tgsi_full_instruction *code = instructions.data;
+   uint8_t (*live_after)[GRATE_FP_MAX_TEMPS] = calloc(count + 1, sizeof(*live_after));
+   assert(live_after);
+   int last_fetch = -1;
+   for (int n = (int)count - 1; n >= 0; n--) {
+      memcpy(live_after[n], live_after[n + 1], sizeof(*live_after));
+      const struct tgsi_full_instruction *inst = &code[n];
+      if (inst->Instruction.Opcode == TGSI_OPCODE_TEX && last_fetch < 0)
+         last_fetch = n;
+      for (unsigned d = 0; d < inst->Instruction.NumDstRegs; d++) {
+         const struct tgsi_dst_register *dst = &inst->Dst[d].Register;
+         if (dst->File == TGSI_FILE_TEMPORARY)
+            live_after[n][dst->Index] &= ~dst->WriteMask;
+      }
+      for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++) {
+         const struct tgsi_src_register *reg = &inst->Src[src].Register;
+         if (reg->File == TGSI_FILE_INPUT && last_fetch < 0)
+            last_fetch = n;
+         if (reg->File == TGSI_FILE_TEMPORARY)
+            live_after[n][reg->Index] |= tgsi_util_get_inst_usage_mask(inst, src);
+      }
+   }
+   for (unsigned n = 0; n < count; n++) {
+      const struct tgsi_full_instruction *inst = &code[n];
+      fp->late_rows = (int)n > last_fetch;
+      fp->texture_rows = (int)n == last_fetch && inst->Instruction.Opcode == TGSI_OPCODE_TEX;
+      memset(fp->claimed, 0, sizeof(fp->claimed));
+      memset(fp->reusable, 0, sizeof(fp->reusable));
+      memcpy(fp->temp_dst, fp->temp_src, sizeof(fp->temp_dst));
+      memset(fp->temp_dst[fp->num_temporaries], -1, sizeof(fp->temp_dst[0]));
+      bool predicate = inst->Instruction.Opcode == TGSI_OPCODE_SLT ||
+                       inst->Instruction.Opcode == TGSI_OPCODE_SGE ||
+                       inst->Instruction.Opcode == TGSI_OPCODE_SEQ;
+      for (unsigned d = 0; d < inst->Instruction.NumDstRegs; d++) {
+         const struct tgsi_dst_register *dst = &inst->Dst[d].Register;
+         if (dst->File != TGSI_FILE_TEMPORARY) continue;
+         for (unsigned c = 0; c < 4; c++) {
+            if (!(dst->WriteMask & (1 << c))) continue;
+            unsigned kind = predicate ? 2 : inst->Instruction.Opcode == TGSI_OPCODE_TEX ? 1 : 0;
+            if (inst->Instruction.Opcode == TGSI_OPCODE_MOV || inst->Instruction.Opcode == TGSI_OPCODE_CMP) {
+               bool packed = true;
+               unsigned first = inst->Instruction.Opcode == TGSI_OPCODE_CMP ? 1 : 0;
+               for (unsigned src = first; src < inst->Instruction.NumSrcRegs; src++) {
+                  const struct tgsi_src_register *operand = &inst->Src[src].Register;
+                  unsigned swizzle[] = {operand->SwizzleX, operand->SwizzleY, operand->SwizzleZ, operand->SwizzleW};
+                  packed &= operand->File == TGSI_FILE_TEMPORARY &&
+                            fp->temp_src[operand->Index][swizzle[c]] >= 0 &&
+                            (fp->temp_src[operand->Index][swizzle[c]] & TEMP_FX10);
+               }
+               if (packed) kind = 1;
+            }
+            memset(fp->reusable, 0, sizeof(fp->reusable));
+            bool simple = inst->Instruction.Opcode != TGSI_OPCODE_TEX;
+            for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++)
+               simple &= inst->Src[src].Register.File != TGSI_FILE_INPUT;
+            if (simple) {
+               for (unsigned reg = 0; reg < 24; reg++) {
+                  if (reg >= 4 && reg < 16) continue;
+                  unsigned needed = 0;
+                  for (unsigned t = 0; t < fp->num_temporaries; t++) for (unsigned k = 0; k < 4; k++) {
+                     int loc = fp->temp_src[t][k];
+                     if (loc < 0 || (loc & 0x7f) != reg) continue;
+                     unsigned mask = (loc & TEMP_FX10) ? ((loc & TEMP_HIGH) ? 2 : 1) : 3;
+                     bool overwritten = false;
+                     for (unsigned d2 = 0; d2 < inst->Instruction.NumDstRegs; d2++) {
+                        const struct tgsi_dst_register *out = &inst->Dst[d2].Register;
+                        overwritten |= out->File == TGSI_FILE_TEMPORARY && out->Index == t && (out->WriteMask & (1 << k));
+                     }
+                     if (!overwritten && (live_after[n + 1][t] & (1 << k))) needed |= mask;
+                  }
+                  for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++) {
+                     const struct tgsi_src_register *operand = &inst->Src[src].Register;
+                     if (operand->File != TGSI_FILE_TEMPORARY) continue;
+                     unsigned swizzle[] = {operand->SwizzleX, operand->SwizzleY, operand->SwizzleZ, operand->SwizzleW};
+                     for (unsigned lane = c + 1; lane < 4; lane++) {
+                        int loc = fp->temp_src[operand->Index][swizzle[lane]];
+                        if ((dst->WriteMask & (1 << lane)) && loc >= 0 && (loc & 0x7f) == reg)
+                           needed |= (loc & TEMP_FX10) ? ((loc & TEMP_HIGH) ? 2 : 1) : 3;
+                     }
+                  }
+                  fp->reusable[reg] = (~needed) & 3;
+               }
+            }
+            fp->temp_dst[dst->Index][c] = (live_after[n + 1][dst->Index] & (1 << c)) ?
+                                         (fp->texture_rows ? (2 + c / 2) | TEMP_FX10 | (c % 2 ? TEMP_HIGH : 0) :
+                                          allocate_scalar(fp, kind)) : 31;
+         }
+      }
+      if (grate_debug & GRATE_DEBUG_TGSI) {
+         fprintf(stderr, "ALLOC %u opcode %u", n, inst->Instruction.Opcode);
+         for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++) {
+            const struct tgsi_src_register *operand = &inst->Src[src].Register;
+            if (operand->File == TGSI_FILE_TEMPORARY)
+               fprintf(stderr, " src%u[%d,%d,%d,%d]", src, fp->temp_src[operand->Index][0],fp->temp_src[operand->Index][1],fp->temp_src[operand->Index][2],fp->temp_src[operand->Index][3]);
+         }
+         for (unsigned d = 0; d < inst->Instruction.NumDstRegs; d++) {
+            const struct tgsi_dst_register *out = &inst->Dst[d].Register;
+            if (out->File == TGSI_FILE_TEMPORARY)
+               fprintf(stderr, " dst[%d,%d,%d,%d]", fp->temp_dst[out->Index][0],fp->temp_dst[out->Index][1],fp->temp_dst[out->Index][2],fp->temp_dst[out->Index][3]);
+         }
+         fprintf(stderr, "\n");
+      }
+      emit_tgsi_instr(fp, inst);
+      memset(fp->occupied, 0, sizeof(fp->occupied));
+      for (unsigned t = 0; t < fp->num_temporaries; t++) {
+         for (unsigned c = 0; c < 4; c++) {
+            int reg = fp->temp_dst[t][c];
+            if (live_after[n + 1][t] & (1 << c)) {
+               assert(reg >= 0 || fp->allocation_failed);
+               fp->temp_src[t][c] = reg;
+               if (reg >= 0 && reg != 31) {
+                  unsigned mask = (reg & TEMP_FX10) ? ((reg & TEMP_HIGH) ? 2 : 1) : 3;
+                  fp->occupied[reg & 0x7f] |= mask;
+               }
+            } else {
+               fp->temp_src[t][c] = -1;
+            }
+         }
+      }
+      memset(fp->temp_src[fp->num_temporaries], -1, sizeof(fp->temp_src[0]));
+   }
+   free(live_after);
+   util_dynarray_fini(&instructions);
 
 }

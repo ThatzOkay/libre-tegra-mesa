@@ -4,6 +4,7 @@
 #include "util/list.h"
 
 #include <stdint.h>
+#include <stdbool.h>
 
 struct tgsi_parse_context;
 
@@ -42,9 +43,20 @@ struct grate_fp_info {
 };
 
 #define GRATE_FP_MAX_IMMEDIATES 32
+#define GRATE_FP_MAX_TEMPS 64
 
 struct grate_fp_shader {
    unsigned num_temporaries;
+   /* Encoded scalar locations: register[6:0], FX10 bit 8, high half bit 9.
+    * The extra virtual temporary is reserved for interpolation staging. */
+   int temp_src[GRATE_FP_MAX_TEMPS + 1][4];
+   int temp_dst[GRATE_FP_MAX_TEMPS + 1][4];
+   uint8_t occupied[72];
+   uint8_t claimed[72];
+   uint8_t reusable[72];
+   bool late_rows;
+   bool texture_rows;
+   bool allocation_failed;
    float immediates[GRATE_FP_MAX_IMMEDIATES][4];
    unsigned num_immediates;
    struct list_head fp_instructions;
