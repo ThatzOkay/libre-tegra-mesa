@@ -163,6 +163,91 @@ grate_delete_vs_state(struct pipe_context *pcontext, void *so)
    FREE(so);
 }
 
+/* Keep the application shader intact and append a source-over stage.
+ * Its packed source is R2/R3; PSEQ reads colour target 1 into R0/R1.
+ */
+static bool
+create_premultiplied_blob(const struct grate_shader_blob *source,
+                          unsigned fp_count, unsigned alu_count,
+                          struct grate_shader_blob *output)
+{
+   if (fp_count >= 63 || alu_count >= 64)
+      return false;
+   uint32_t blend_words[8];
+   for (unsigned c = 0; c < 4; c++) {
+      struct fp_alu_instr instruction = {
+         .op = FP_ALU_OP_MAD,
+         .dst = {.index = 2 + c / 2, .write_low_sub_reg = !(c & 1),
+                 .write_high_sub_reg = c & 1, .saturate = true},
+         .src = {
+            {.index = c / 2, .datatype = FP_DATATYPE_FIXED10,
+             .sub_reg_select_high = c & 1},
+            {.index = 3, .datatype = FP_DATATYPE_FIXED10,
+             .sub_reg_select_high = true, .minus_one = true, .negate = true},
+            {.index = 2 + c / 2, .datatype = FP_DATATYPE_FIXED10,
+             .sub_reg_select_high = c & 1},
+            {.index = 31, .datatype = FP_DATATYPE_FIXED10, .sub_reg_select_high = true},
+         },
+      };
+      grate_fp_pack_alu(blend_words + c * 2, &instruction);
+   }
+   struct util_dynarray result;
+   util_dynarray_init(&result, NULL);
+#define BLEND_PUSH(value) util_dynarray_append_typed(&result, uint32_t, (value))
+   unsigned seen = 0;
+   for (unsigned i = 0; i < (unsigned)source->num_commands;) {
+      uint32_t command = source->commands[i++];
+      unsigned opcode = command >> 28;
+      unsigned reg = (command >> 16) & 0xfff;
+      unsigned count = command & 0xffff;
+      if (opcode == 4) {
+         if (reg != REG_TGR3D_PSEQ_FLUSH) BLEND_PUSH(command);
+         continue;
+      }
+      if ((opcode != 1 && opcode != 2) || count > (unsigned)source->num_commands - i)
+         goto fail;
+      const uint32_t *values = source->commands + i;
+      i += count;
+      if (opcode == 1 && reg == REG_TGR3D_PSEQ_COMMAND_EVEN(0) && count == 1) {
+         BLEND_PUSH(command); BLEND_PUSH(0x20006000 | (fp_count + 1));
+         continue;
+      }
+      if (opcode == 1 && reg == REG_TGR3D_PSEQ_DWR_IF_STATE && count == 1) {
+         BLEND_PUSH(command); BLEND_PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(fp_count + 1));
+         continue;
+      }
+      unsigned extra = 0, last = 0, bit = 0;
+      if (opcode == 2) {
+         switch (reg) {
+         case REG_TGR3D_PSEQ_INST_DATA: extra = 1; last = 0x00810008; bit = 1; break;
+         case REG_TGR3D_AT_REMAP_DATA: extra = 1; bit = 2; break;
+         case REG_TGR3D_TEX_INST_DATA: extra = 1; bit = 4; break;
+         case REG_TGR3D_ALU_REMAP_DATA: extra = 1; last = (alu_count << 2) | 1; bit = 8; break;
+         case REG_TGR3D_ALU_INST_DATA: extra = 8; bit = 16; break;
+         case REG_TGR3D_ALU_P2CX_DATA: extra = 1; bit = 32; break;
+         case REG_TGR3D_DW_INST_DATA: extra = 1; last = 0x00028005; bit = 64; break;
+         }
+      }
+      if (bit) {
+         if ((seen & bit) || count != (bit == 16 ? alu_count * 8 : fp_count)) goto fail;
+         seen |= bit;
+      }
+      BLEND_PUSH((command & 0xffff0000) | (count + extra));
+      for (unsigned j = 0; j < count; j++) BLEND_PUSH(bit == 64 ? 0 : values[j]);
+      for (unsigned j = 0; j < extra; j++) BLEND_PUSH(bit == 16 ? blend_words[j] : last);
+      if (bit == 1) BLEND_PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
+   }
+   if (seen != 127) goto fail;
+   util_dynarray_trim(&result);
+   output->commands = result.data;
+   output->num_commands = result.size / sizeof(uint32_t);
+#undef BLEND_PUSH
+   return true;
+fail:
+   util_dynarray_fini(&result);
+   return false;
+}
+
 static void
 free_fragment_ir(struct grate_fp_shader *fp)
 {
@@ -332,6 +417,13 @@ grate_create_fs_state(struct pipe_context *pcontext,
    so->blob.commands = buf.data;
    so->info = fp.info;
    free_fragment_ir(&fp);
+   if (!create_premultiplied_blob(&so->blob, num_fp_instrs, num_alu_instrs,
+                                 &so->premultiplied_blob)) {
+      grate_loge("failed to build premultiplied fragment variant\n");
+      FREE(so->blob.commands);
+      FREE(so);
+      return NULL;
+   }
    return so;
 }
 
@@ -345,8 +437,11 @@ grate_bind_fs_state(struct pipe_context *pcontext, void *so)
 static void
 grate_delete_fs_state(struct pipe_context *pcontext, void *so)
 {
+   struct grate_fragment_shader_state *shader = so;
    grate_trace();
-   FREE(so);
+   FREE(shader->blob.commands);
+   FREE(shader->premultiplied_blob.commands);
+   FREE(shader);
 }
 
 void

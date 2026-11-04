@@ -249,7 +249,19 @@ grate_create_blend_state(struct pipe_context *pcontext,
 static void
 grate_bind_blend_state(struct pipe_context *pcontext, void *so)
 {
-   grate_unimplemented();
+   const struct pipe_blend_state *blend = so;
+   struct grate_context *ctx = grate_context(pcontext);
+   ctx->premultiplied_blend = blend && !blend->independent_blend_enable &&
+      !blend->logicop_enable && blend->rt[0].blend_enable &&
+      blend->rt[0].rgb_func == PIPE_BLEND_ADD &&
+      blend->rt[0].alpha_func == PIPE_BLEND_ADD &&
+      blend->rt[0].rgb_src_factor == PIPE_BLENDFACTOR_ONE &&
+      blend->rt[0].alpha_src_factor == PIPE_BLENDFACTOR_ONE &&
+      blend->rt[0].rgb_dst_factor == PIPE_BLENDFACTOR_INV_SRC_ALPHA &&
+      blend->rt[0].alpha_dst_factor == PIPE_BLENDFACTOR_INV_SRC_ALPHA &&
+      blend->rt[0].colormask == 0xf;
+   if (blend && blend->rt[0].blend_enable && !ctx->premultiplied_blend)
+      grate_loge("unsupported blend state (source-over with premultiplied RGBA required)\n");
 }
 
 static void
@@ -731,7 +743,12 @@ emit_program(struct grate_context *context, uint32_t **ptrp)
    uint32_t cull_face_linker_setup;
 
    emit_shader(stream, ptrp, &context->vshader->blob);
-   emit_shader(stream, ptrp, &context->fshader->blob);
+   if (context->premultiplied_blend) {
+      assert(context->framebuffer.base.nr_cbufs == 1);
+      emit_shader(stream, ptrp, &context->fshader->premultiplied_blob);
+   } else {
+      emit_shader(stream, ptrp, &context->fshader->blob);
+   }
 
    cull_face_linker_setup = TGR3D_SU_PARAM_SUBPIX_XOFF(0x38) |
                             TGR3D_SU_PARAM_SUBPIX_YOFF(0x38) |
