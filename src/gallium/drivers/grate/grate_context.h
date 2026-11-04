@@ -40,6 +40,8 @@ struct grate_context {
    struct grate_vertexbuf_state vbs;
    struct pipe_constant_buffer constant_buffer[PIPE_MAX_CONSTANT_BUFFERS]; // ??, stolen from other drivers but no idea
 
+   bool premultiplied_blend;
+
    struct grate_zsa_state *zsa;
    struct grate_rasterizer_state *rast;
 
