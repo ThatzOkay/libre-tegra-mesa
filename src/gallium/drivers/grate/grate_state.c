@@ -40,14 +40,15 @@ grate_set_constant_buffer(struct pipe_context *pcontext, enum mesa_shader_stage 
 }
 
 static void grate_add_render_target(struct grate_context *context,
-                                    const struct pipe_surface *ref) 
+                                    const struct pipe_surface *ref,
+                                    unsigned int slot)
 {
    if (!ref->texture) {
       fprintf(stderr, "%s: texture at %p null!", __func__, ref);
       assert(0);
       return;
    }
-   if (context->framebuffer.num_rts >= context->base.screen->caps.max_render_targets) {
+   if (slot >= REG_TGR3D_GLOBAL_SURFDESC_LENGTH) {
       fprintf(stderr, "%s: Reached max render targets!", __func__);
       assert(0);
       return;
@@ -59,10 +60,10 @@ static void grate_add_render_target(struct grate_context *context,
    rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->pitch);
    rt_params |= TGR3D_GLOBAL_SURFDESC_STRUCTURE(res->tiled);
    
-   context->framebuffer.rt_params[context->framebuffer.num_rts] = rt_params;
-   context->framebuffer.rt_bos[context->framebuffer.num_rts] = res->bo;
-   context->framebuffer.rt_mask |= 1 << context->framebuffer.num_rts;
-   context->framebuffer.num_rts++;
+   context->framebuffer.rt_params[slot] = rt_params;
+   context->framebuffer.rt_bos[slot] = res->bo;
+   context->framebuffer.rt_mask |= 1u << slot;
+   context->framebuffer.num_rts = MAX2(context->framebuffer.num_rts, slot + 1);
 }
 
 static void
@@ -76,12 +77,16 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
 
    util_copy_framebuffer_state(cso, framebuffer);
 
+   /* Slot 0 is the fixed depth target. Keep colour output i at i + 1,
+    * even without depth, matching the fragment compiler's DW stores.
+    */
    for (unsigned int i = 0; i < framebuffer->nr_cbufs; i++) {
-      grate_add_render_target(context, &framebuffer->cbufs[i]);
+      if (framebuffer->cbufs[i].texture)
+         grate_add_render_target(context, &framebuffer->cbufs[i], i + 1);
    }
    
    if (framebuffer->zsbuf.texture) {
-      grate_add_render_target(context, &framebuffer->zsbuf);
+      grate_add_render_target(context, &framebuffer->zsbuf, 0);
    }
 
    /* prepare the scissor-registers for the non-scissor case */
@@ -588,21 +593,25 @@ emit_render_targets(struct grate_context *context, uint32_t **ptrp)
    struct grate_stream *stream = &context->gr3d->stream;
    const struct grate_framebuffer_state *fb = &context->framebuffer;
 
-   *(*ptrp)++ = host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(0), fb->num_rts);
+   /* Emit only populated slots: slot 0 is absent for colour-only draws,
+    * and Gallium may also leave holes among the colour attachments.
+    */
    for (i = 0; i < fb->num_rts; ++i) {
-      uint32_t rt_params = fb->rt_params[i];
-      /* TODO: setup dither */
-      /* rt_params |= TGR3D_GLOBAL_SURFDESC_DITHER(enable_dither); */
-      *(*ptrp)++ = rt_params;
-   }
+      if (!(fb->rt_mask & (1u << i)))
+         continue;
 
-   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(0), fb->num_rts));
-   for (i = 0; i < fb->num_rts; ++i) {
+      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(i), 1));
+      GRATE_PUSHBUF_WORD(*ptrp, fb->rt_params[i]);
+      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(i), 1));
       grate_stream_push_reloc(stream, ptrp, fb->rt_bos[i], 0);
    }
 
+   uint32_t enable = fb->rt_mask;
+   if (fb->base.zsbuf.texture && context->zsa && context->zsa->base.depth_enabled)
+      enable |= TGR3D_DW_ST_ENABLE_Z_TEST(TGR3D_STATE_ENABLED);
+
    GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_DW_ST_ENABLE, 1));
-   GRATE_PUSHBUF_WORD(*ptrp, fb->rt_mask);
+   GRATE_PUSHBUF_WORD(*ptrp, enable);
 }
 
 static void
