@@ -69,7 +69,7 @@ fp_alu_dst(const struct tgsi_dst_register *dst, int subreg, bool saturate)
 {
    struct fp_alu_dst_operand ret = { 0 };
 
-   ret.index = dst->Index;
+   ret.index = 16 + dst->Index * 4;
    if (dst->File == TGSI_FILE_OUTPUT) {
       ret.index = 2; // HACK: r2+r3 to match hard-coded store shader for now
 
@@ -79,33 +79,84 @@ fp_alu_dst(const struct tgsi_dst_register *dst, int subreg, bool saturate)
       ret.index += o / 2;
       ret.write_low_sub_reg = (o % 2) == 0;
       ret.write_high_sub_reg = (o % 2) != 0;
-   } else
+   } else {
+      assert(dst->File == TGSI_FILE_TEMPORARY && dst->Index < 2);
       ret.index += subreg;
+      ret.write_low_sub_reg = true;
+      ret.write_high_sub_reg = true;
+   }
 
    ret.saturate = saturate;
 
    return ret;
 }
 
+static struct fp_alu_src_operand
+fp_tgsi_src(struct grate_fp_shader *fp, const struct tgsi_src_register *src,
+            unsigned component, struct fp_mfu_instr *mfu)
+{
+   unsigned swizzle[] = {src->SwizzleX, src->SwizzleY, src->SwizzleZ, src->SwizzleW};
+   unsigned comp = swizzle[component];
+   struct fp_alu_src_operand value;
+
+   switch (src->File) {
+   case TGSI_FILE_INPUT:
+      /* Interpolate the selected source channel, not the destination channel. */
+      assert(mfu);
+      assert(mfu->var[comp].op == FP_VAR_OP_NOP || mfu->var[comp].tram_row == src->Index);
+      mfu->var[comp].op = FP_VAR_OP_FP20;
+      mfu->var[comp].tram_row = src->Index;
+      fp->info.max_tram_row = MAX2(fp->info.max_tram_row, src->Index + 1);
+      value = fp_alu_src_row(comp);
+      break;
+   case TGSI_FILE_IMMEDIATE: {
+      float imm = fp->immediates[src->Index][comp];
+      if (imm != 0.0f && imm != 1.0f)
+         fprintf(stderr, "GRATE FRAG: immediate %f is not supported (only 0.0 and 1.0), using 0.0\n", imm);
+      value = imm == 1.0f ? fp_alu_src_one() : fp_alu_src_zero();
+      break;
+   }
+   case TGSI_FILE_CONSTANT:
+      fprintf(stderr, "GRATE FRAG: constants (uniforms) are not supported in fragment shaders yet, using 0.0\n");
+      value = fp_alu_src_zero();
+      break;
+   case TGSI_FILE_TEMPORARY:
+      value = fp_alu_src_reg(src->Index * 4 + comp);
+      break;
+   default:
+      UNREACHABLE("unsupported fragment ALU source");
+   }
+   value.absolute_value = src->Absolute;
+   value.negate = src->Negate;
+   return value;
+}
+
 static void
-emit_vMOV(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
-          bool saturate, const struct tgsi_src_register *src)
+setup_interpolation(struct fp_mfu_instr *mfu)
+{
+   mfu->sfu.op = FP_SFU_OP_RCP;
+   mfu->sfu.reg = 4;
+   for (unsigned k = 0; k < 2; k++) {
+      mfu->mul[k].dst = FP_MFU_MUL_DST_BARYCENTRIC_WEIGHT;
+      mfu->mul[k].src[0] = FP_MFU_MUL_SRC_SFU_RESULT;
+      mfu->mul[k].src[1] = k ? FP_MFU_MUL_SRC_BARYCENTRIC_COEF_1 : FP_MFU_MUL_SRC_BARYCENTRIC_COEF_0;
+   }
+}
+
+static void
+emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
+          bool saturate, const struct tgsi_src_register *src,
+          const struct tgsi_src_register *rhs)
 {
    struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
    list_inithead(&inst->link);
 
    struct fp_mfu_instr *mfu = NULL;
-   if (src->File == TGSI_FILE_INPUT) {
+   if (src->File == TGSI_FILE_INPUT || (rhs && rhs->File == TGSI_FILE_INPUT)) {
       mfu = CALLOC_STRUCT(fp_mfu_instr);
       list_inithead(&mfu->link);
+      setup_interpolation(mfu);
    }
-
-   int swizzle[] = {
-      src->SwizzleX,
-      src->SwizzleY,
-      src->SwizzleZ,
-      src->SwizzleW
-   };
 
    struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
    int alu_instrs = 0;
@@ -114,42 +165,18 @@ emit_vMOV(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       if ((dst->WriteMask & (1 << i)) == 0)
          continue;
 
-      int comp = swizzle[i];
-
-      struct fp_alu_src_operand src0 = { };
-      if (src->File == TGSI_FILE_INPUT) {
-         mfu->var[i].op = FP_VAR_OP_FP20;
-         mfu->var[i].tram_row = src->Index;
-         fp->info.max_tram_row = MAX2(fp->info.max_tram_row, src->Index);
-         src0 = fp_alu_src_row(comp);
-      } else if (src->File == TGSI_FILE_IMMEDIATE) {
-         /*
-          * The only constants this compiler can put into an ALU instruction are the hardware's zero and one. Any other
-          * value would need the hardware's constant mechanism, which is not understood here yet: say so and use zero
-          * instead of reading an undefined register.
-          */
-         float value = fp->immediates[src->Index][comp];
-         if (value == 1.0f)
-            src0 = fp_alu_src_one();
-         else {
-            if (value != 0.0f)
-               fprintf(stderr, "GRATE FRAG: immediate %f is not supported (only 0.0 and 1.0), using 0.0\n", value);
-            src0 = fp_alu_src_zero();
-         }
-      } else if (src->File == TGSI_FILE_CONSTANT) {
-         fprintf(stderr, "GRATE FRAG: constants (uniforms) are not supported in fragment shaders yet, using 0.0\n");
-         src0 = fp_alu_src_zero();
-      } else
-         src0 = fp_alu_src_reg(src->Index + comp);
-
-      alu->slots[alu_instrs++] = fp_alu_sMOV(fp_alu_dst(dst, i, saturate), src0);
+      struct fp_alu_src_operand a = fp_tgsi_src(fp, src, i, mfu);
+      struct fp_alu_src_operand b = rhs ? fp_tgsi_src(fp, rhs, i, mfu) : fp_alu_src_one();
+      struct fp_alu_instr op = fp_alu_sMOV(fp_alu_dst(dst, i, saturate), a);
+      op.src[1] = b; /* MAD(a, b, zero, one) implements MOV or MUL. */
+      alu->slots[alu_instrs++] = op;
    }
    inst->alu_sched.num_instructions = 1;
-   inst->alu_sched.address = list_length(&fp->fp_instructions);
+   inst->alu_sched.address = list_length(&fp->alu_instructions);
 
    if (mfu != NULL) {
       inst->mfu_sched.num_instructions = 1;
-      inst->mfu_sched.address = list_length(&fp->fp_instructions);
+      inst->mfu_sched.address = list_length(&fp->mfu_instructions);
       list_addtail(&mfu->link, &fp->mfu_instructions);
    }
 
@@ -164,6 +191,26 @@ emit_vMOV(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
    }
 
    list_addtail(&alu->link, &fp->alu_instructions);
+   if (!mfu && !list_is_empty(&fp->fp_instructions)) {
+      struct fp_instr *previous = list_last_entry(&fp->fp_instructions, struct fp_instr, link);
+      if (!previous->dw.enable && previous->alu_sched.num_instructions < 3) {
+         if (previous->alu_sched.num_instructions == 1 &&
+             (src->File == TGSI_FILE_TEMPORARY || (rhs && rhs->File == TGSI_FILE_TEMPORARY))) {
+            struct fp_alu_instr_packet *nop = CALLOC_STRUCT(fp_alu_instr_packet);
+            list_inithead(&nop->link);
+            /* Allow the GPR result to become available before it is read. */
+            struct fp_alu_dst_operand discard = {.index = 31};
+            for (unsigned n = 0; n < 4; n++)
+               nop->slots[n] = fp_alu_sMOV(discard, fp_alu_src_zero());
+            list_addtail(&nop->link, &alu->link);
+            previous->alu_sched.num_instructions++;
+         }
+         previous->alu_sched.num_instructions++;
+         previous->dw = inst->dw;
+         FREE(inst);
+         return;
+      }
+   }
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
@@ -174,9 +221,37 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
 
    switch (inst->Instruction.Opcode) {
    case TGSI_OPCODE_MOV:
-      emit_vMOV(fp, &inst->Dst[0].Register, saturate,
-                    &inst->Src[0].Register);
+      emit_vALU(fp, &inst->Dst[0].Register, saturate,
+                    &inst->Src[0].Register, NULL);
       break;
+
+   case TGSI_OPCODE_MUL: {
+      const struct tgsi_src_register *a = &inst->Src[0].Register;
+      const struct tgsi_src_register *b = &inst->Src[1].Register;
+      struct tgsi_src_register staged = {0};
+      if (a->File == TGSI_FILE_INPUT && b->File == TGSI_FILE_INPUT && a->Index != b->Index) {
+         /* One MFU packet can interpolate one vec4. Preserve A in an unused general-purpose vec4
+          * before loading B. Scratch registers must not alias a live
+          * TGSI temporary. General register allocation is still missing.
+          */
+         assert(fp->num_temporaries <= 1);
+         struct tgsi_dst_register scratch = {0};
+         scratch.File = TGSI_FILE_TEMPORARY;
+         scratch.Index = fp->num_temporaries;
+         scratch.WriteMask = TGSI_WRITEMASK_XYZW;
+         emit_vALU(fp, &scratch, false, a, NULL);
+         staged.File = TGSI_FILE_TEMPORARY;
+         staged.Index = fp->num_temporaries;
+         staged.SwizzleX = TGSI_SWIZZLE_X;
+         staged.SwizzleY = TGSI_SWIZZLE_Y;
+         staged.SwizzleZ = TGSI_SWIZZLE_Z;
+         staged.SwizzleW = TGSI_SWIZZLE_W;
+         a = &staged;
+      }
+      emit_vALU(fp, &inst->Dst[0].Register, saturate, a, b);
+
+      break;
+   }
 
    default:
       fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x\n", inst->Instruction.Opcode);
@@ -197,7 +272,7 @@ emit_tgsi_input(struct grate_fp_shader *fp, const struct tgsi_full_declaration *
    grate_trace();
    assert(decl->Range.First == decl->Range.Last);
 
-   uint32_t src = LINK_SRC(1);
+   uint32_t src = LINK_SRC(decl->Range.First + 1) | (decl->Range.First << 9);
    uint32_t dst = 0;
    for (int i = 0; i < 4; ++i)
       dst |= LINK_DST(i, i, LINK_DST_FP20);
@@ -215,6 +290,9 @@ static void
 emit_tgsi_declaration(struct grate_fp_shader *fp, const struct tgsi_full_declaration *decl)
 {
    switch (decl->Declaration.File) {
+   case TGSI_FILE_TEMPORARY:
+      fp->num_temporaries = MAX2(fp->num_temporaries, decl->Range.Last + 1);
+      break;
    case TGSI_FILE_INPUT:
       emit_tgsi_input(fp, decl);
       break;
@@ -232,6 +310,7 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
    fp->info.color_input = -1;
    fp->info.max_tram_row = 1;
    fp->num_immediates = 0;
+   fp->num_temporaries = 0;
 
    while (!tgsi_parse_end_of_tokens(tgsi)) {
       tgsi_parse_token(tgsi);
@@ -258,22 +337,4 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
       }
    }
 
-   /*
-    * HACK: insert barycentric interpolation setup
-    * This will overwrite instructions in some cases, need proper scheduler
-    * to fix properly
-    */
-    if (list_is_empty(&fp->mfu_instructions))
-       return; /* nothing is interpolated (for example a constant colour): no setup, and no first entry to write to */
-
-    struct fp_mfu_instr *first = list_first_entry(&fp->mfu_instructions, struct fp_mfu_instr, link);
-    first->sfu.op = FP_SFU_OP_RCP;
-    first->sfu.reg = 4;
-    first->mul[0].dst = FP_MFU_MUL_DST_BARYCENTRIC_WEIGHT;
-    first->mul[0].src[0] = FP_MFU_MUL_SRC_SFU_RESULT;
-    first->mul[0].src[1] = FP_MFU_MUL_SRC_BARYCENTRIC_COEF_0;
-
-    first->mul[1].dst = FP_MFU_MUL_DST_BARYCENTRIC_WEIGHT;
-    first->mul[1].src[0] = FP_MFU_MUL_SRC_SFU_RESULT;
-    first->mul[1].src[1] = FP_MFU_MUL_SRC_BARYCENTRIC_COEF_1;
 }
