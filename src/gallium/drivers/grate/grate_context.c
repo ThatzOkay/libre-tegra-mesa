@@ -7,6 +7,7 @@
 #include "grate_common.h"
 #include "grate_device.h"
 #include "grate_context.h"
+#include "util/u_inlines.h"
 #include "grate_draw.h"
 #include "grate_program.h"
 #include "grate_resource.h"
@@ -73,6 +74,9 @@ grate_context_destroy(struct pipe_context *pcontext)
 {
    struct grate_context *context = grate_context(pcontext);
    grate_trace();
+
+   for (unsigned i = 0; i < 16; i++)
+      pipe_sampler_view_reference(&context->sampler_views[i], NULL);
 
    slab_destroy_child(&context->transfer_pool);
 

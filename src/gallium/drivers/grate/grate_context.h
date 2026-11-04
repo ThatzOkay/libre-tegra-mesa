@@ -46,6 +46,9 @@ struct grate_context {
    struct grate_vertex_shader_state *vshader;
    struct grate_fragment_shader_state *fshader;
 
+   struct pipe_sampler_view *sampler_views[16];
+   struct pipe_sampler_state *samplers[16];
+
    uint32_t no_scissor[3];
    uint32_t viewport[10];
    uint32_t guardband[4];

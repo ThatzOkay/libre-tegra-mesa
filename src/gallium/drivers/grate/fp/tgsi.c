@@ -214,12 +214,71 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
+/* The initial TEX path supports an interpolated vec2 coordinate and one
+ * base-level 2D sample. TEX returns packed fx10 channels in row registers 2/3.
+ */
+static void
+emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
+{
+   const struct tgsi_src_register *coord = &tgsi->Src[0].Register;
+   const struct tgsi_src_register *sampler = &tgsi->Src[1].Register;
+   const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
+   assert(tgsi->Texture.Texture == TGSI_TEXTURE_2D);
+   assert(coord->File == TGSI_FILE_INPUT && !coord->Negate && !coord->Absolute);
+   assert(coord->SwizzleX == 0 && coord->SwizzleY == 1);
+   assert(sampler->File == TGSI_FILE_SAMPLER && sampler->Index < 16);
+
+   struct fp_instr *interp = CALLOC_STRUCT(fp_instr);
+   struct fp_mfu_instr *mfu = CALLOC_STRUCT(fp_mfu_instr);
+   list_inithead(&interp->link);
+   list_inithead(&mfu->link);
+   setup_interpolation(mfu);
+   for (unsigned i = 0; i < 2; i++) {
+      mfu->var[i].op = FP_VAR_OP_FP20;
+      mfu->var[i].tram_row = coord->Index;
+   }
+   fp->info.max_tram_row = MAX2(fp->info.max_tram_row, coord->Index + 1);
+   interp->mfu_sched.address = list_length(&fp->mfu_instructions);
+   interp->mfu_sched.num_instructions = 1;
+   list_addtail(&mfu->link, &fp->mfu_instructions);
+   list_addtail(&interp->link, &fp->fp_instructions);
+
+   struct fp_instr *sample = CALLOC_STRUCT(fp_instr);
+   list_inithead(&sample->link);
+   sample->tex = (1 << 10) | (1 << 5) | sampler->Index;
+   struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
+   list_inithead(&alu->link);
+   unsigned slot = 0;
+   for (unsigned i = 0; i < 4; i++) {
+      if (!(dst->WriteMask & (1 << i))) continue;
+      unsigned channel = i;
+      struct fp_alu_src_operand src = {
+         .index = 2 + channel / 2,
+         .datatype = FP_DATATYPE_FIXED10,
+         .sub_reg_select_high = channel % 2,
+      };
+      alu->slots[slot++] = fp_alu_sMOV(fp_alu_dst(dst, i, tgsi->Instruction.Saturate), src);
+   }
+   sample->alu_sched.address = list_length(&fp->alu_instructions);
+   sample->alu_sched.num_instructions = 1;
+   list_addtail(&alu->link, &fp->alu_instructions);
+   if (dst->File == TGSI_FILE_OUTPUT) {
+      sample->dw.enable = true;
+      sample->dw.index = dst->Index + 1;
+      sample->dw.src_regs = FP_DW_REGS_R2_R3;
+   }
+   list_addtail(&sample->link, &fp->fp_instructions);
+}
+
 static void
 emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *inst)
 {
    bool saturate = inst->Instruction.Saturate != 0;
 
    switch (inst->Instruction.Opcode) {
+   case TGSI_OPCODE_TEX:
+      emit_TEX(fp, inst);
+      break;
    case TGSI_OPCODE_MOV:
       emit_vALU(fp, &inst->Dst[0].Register, saturate,
                     &inst->Src[0].Register, NULL);
