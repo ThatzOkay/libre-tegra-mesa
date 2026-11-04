@@ -168,7 +168,7 @@ int grate_bo_wait(struct grate_bo *bo)
 {
     if (!bo->pending_channel)
         return 0;
-    return drm_tegra_fence_wait(&bo->pending, 1000000000UL);
+    return drm_tegra_fence_wait(&bo->pending, 1000000000UL, "bo");
 }
 
 int grate_bo_map(struct grate_bo *bo, void **ptr)

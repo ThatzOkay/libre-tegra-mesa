@@ -102,6 +102,11 @@ int drm_tegra_pushbuf_sync_cond(struct drm_tegra_pushbuf *pushbuf,
 int drm_tegra_syncpoint_new(struct drm_tegra_channel *channel,
                             struct drm_tegra_syncpoint **syncptp);
 int drm_tegra_syncpoint_free(struct drm_tegra_syncpoint *syncpt);
-int drm_tegra_fence_wait(struct drm_tegra_fence *fence, unsigned long timeout);
+/* why names the caller in GRATE_DRM_TRACE output ("drain", "bo", ...); it has no other effect. */
+int drm_tegra_fence_wait(struct drm_tegra_fence *fence, unsigned long timeout, const char *why);
+
+/* GRATE_DRM_TRACE level (0 when unset) and a monotonic microsecond clock, for the trace output. */
+int drm_trace_level(void);
+unsigned long long drm_tegra_now_us(void);
 
 #endif /* __DRM_TEGRA_H__ */

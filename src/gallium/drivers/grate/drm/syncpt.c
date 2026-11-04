@@ -25,7 +25,9 @@
 #endif
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <sys/ioctl.h>
 
@@ -78,8 +80,17 @@ drm_tegra_syncpoint_free(struct drm_tegra_syncpoint *syncpt)
 }
 
 /* timeout is in nanoseconds relative to now; the classic ioctl takes milliseconds */
+unsigned long long
+drm_tegra_now_us(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 int
-drm_tegra_fence_wait(struct drm_tegra_fence *fence, unsigned long timeout)
+drm_tegra_fence_wait(struct drm_tegra_fence *fence, unsigned long timeout, const char *why)
 {
     struct grate_classic_syncpt_wait args;
     int err;
@@ -89,9 +100,15 @@ drm_tegra_fence_wait(struct drm_tegra_fence *fence, unsigned long timeout)
     args.thresh = fence->value;
     args.timeout = timeout / 1000000;
 
+    unsigned long long t0 = drm_trace_level() ? drm_tegra_now_us() : 0;
+
     err = ioctl(fence->drm->fd, GRATE_CLASSIC_IOCTL_SYNCPT_WAIT, &args);
     if (err < 0)
-        return -errno;
+        err = -errno;
 
-    return 0;
+    if (drm_trace_level())
+        fprintf(stderr, "grate-drm: fence wait (%s) id %u thresh %u -> %d, blocked %llu us\n", why, args.id, args.thresh,
+                err, drm_tegra_now_us() - t0);
+
+    return err;
 }
