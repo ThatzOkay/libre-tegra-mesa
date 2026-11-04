@@ -27,6 +27,7 @@
 #endif
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -36,7 +37,26 @@
 #include <poll.h>
 
 #include "grate_device.h"
+#include "grate_bo.h"
 #include "tegra_private.h"
+#include "tegra_classic.h"
+
+/*
+ * GRATE_DRM_TRACE=1 logs every submit and wait to stderr; =2 also dumps the command words of each submit. For finding
+ * out whether the driver's jobs reach the kernel and complete (there is no other trace of draws).
+ */
+static int
+drm_trace_level(void)
+{
+    static int level = -1;
+
+    if (level < 0) {
+        const char *env = getenv("GRATE_DRM_TRACE");
+        level = env ? atoi(env) : 0;
+    }
+
+    return level;
+}
 
 struct drm_tegra_submit_cmd *
 drm_tegra_job_add_command(struct drm_tegra_job *job, uint32_t type,
@@ -129,31 +149,123 @@ drm_tegra_job_get_pushbuf(struct drm_tegra_job *job,
     return 0;
 }
 
+/*
+ * The classic kernel interface wants the command words in a GEM buffer (not a user pointer), one relocation per
+ * patched word that names the GEM handle of the target, and the sync point increments listed separately. The
+ * driver's new-style bookkeeping maps onto that as: one gather buffer holding all of the pushbuf, one command
+ * buffer entry covering it, one relocation per drm_tegra_submit_buf (whose "mapping" is the GEM handle, see
+ * drm_tegra_channel_map()) and one sync point entry (the channel's context id, see drm_tegra_syncpoint_new()).
+ */
 int
 drm_tegra_job_submit(struct drm_tegra_job *job, struct drm_tegra_fence *fence)
 {
     struct drm_tegra_channel *channel = job->channel;
     struct grate_device *drm = channel->drm;
-    struct drm_tegra_channel_submit args;
+    struct grate_classic_submit args;
+    struct grate_classic_cmdbuf cmdbuf;
+    struct grate_classic_syncpt syncpt;
+    struct grate_classic_reloc *relocs = NULL;
+    struct grate_bo *gather;
+    uint32_t handle;
+    unsigned int words, i;
+    void *map;
     int err;
+
+    words = job->pushbuf->ptr - job->pushbuf->start;
+
+    /* waiting for another job's sync point is a per-command feature the classic interface does not have */
+    for (i = 0; i < job->num_commands; i++) {
+        if (job->commands[i].type == DRM_TEGRA_SUBMIT_CMD_WAIT_SYNCPT)
+            return -ENOTSUP;
+    }
+
+    gather = grate_bo_alloc(drm, align(words * 4, job->page_size), 0);
+    if (!gather)
+        return -ENOMEM;
+
+    err = grate_bo_map(gather, &map);
+    if (err < 0)
+        goto out_bo;
+
+    memcpy(map, job->pushbuf->start, words * 4);
+    grate_bo_unmap(gather);
+
+    err = grate_bo_get_handle(gather, &handle);
+    if (err < 0)
+        goto out_bo;
+
+    if (job->num_buffers) {
+        relocs = calloc(job->num_buffers, sizeof(*relocs));
+        if (!relocs) {
+            err = -ENOMEM;
+            goto out_bo;
+        }
+    }
+
+    for (i = 0; i < job->num_buffers; i++) {
+        relocs[i].cmdbuf.handle = handle;
+        relocs[i].cmdbuf.offset = job->buffers[i].reloc.gather_offset_words * 4;
+        relocs[i].target.handle = job->buffers[i].mapping;
+        relocs[i].target.offset = job->buffers[i].reloc.target_offset;
+        relocs[i].shift = job->buffers[i].reloc.shift;
+    }
+
+    memset(&cmdbuf, 0, sizeof(cmdbuf));
+    cmdbuf.handle = handle;
+    cmdbuf.words = words;
+
+    memset(&syncpt, 0, sizeof(syncpt));
+    syncpt.id = job->syncpt.id;
+    syncpt.incrs = job->syncpt.increments;
 
     memset(&args, 0, sizeof(args));
     args.context = channel->context;
-    args.num_bufs = job->num_buffers;
-    args.num_cmds = job->num_commands;
-    args.gather_data_words = job->pushbuf->ptr - job->pushbuf->start;
-    args.syncpt.id = job->syncpt.id;
-    args.syncpt.increments = job->syncpt.increments;
+    args.num_syncpts = 1;
+    args.num_cmdbufs = 1;
+    args.num_relocs = job->num_buffers;
+    args.syncpts = (uintptr_t)&syncpt;
+    args.cmdbufs = (uintptr_t)&cmdbuf;
+    args.relocs = (uintptr_t)relocs;
 
-    args.bufs_ptr = (uintptr_t)job->buffers;
-    args.cmds_ptr = (uintptr_t)job->commands;
-    args.gather_data_ptr = (uintptr_t)job->pushbuf->start;
+    err = ioctl(drm->fd, GRATE_CLASSIC_IOCTL_SUBMIT, &args) < 0 ? -errno : 0;
 
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_CHANNEL_SUBMIT, &args);
+    if (drm_trace_level()) {
+        fprintf(stderr, "grate-drm: submit class 0x%x: %u words, %u relocs, %u syncpt incrs (syncpt %u) -> %d, fence %u\n",
+                channel->class, words, job->num_buffers, job->syncpt.increments, job->syncpt.id, err, args.fence);
+
+        if (drm_trace_level() > 1) {
+            for (i = 0; i < job->num_buffers; i++)
+                fprintf(stderr, "grate-drm:   reloc %u: word %u -> GEM handle %u, offset %u\n", i,
+                        job->buffers[i].reloc.gather_offset_words, job->buffers[i].mapping,
+                        (unsigned)job->buffers[i].reloc.target_offset);
+
+            for (i = 0; i < words; i++)
+                fprintf(stderr, "grate-drm:   %04x: %08x\n", i * 4, job->pushbuf->start[i]);
+        }
+    }
+
     if (err < 0)
-        return -errno;
+        goto out_relocs;
 
-    job->syncpt.fence = args.syncpt.value;
+    /*
+     * GRATE_DRM_WAIT=<ms> waits for every job right after its submit (the driver itself does not wait for draws) and
+     * logs how the wait ends: a timeout means the job never completed, success with a wrong picture means it ran.
+     */
+    if (getenv("GRATE_DRM_WAIT")) {
+        struct grate_classic_syncpt_wait wait;
+        int werr;
+
+        memset(&wait, 0, sizeof(wait));
+        wait.id = job->syncpt.id;
+        wait.thresh = args.fence;
+        wait.timeout = atoi(getenv("GRATE_DRM_WAIT"));
+
+        werr = ioctl(drm->fd, GRATE_CLASSIC_IOCTL_SYNCPT_WAIT, &wait) < 0 ? -errno : 0;
+        fprintf(stderr, "grate-drm: wait for fence %u of class 0x%x (%u ms) -> %d\n", args.fence, channel->class,
+                wait.timeout, werr);
+    }
+
+    job->syncpt.fence = args.fence;
 
     if (fence) {
         fence->drm = drm;
@@ -161,26 +273,46 @@ drm_tegra_job_submit(struct drm_tegra_job *job, struct drm_tegra_fence *fence)
         fence->value = job->syncpt.fence;
     }
 
-    return 0;
+    /*
+     * The kernel copies the command words out of the gather buffer during the ioctl (the classic submit path,
+     * tegra_drm_copy_and_patch_cmdbufs), so the buffer is not needed once the ioctl has returned.
+     */
+out_relocs:
+    free(relocs);
+out_bo:
+    grate_bo_unref(gather);
+
+    return err;
 }
 
+/* timeout is in nanoseconds relative to now; the classic ioctl takes milliseconds */
 int
 drm_tegra_job_wait(struct drm_tegra_job *job, unsigned long timeout)
 {
     struct drm_tegra_channel *channel = job->channel;
     struct grate_device *drm = channel->drm;
-    struct drm_tegra_syncpoint_wait args;
-    struct timespec ts;
+    struct grate_classic_syncpt_wait args;
+    unsigned long ms = timeout / 1000000;
     int err;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    /*
+     * The driver passes 1000000 here, which is 1 ms as a relative nanosecond timeout. That is too short to wait for
+     * a rendering job on this hardware, so wait at least a second (a deliberate deviation from the original value).
+     */
+    if (ms < 1000)
+        ms = 1000;
 
     memset(&args, 0, sizeof(args));
-    args.timeout_ns = ts.tv_sec * 1000000000 + ts.tv_nsec + timeout;
     args.id = job->syncpt.id;
-    args.threshold = job->syncpt.fence;
+    args.thresh = job->syncpt.fence;
+    args.timeout = ms;
 
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_SYNCPOINT_WAIT, &args);
+    err = ioctl(drm->fd, GRATE_CLASSIC_IOCTL_SYNCPT_WAIT, &args);
+
+    if (drm_trace_level())
+        fprintf(stderr, "grate-drm: wait id %u thresh %u (%lu ms) -> %d\n", args.id, args.thresh, ms,
+                err < 0 ? -errno : 0);
+
     if (err < 0)
         return -errno;
 

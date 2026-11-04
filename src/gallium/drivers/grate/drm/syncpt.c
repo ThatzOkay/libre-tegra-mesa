@@ -31,12 +31,17 @@
 
 #include "grate_device.h"
 #include "tegra_private.h"
+#include "tegra_classic.h"
 
+/*
+ * The classic kernel interface hides sync points: the "syncpoint id" of a channel is its context id (GET_SYNCPT
+ * returns it), and the fence a submit returns is a per-context job counter that SYNCPT_WAIT understands.
+ */
 int
-drm_tegra_syncpoint_new(struct grate_device *drm,
+drm_tegra_syncpoint_new(struct drm_tegra_channel *channel,
                         struct drm_tegra_syncpoint **syncptp)
 {
-    struct drm_tegra_syncpoint_allocate args;
+    struct grate_classic_get_syncpt args;
     struct drm_tegra_syncpoint *syncpt;
     int err;
 
@@ -45,14 +50,15 @@ drm_tegra_syncpoint_new(struct grate_device *drm,
         return -ENOMEM;
 
     memset(&args, 0, sizeof(args));
+    args.context = channel->context;
 
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_SYNCPOINT_ALLOCATE, &args);
+    err = ioctl(channel->drm->fd, GRATE_CLASSIC_IOCTL_GET_SYNCPT, &args);
     if (err < 0) {
         free(syncpt);
         return -errno;
     }
 
-    syncpt->drm = drm;
+    syncpt->drm = channel->drm;
     syncpt->id = args.id;
 
     *syncptp = syncpt;
@@ -63,38 +69,27 @@ drm_tegra_syncpoint_new(struct grate_device *drm,
 int
 drm_tegra_syncpoint_free(struct drm_tegra_syncpoint *syncpt)
 {
-    struct drm_tegra_syncpoint_free args;
-    struct grate_device *drm = syncpt->drm;
-    int err;
-
     if (!syncpt)
         return -EINVAL;
-
-    memset(&args, 0, sizeof(args));
-    args.id = syncpt->id;
-
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_SYNCPOINT_FREE, &args);
-    if (err < 0)
-        return -errno;
 
     free(syncpt);
 
     return 0;
 }
 
+/* timeout is in nanoseconds relative to now; the classic ioctl takes milliseconds */
 int
 drm_tegra_fence_wait(struct drm_tegra_fence *fence, unsigned long timeout)
 {
-    struct drm_tegra_syncpoint_wait args;
-    struct grate_device *drm = fence->drm;
+    struct grate_classic_syncpt_wait args;
     int err;
 
     memset(&args, 0, sizeof(args));
-    args.timeout_ns = 0;
     args.id = fence->syncpt;
-    args.threshold = fence->value;
+    args.thresh = fence->value;
+    args.timeout = timeout / 1000000;
 
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_SYNCPOINT_WAIT, &args);
+    err = ioctl(fence->drm->fd, GRATE_CLASSIC_IOCTL_SYNCPT_WAIT, &args);
     if (err < 0)
         return -errno;
 
