@@ -34,13 +34,14 @@
 #include "grate_device.h"
 #include "grate_bo.h"
 #include "tegra_private.h"
+#include "tegra_classic.h"
 
 int
 drm_tegra_channel_open(struct grate_device *drm,
                        enum drm_tegra_class client,
                        struct drm_tegra_channel **channelp)
 {
-    struct drm_tegra_channel_open args;
+    struct grate_classic_open_channel args;
     struct drm_tegra_channel *channel;
     enum host1x_class class;
     int err;
@@ -73,18 +74,32 @@ drm_tegra_channel_open(struct grate_device *drm,
     channel->drm = drm;
 
     memset(&args, 0, sizeof(args));
-    args.host1x_class = class;
+    args.client = class;
 
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_CHANNEL_OPEN, &args);
+    err = ioctl(drm->fd, GRATE_CLASSIC_IOCTL_OPEN_CHANNEL, &args);
     if (err < 0) {
         free(channel);
         return -errno;
     }
 
     channel->context = args.context;
-    channel->version = args.version;
-    channel->capabilities = args.capabilities;
+    channel->capabilities = 0;
     channel->class = class;
+
+    /* the classic interface does not report the hardware version: take it from the SoC */
+    switch (drm->soc_id) {
+    case DRM_TEGRA_SOC_T20:
+        channel->version = 0x20;
+        break;
+
+    case DRM_TEGRA_SOC_T30:
+        channel->version = 0x30;
+        break;
+
+    default:
+        channel->version = 0;
+        break;
+    }
 
     switch (channel->version) {
     case 0x20:
@@ -101,6 +116,7 @@ drm_tegra_channel_open(struct grate_device *drm,
         break;
 
     default:
+        free(channel);
         return -ENOTSUP;
     }
 
@@ -111,7 +127,7 @@ drm_tegra_channel_open(struct grate_device *drm,
 
 int drm_tegra_channel_close(struct drm_tegra_channel *channel)
 {
-    struct drm_tegra_channel_close args;
+    struct grate_classic_close_channel args;
     struct grate_device *drm;
     int err;
 
@@ -123,7 +139,7 @@ int drm_tegra_channel_close(struct drm_tegra_channel *channel)
     memset(&args, 0, sizeof(args));
     args.context = channel->context;
 
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_CHANNEL_CLOSE, &args);
+    err = ioctl(drm->fd, GRATE_CLASSIC_IOCTL_CLOSE_CHANNEL, &args);
     if (err < 0)
         return -errno;
 
@@ -138,36 +154,26 @@ drm_tegra_channel_get_version(struct drm_tegra_channel *channel)
     return channel->version;
 }
 
+/*
+ * The classic interface has no mapping objects: the kernel maps a buffer when a job that relocates it is submitted.
+ * A "mapping" is therefore just the GEM handle, which drm_tegra_pushbuf_relocate() passes on as the relocation target.
+ */
 int
 drm_tegra_channel_map(struct drm_tegra_channel *channel,
                       struct grate_bo *bo, uint32_t flags,
                       struct drm_tegra_mapping **mapp)
 {
-    struct grate_device *drm = channel->drm;
-    struct drm_tegra_channel_map args;
     struct drm_tegra_mapping *map;
-    int err;
 
-    if (!drm || !bo || !mapp)
+    if (!channel || !bo || !mapp)
         return -EINVAL;
 
     map = calloc(1, sizeof(*map));
     if (!map)
         return -ENOMEM;
 
-    memset(&args, 0, sizeof(args));
-    args.context = channel->context;
-    args.handle = bo->handle;
-    args.flags = flags;
-
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_CHANNEL_MAP, &args);
-    if (err < 0) {
-        free(map);
-        return -errno;
-    }
-
     map->channel = channel;
-    map->id = args.mapping;
+    map->id = bo->handle;
     map->flags = flags;
     *mapp = map;
 
@@ -177,21 +183,8 @@ drm_tegra_channel_map(struct drm_tegra_channel *channel,
 int
 drm_tegra_channel_unmap(struct drm_tegra_mapping *map)
 {
-    struct drm_tegra_channel *channel = map->channel;
-    struct grate_device *drm = channel->drm;
-    struct drm_tegra_channel_unmap args;
-    int err;
-
-    if (!channel || !map)
+    if (!map)
         return -EINVAL;
-
-    memset(&args, 0, sizeof(args));
-    args.context = channel->context;
-    args.mapping = map->id;
-
-    err = ioctl(drm->fd, DRM_IOCTL_TEGRA_CHANNEL_UNMAP, &args);
-    if (err < 0)
-        return -errno;
 
     free(map);
     return 0;

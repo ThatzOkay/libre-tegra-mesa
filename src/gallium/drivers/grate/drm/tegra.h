@@ -98,7 +98,7 @@ int drm_tegra_pushbuf_sync_cond(struct drm_tegra_pushbuf *pushbuf,
                                 struct drm_tegra_syncpoint *syncpt,
                                 enum drm_tegra_sync_cond cond);
 
-int drm_tegra_syncpoint_new(struct grate_device *drm,
+int drm_tegra_syncpoint_new(struct drm_tegra_channel *channel,
                             struct drm_tegra_syncpoint **syncptp);
 int drm_tegra_syncpoint_free(struct drm_tegra_syncpoint *syncpt);
 int drm_tegra_fence_wait(struct drm_tegra_fence *fence, unsigned long timeout);
