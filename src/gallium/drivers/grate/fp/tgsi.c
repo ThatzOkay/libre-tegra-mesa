@@ -92,6 +92,25 @@ fp_alu_dst(const struct tgsi_dst_register *dst, int subreg, bool saturate)
 }
 
 static struct fp_alu_src_operand
+fp_constant(struct grate_fp_shader *fp, int word, float immediate)
+{
+   unsigned i;
+   for (i = 0; i < fp->info.num_constants; i++) {
+      if (fp->info.constants[i].word == word &&
+          (word >= 0 || fp->info.constants[i].immediate == immediate))
+         break;
+   }
+   assert(i < 32);
+   if (i == fp->info.num_constants) {
+      fp->info.constants[i].word = word;
+      fp->info.constants[i].immediate = immediate;
+      fp->info.num_constants++;
+   }
+   struct fp_alu_src_operand value = {.index = 32 + i};
+   return value;
+}
+
+static struct fp_alu_src_operand
 fp_tgsi_src(struct grate_fp_shader *fp, const struct tgsi_src_register *src,
             unsigned component, struct fp_mfu_instr *mfu)
 {
@@ -111,14 +130,13 @@ fp_tgsi_src(struct grate_fp_shader *fp, const struct tgsi_src_register *src,
       break;
    case TGSI_FILE_IMMEDIATE: {
       float imm = fp->immediates[src->Index][comp];
-      if (imm != 0.0f && imm != 1.0f)
-         fprintf(stderr, "GRATE FRAG: immediate %f is not supported (only 0.0 and 1.0), using 0.0\n", imm);
-      value = imm == 1.0f ? fp_alu_src_one() : fp_alu_src_zero();
+      value = imm == 1.0f ? fp_alu_src_one() :
+              imm == 0.0f ? fp_alu_src_zero() : fp_constant(fp, -1, imm);
       break;
    }
    case TGSI_FILE_CONSTANT:
-      fprintf(stderr, "GRATE FRAG: constants (uniforms) are not supported in fragment shaders yet, using 0.0\n");
-      value = fp_alu_src_zero();
+      assert(!src->Indirect);
+      value = fp_constant(fp, src->Index * 4 + comp, 0.0f);
       break;
    case TGSI_FILE_TEMPORARY:
       value = fp_alu_src_reg(src->Index * 4 + comp);
@@ -274,6 +292,10 @@ static void
 emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *inst)
 {
    bool saturate = inst->Instruction.Saturate != 0;
+   for (unsigned i = 0; i < inst->Instruction.NumSrcRegs; i++) {
+      if (inst->Src[i].Register.File == TGSI_FILE_CONSTANT && inst->Src[i].Register.Dimension)
+         assert(inst->Src[i].Dimension.Index == 0 && !inst->Src[i].Dimension.Indirect);
+   }
 
    switch (inst->Instruction.Opcode) {
    case TGSI_OPCODE_TEX:
@@ -366,6 +388,7 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
    list_inithead(&fp->mfu_instructions);
 
    fp->info.num_inputs = 0;
+   fp->info.num_constants = 0;
    fp->info.color_input = -1;
    fp->info.max_tram_row = 1;
    fp->num_immediates = 0;

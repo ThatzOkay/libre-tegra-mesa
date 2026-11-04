@@ -680,6 +680,44 @@ emit_vs_uniforms(struct grate_context *context, uint32_t **ptrp)
       grate_stream_push_words(stream, ptrp, constbuf->user_buffer, user_words, 0);
 }
 
+/* Tegra fragment constants are sign:1 exponent:6 mantissa:13 (bias 31).
+ * Flush values below the normalized range rather than wrapping the exponent.
+ */
+static uint32_t
+fragment_fp20(float value)
+{
+   uint32_t bits = fui(value);
+   unsigned exponent = (bits >> 23) & 0xff;
+   uint32_t sign = (bits >> 12) & 0x80000;
+   if (exponent == 0xff)
+      return sign | 0x7e000 | ((bits & 0x7fffff) ? 1 : 0);
+   int adjusted = (int)exponent - 127 + 31;
+   if (adjusted <= 0)
+      return 0;
+   if (adjusted >= 63)
+      return sign | 0x7e000;
+   return sign | ((uint32_t)adjusted << 13) | ((bits & 0x7fffff) >> 10);
+}
+
+static void
+emit_fs_uniforms(struct grate_context *context, uint32_t **ptrp)
+{
+   const struct grate_fp_info *info = &context->fshader->info;
+   const struct pipe_constant_buffer *cb = &context->constant_buffer[MESA_SHADER_FRAGMENT];
+   if (!info->num_constants)
+      return;
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(0x820, info->num_constants));
+   for (unsigned i = 0; i < info->num_constants; i++) {
+      float value = info->constants[i].immediate;
+      int word = info->constants[i].word;
+      if (word >= 0) {
+         assert(cb->user_buffer && ((unsigned)word + 1) * sizeof(float) <= cb->buffer_size);
+         memcpy(&value, (const uint8_t *)cb->user_buffer + word * sizeof(float), sizeof(value));
+      }
+      GRATE_PUSHBUF_WORD(*ptrp, fragment_fp20(value));
+   }
+}
+
 static void
 emit_shader(struct grate_stream *stream, uint32_t **ptrp, struct grate_shader_blob *blob)
 {
@@ -775,6 +813,7 @@ grate_emit_state(struct grate_context *context, uint32_t **ptrp)
    emit_zsa_state(context, ptrp);
    emit_attribs(context, ptrp);
    emit_vs_uniforms(context, ptrp);
+   emit_fs_uniforms(context, ptrp);
    emit_program(context, ptrp);
    emit_textures(context, ptrp);
 }

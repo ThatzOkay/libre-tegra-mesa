@@ -32,6 +32,13 @@ struct grate_fp_info {
    int num_inputs;
    int color_input;
    int max_tram_row;
+   /* Scalar hardware constants: uniforms point into TGSI constant buffer 0;
+    * immediates share the same 32-entry FP20 bank. */
+   struct {
+      int word; /* -1 for an immediate */
+      float immediate;
+   } constants[32];
+   unsigned num_constants;
 };
 
 #define GRATE_FP_MAX_IMMEDIATES 32
