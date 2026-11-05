@@ -308,6 +308,27 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       direct_pack = fp->temp_src[src->Index][c] == (int)c;
    if (direct_pack)
       output_stage = false;
+   /* The output stage computes each channel into a scratch global first.
+    * Take globals that no live temporary occupies (occupied also holds this
+    * instruction's own sources), so a scratch write cannot destroy a value
+    * that a later channel or instruction still reads.
+    */
+   unsigned scratch[4] = {16, 17, 18, 19};
+   if (output_stage) {
+      unsigned reg = 16;
+      for (unsigned c = 0; c < 4; c++) {
+         if (!(dst->WriteMask & (1 << c))) continue;
+         while (reg < 24 && fp->occupied[reg])
+            reg++;
+         if (reg == 24) {
+            if (!fp->allocation_failed)
+               fprintf(stderr, "GRATE FRAG: scalar register bank exhausted (spilling unsupported)\n");
+            fp->allocation_failed = true;
+            break;
+         }
+         scratch[c] = reg++;
+      }
+   }
    struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
    int alu_instrs = 0;
    list_inithead(&alu->link);
@@ -349,7 +370,7 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
          break;
       }
       if (output_stage) {
-         op.dst.index = 16 + i;
+         op.dst.index = scratch[i];
          op.dst.write_low_sub_reg = true;
          op.dst.write_high_sub_reg = true;
       }
@@ -385,7 +406,7 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
          struct fp_alu_dst_operand discard = {.index = 31};
          nop->slots[c] = fp_alu_sMOV(discard, fp_alu_src_zero());
          if (!(dst->WriteMask & (1 << c))) continue;
-         struct fp_alu_src_operand value = {.index = 16 + c};
+         struct fp_alu_src_operand value = {.index = scratch[c]};
          store->slots[slot++] = fp_alu_sMOV(fp_alu_dst(fp, dst, c, saturate), value);
       }
       list_addtail(&nop->link, &fp->alu_instructions);
