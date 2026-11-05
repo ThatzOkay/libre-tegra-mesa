@@ -297,46 +297,27 @@ free_fragment_ir(struct grate_fp_shader *fp)
    }
 }
 
-static void *
-grate_create_fs_state(struct pipe_context *pcontext,
-                      const struct pipe_shader_state *template)
+/**
+ * Compiles the program of so->base.tokens, storing the output the mode asks
+ * for, into so->blob and so->info.
+ */
+static bool
+grate_compile_fs(struct grate_context *context,
+                 struct grate_fragment_shader_state *so,
+                 const struct grate_fp_output *output)
 {
-   grate_trace();
-   struct grate_context *context = grate_context(pcontext);
-   struct grate_fragment_shader_state *so = CALLOC_STRUCT(grate_fragment_shader_state);
    enum drm_tegra_soc_id soc_id = context->drm->soc_id;
-
-   if (!so)
-      return NULL;
-
-   so->base = *template;
-
-   if (template->type == PIPE_SHADER_IR_NIR) {
-      so->base.tokens = nir_to_tgsi(template->ir.nir,
-                                    pcontext->screen);
-      so->base.type = PIPE_SHADER_IR_TGSI;
-   }
-
-
-   if (grate_debug & GRATE_DEBUG_TGSI) {
-      fprintf(stderr, "DEBUG: TGSI:\n");
-      tgsi_dump(so->base.tokens, 0);
-      fprintf(stderr, "\n");
-   }
 
    struct tgsi_parse_context parser;
    unsigned ok = tgsi_parse_init(&parser, so->base.tokens);
    assert(ok == TGSI_PARSE_OK);
 
    struct grate_fp_shader fp;
-   grate_tgsi_to_fp(&fp, &parser);
+   grate_tgsi_to_fp(&fp, &parser, output);
    tgsi_parse_free(&parser);
    if (fp.allocation_failed) {
       free_fragment_ir(&fp);
-      if (template->type == PIPE_SHADER_IR_NIR)
-         FREE((void *)so->base.tokens);
-      FREE(so);
-      return NULL;
+      return false;
    }
 
    struct util_dynarray buf;
@@ -360,7 +341,8 @@ grate_create_fs_state(struct pipe_context *pcontext,
    PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(fp.uses_globals ? 0x4 : 0x12c) |
         TGR3D_PSEQ_CTL_MIN_OUT(fp.uses_globals ? 0x2 : 0xc8) |
         TGR3D_PSEQ_CTL_MERGE_SPAN_STARTS | TGR3D_PSEQ_CTL_MERGE_REGISTERS |
-        TGR3D_PSEQ_CTL_REMOVE_KILLED_PIXELS | TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS);
+        TGR3D_PSEQ_CTL_REMOVE_KILLED_PIXELS |
+        TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS);
 
    PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_QUAD_ID, 0));
    PUSH(host1x_opcode_imm(REG_TGR3D_GLOBAL_INST_OFFSET, 0));
@@ -454,7 +436,79 @@ grate_create_fs_state(struct pipe_context *pcontext,
    free_fragment_ir(&fp);
    so->num_fp_instrs = num_fp_instrs;
    so->num_alu_instrs = num_alu_instrs;
+   return true;
+}
+
+static void *
+grate_create_fs_state(struct pipe_context *pcontext,
+                      const struct pipe_shader_state *template)
+{
+   grate_trace();
+   struct grate_context *context = grate_context(pcontext);
+   struct grate_fragment_shader_state *so =
+      CALLOC_STRUCT(grate_fragment_shader_state);
+   const struct grate_fp_output output = {.mode = GRATE_FP_OUTPUT_SRC0};
+
+   if (!so)
+      return NULL;
+
+   so->base = *template;
+
+   if (template->type == PIPE_SHADER_IR_NIR) {
+      so->base.tokens = nir_to_tgsi(template->ir.nir, pcontext->screen);
+      so->base.type = PIPE_SHADER_IR_TGSI;
+   }
+
+   if (grate_debug & GRATE_DEBUG_TGSI) {
+      fprintf(stderr, "DEBUG: TGSI:\n");
+      tgsi_dump(so->base.tokens, 0);
+      fprintf(stderr, "\n");
+   }
+
+   if (!grate_compile_fs(context, so, &output)) {
+      if (template->type == PIPE_SHADER_IR_NIR)
+         FREE((void *)so->base.tokens);
+      FREE(so);
+      return NULL;
+   }
+
    return so;
+}
+
+/**
+ * The program that stores what a dual-source pass blends (see
+ * fp/blend.h), compiled on first use. NULL if it cannot be compiled.
+ */
+struct grate_fragment_shader_state *
+grate_fragment_dual_variant(struct grate_context *context,
+                            struct grate_fragment_shader_state *shader,
+                            const struct grate_fp_output *output)
+{
+   struct grate_fragment_shader_state *variant;
+
+   for (variant = shader->dual_variants; variant;
+        variant = variant->next_dual) {
+      if (!memcmp(&variant->output, output, sizeof(*output)))
+         return variant;
+   }
+
+   variant = CALLOC_STRUCT(grate_fragment_shader_state);
+   if (!variant)
+      return NULL;
+
+   /* shares the tokens; the variant never frees them */
+   variant->base = shader->base;
+   variant->output = *output;
+   if (!grate_compile_fs(context, variant, output)) {
+      grate_loge("cannot compile the dual-source variant of the "
+                 "fragment program\n");
+      FREE(variant);
+      return NULL;
+   }
+
+   variant->next_dual = shader->dual_variants;
+   shader->dual_variants = variant;
+   return variant;
 }
 
 static void
@@ -470,6 +524,12 @@ grate_delete_fs_state(struct pipe_context *pcontext, void *so)
    struct grate_fragment_shader_state *shader = so;
    grate_trace();
    FREE(shader->blob.commands);
+   while (shader->dual_variants) {
+      struct grate_fragment_shader_state *variant = shader->dual_variants;
+
+      shader->dual_variants = variant->next_dual;
+      grate_delete_fs_state(pcontext, variant);
+   }
    while (shader->variants) {
       struct grate_blend_variant *variant = shader->variants;
 

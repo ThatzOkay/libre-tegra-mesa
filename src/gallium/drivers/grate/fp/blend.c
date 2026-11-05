@@ -1,3 +1,5 @@
+#include <string.h>
+
 #include "util/macros.h"
 
 #include "blend.h"
@@ -351,4 +353,114 @@ grate_fp_blend_alu(uint32_t key,
    }
 
    return num_packets;
+}
+
+static bool
+factor_is_dual(enum pipe_blendfactor factor)
+{
+   switch (factor) {
+   case PIPE_BLENDFACTOR_SRC1_COLOR:
+   case PIPE_BLENDFACTOR_SRC1_ALPHA:
+   case PIPE_BLENDFACTOR_INV_SRC1_COLOR:
+   case PIPE_BLENDFACTOR_INV_SRC1_ALPHA:
+      return true;
+   default:
+      return false;
+   }
+}
+
+bool
+grate_fp_blend_is_dual(const struct pipe_rt_blend_state *rt)
+{
+   return rt->blend_enable && (factor_is_dual(rt->rgb_src_factor) ||
+                               factor_is_dual(rt->alpha_src_factor) ||
+                               factor_is_dual(rt->rgb_dst_factor) ||
+                               factor_is_dual(rt->alpha_dst_factor));
+}
+
+/* The factors a pass may use, one row each. `colour` and `alpha` are how
+ * the factor reads when the colour channels / the alpha channel are blended
+ * against the stored colour (src1 is stored as the colour in the dst pass).
+ */
+static const struct {
+   enum pipe_blendfactor factor;
+   enum grate_fp_dual_factor dual;
+   enum pipe_blendfactor colour;
+   enum pipe_blendfactor alpha;
+} dual_factors[] = {
+   {PIPE_BLENDFACTOR_ZERO, GRATE_FP_DUAL_ZERO, PIPE_BLENDFACTOR_ZERO,
+    PIPE_BLENDFACTOR_ZERO},
+   {PIPE_BLENDFACTOR_ONE, GRATE_FP_DUAL_ONE, PIPE_BLENDFACTOR_ONE,
+    PIPE_BLENDFACTOR_ONE},
+   {PIPE_BLENDFACTOR_SRC1_COLOR, GRATE_FP_DUAL_SRC1_COLOR,
+    PIPE_BLENDFACTOR_SRC_COLOR, PIPE_BLENDFACTOR_SRC_ALPHA},
+   {PIPE_BLENDFACTOR_INV_SRC1_COLOR, GRATE_FP_DUAL_INV_SRC1_COLOR,
+    PIPE_BLENDFACTOR_INV_SRC_COLOR, PIPE_BLENDFACTOR_INV_SRC_ALPHA},
+   {PIPE_BLENDFACTOR_SRC1_ALPHA, GRATE_FP_DUAL_SRC1_ALPHA,
+    PIPE_BLENDFACTOR_SRC_ALPHA, PIPE_BLENDFACTOR_SRC_ALPHA},
+   {PIPE_BLENDFACTOR_INV_SRC1_ALPHA, GRATE_FP_DUAL_INV_SRC1_ALPHA,
+    PIPE_BLENDFACTOR_INV_SRC_ALPHA, PIPE_BLENDFACTOR_INV_SRC_ALPHA},
+};
+
+static bool
+dual_factor_lookup(enum pipe_blendfactor factor, unsigned *index)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(dual_factors); i++) {
+      if (dual_factors[i].factor == factor) {
+         *index = i;
+         return true;
+      }
+   }
+   return false;
+}
+
+bool
+grate_fp_blend_dual_plan(const struct pipe_rt_blend_state *rt,
+                         struct grate_fp_dual_plan *plan)
+{
+   unsigned src_rgb, src_alpha, dst_rgb, dst_alpha;
+
+   memset(plan, 0, sizeof(*plan));
+
+   /* Only sums: both passes add their term. */
+   if (rt->rgb_func != PIPE_BLEND_ADD || rt->alpha_func != PIPE_BLEND_ADD)
+      return false;
+
+   if (!dual_factor_lookup(rt->rgb_src_factor, &src_rgb) ||
+       !dual_factor_lookup(rt->alpha_src_factor, &src_alpha) ||
+       !dual_factor_lookup(rt->rgb_dst_factor, &dst_rgb) ||
+       !dual_factor_lookup(rt->alpha_dst_factor, &dst_alpha))
+      return false;
+
+   /* dst * Fd, unless Fd is one */
+   if (dual_factors[dst_rgb].factor != PIPE_BLENDFACTOR_ONE ||
+       dual_factors[dst_alpha].factor != PIPE_BLENDFACTOR_ONE) {
+      struct grate_fp_dual_pass *pass = &plan->pass[plan->num_passes++];
+
+      pass->output.mode = GRATE_FP_OUTPUT_SRC1;
+      pass->rt = *rt;
+      pass->rt.rgb_func = pass->rt.alpha_func = PIPE_BLEND_ADD;
+      pass->rt.rgb_src_factor = pass->rt.alpha_src_factor =
+         PIPE_BLENDFACTOR_ZERO;
+      pass->rt.rgb_dst_factor = dual_factors[dst_rgb].colour;
+      pass->rt.alpha_dst_factor = dual_factors[dst_alpha].alpha;
+   }
+
+   /* + src0 * Fs, unless Fs is zero */
+   if (dual_factors[src_rgb].factor != PIPE_BLENDFACTOR_ZERO ||
+       dual_factors[src_alpha].factor != PIPE_BLENDFACTOR_ZERO) {
+      struct grate_fp_dual_pass *pass = &plan->pass[plan->num_passes++];
+
+      pass->output.mode = GRATE_FP_OUTPUT_SRC0_TIMES_FACTOR;
+      pass->output.factor[0] = dual_factors[src_rgb].dual;
+      pass->output.factor[1] = dual_factors[src_alpha].dual;
+      pass->rt = *rt;
+      pass->rt.rgb_func = pass->rt.alpha_func = PIPE_BLEND_ADD;
+      pass->rt.rgb_src_factor = pass->rt.alpha_src_factor =
+         PIPE_BLENDFACTOR_ONE;
+      pass->rt.rgb_dst_factor = pass->rt.alpha_dst_factor =
+         PIPE_BLENDFACTOR_ONE;
+   }
+
+   return true;
 }

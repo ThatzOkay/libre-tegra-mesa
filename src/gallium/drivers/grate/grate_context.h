@@ -12,6 +12,8 @@
 #include "grate_stream.h"
 #include "tgr_3d.xml.h"
 
+#include "fp/blend.h"
+
 /* Hardware surface slot of the stencil plane (slot 0 is depth, colour output i is slot i + 1). */
 #define GRATE_STENCIL_SLOT 2
 
@@ -47,6 +49,12 @@ struct grate_context {
    struct pipe_constant_buffer constant_buffer[PIPE_MAX_CONSTANT_BUFFERS]; // ??, stolen from other drivers but no idea
 
    uint32_t blend_key; /* grate_fp_blend_key(), 0 = not blending */
+
+   /* Dual-source blending is drawn in passes, see fp/blend.h. */
+   bool blend_dual;
+   struct grate_fp_dual_plan dual_plan;
+   uint32_t dual_keys[GRATE_FP_DUAL_MAX_PASSES];
+   unsigned dual_pass; /* 1-based pass being drawn, 0 = none */
 
    struct grate_zsa_state *zsa;
    struct pipe_stencil_ref stencil_ref;

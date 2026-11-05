@@ -1131,9 +1131,119 @@ forward_tex_coord(struct tgsi_full_instruction *code, unsigned count)
    return count;
 }
 
+/* Append the instructions for dual-source output modes (see
+ * enum grate_fp_output_mode). t0 and t1 are the temporaries that hold
+ * output 0 and 1. Returns the temporary to store as the colour. */
+static bool
+build_dual_output(struct grate_fp_shader *fp,
+                  struct util_dynarray *instructions,
+                  const struct grate_fp_output *output,
+                  const int *output_temps, const unsigned *output_masks,
+                  int *result)
+{
+   if (output_temps[1] < 0) {
+      fprintf(stderr, "GRATE FRAG: dual-source blending but the program "
+                      "has no second output\n");
+      fp->allocation_failed = true;
+      return false;
+   }
+
+   if (output->mode == GRATE_FP_OUTPUT_SRC1) {
+      *result = output_temps[1];
+      return true;
+   }
+
+   assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
+   unsigned factor_temp = fp->num_temporaries++;
+   unsigned one_comp, zero_comp;
+   unsigned one_imm = find_immediate(fp, 1.0f, &one_comp);
+   unsigned zero_imm = find_immediate(fp, 0.0f, &zero_comp);
+
+   /* group 0: the colour channels, group 1: alpha */
+   for (unsigned group = 0; group < 2; group++) {
+      enum grate_fp_dual_factor factor = output->factor[group];
+      unsigned mask = group ? TGSI_WRITEMASK_W : TGSI_WRITEMASK_XYZ;
+      struct tgsi_full_instruction mov = {0};
+
+      mov.Instruction.Opcode = TGSI_OPCODE_MOV;
+      mov.Instruction.NumDstRegs = 1;
+      mov.Instruction.NumSrcRegs = 1;
+      mov.Dst[0].Register.File = TGSI_FILE_TEMPORARY;
+      mov.Dst[0].Register.Index = factor_temp;
+      mov.Dst[0].Register.WriteMask = mask;
+
+      bool invert = factor == GRATE_FP_DUAL_INV_SRC1_COLOR ||
+                    factor == GRATE_FP_DUAL_INV_SRC1_ALPHA;
+      if (factor == GRATE_FP_DUAL_ZERO || factor == GRATE_FP_DUAL_ONE) {
+         unsigned comp = factor == GRATE_FP_DUAL_ONE ? one_comp : zero_comp;
+
+         mov.Src[0].Register.File = TGSI_FILE_IMMEDIATE;
+         mov.Src[0].Register.Index =
+            factor == GRATE_FP_DUAL_ONE ? one_imm : zero_imm;
+         set_src_swizzle(&mov.Src[0].Register, comp, comp, comp, comp);
+      } else {
+         mov.Src[0].Register.File = TGSI_FILE_TEMPORARY;
+         mov.Src[0].Register.Index = output_temps[1];
+         if (factor == GRATE_FP_DUAL_SRC1_COLOR ||
+             factor == GRATE_FP_DUAL_INV_SRC1_COLOR)
+            set_src_swizzle(&mov.Src[0].Register, TGSI_SWIZZLE_X,
+                            TGSI_SWIZZLE_Y, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+         else
+            set_src_swizzle(&mov.Src[0].Register, TGSI_SWIZZLE_W,
+                            TGSI_SWIZZLE_W, TGSI_SWIZZLE_W, TGSI_SWIZZLE_W);
+      }
+      util_dynarray_append_typed(instructions, struct tgsi_full_instruction,
+                                 mov);
+
+      if (invert) {
+         /* factor = 1 - factor */
+         struct tgsi_full_instruction add = {0};
+
+         add.Instruction.Opcode = TGSI_OPCODE_ADD;
+         add.Instruction.NumDstRegs = 1;
+         add.Instruction.NumSrcRegs = 2;
+         add.Dst[0] = mov.Dst[0];
+         add.Src[0].Register.File = TGSI_FILE_IMMEDIATE;
+         add.Src[0].Register.Index = one_imm;
+         set_src_swizzle(&add.Src[0].Register, one_comp, one_comp, one_comp,
+                         one_comp);
+         add.Src[1].Register.File = TGSI_FILE_TEMPORARY;
+         add.Src[1].Register.Index = factor_temp;
+         add.Src[1].Register.Negate = 1;
+         set_src_swizzle(&add.Src[1].Register, TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
+                         TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+         util_dynarray_append_typed(instructions,
+                                    struct tgsi_full_instruction, add);
+      }
+   }
+
+   /* factor = src0 * factor */
+   struct tgsi_full_instruction mul = {0};
+
+   mul.Instruction.Opcode = TGSI_OPCODE_MUL;
+   mul.Instruction.NumDstRegs = 1;
+   mul.Instruction.NumSrcRegs = 2;
+   mul.Dst[0].Register.File = TGSI_FILE_TEMPORARY;
+   mul.Dst[0].Register.Index = factor_temp;
+   mul.Dst[0].Register.WriteMask = TGSI_WRITEMASK_XYZW;
+   mul.Src[0].Register.File = TGSI_FILE_TEMPORARY;
+   mul.Src[0].Register.Index = output_temps[0];
+   mul.Src[1].Register.File = TGSI_FILE_TEMPORARY;
+   mul.Src[1].Register.Index = factor_temp;
+   for (unsigned i = 0; i < 2; i++) {
+      set_src_swizzle(&mul.Src[i].Register, TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
+                      TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+   }
+   util_dynarray_append_typed(instructions, struct tgsi_full_instruction,
+                              mul);
+
+   *result = factor_temp;
+   return true;
+}
+
 void
-grate_tgsi_to_fp(struct grate_fp_shader *fp,
-                 struct tgsi_parse_context *tgsi)
+grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
+                 const struct grate_fp_output *output)
 {
    list_inithead(&fp->fp_instructions);
    list_inithead(&fp->alu_instructions);
@@ -1205,22 +1315,32 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp,
          dst->Index = output_temps[index];
       }
    }
-   for (unsigned out = 0; out < 16; out++) {
-      if (output_temps[out] < 0) continue;
+   /* One colour is stored: output 0, or what a dual-source pass makes of
+    * the two outputs. */
+   int stored_temp = output_temps[0];
+   if (output->mode != GRATE_FP_OUTPUT_SRC0 &&
+       !build_dual_output(fp, &instructions, output, output_temps,
+                          output_masks, &stored_temp)) {
+      util_dynarray_fini(&instructions);
+      return;
+   }
+   if (stored_temp >= 0) {
       struct tgsi_full_instruction store = {0};
+
       store.Instruction.Opcode = TGSI_OPCODE_MOV;
       store.Instruction.NumDstRegs = 1;
       store.Instruction.NumSrcRegs = 1;
       store.Dst[0].Register.File = TGSI_FILE_OUTPUT;
-      store.Dst[0].Register.Index = out;
-      store.Dst[0].Register.WriteMask = output_masks[out];
+      store.Dst[0].Register.Index = 0;
+      store.Dst[0].Register.WriteMask = output->mode == GRATE_FP_OUTPUT_SRC1
+                                           ? output_masks[1]
+                                           : output_masks[0];
       store.Src[0].Register.File = TGSI_FILE_TEMPORARY;
-      store.Src[0].Register.Index = output_temps[out];
-      store.Src[0].Register.SwizzleX = TGSI_SWIZZLE_X;
-      store.Src[0].Register.SwizzleY = TGSI_SWIZZLE_Y;
-      store.Src[0].Register.SwizzleZ = TGSI_SWIZZLE_Z;
-      store.Src[0].Register.SwizzleW = TGSI_SWIZZLE_W;
-      util_dynarray_append_typed(&instructions, struct tgsi_full_instruction, store);
+      store.Src[0].Register.Index = stored_temp;
+      set_src_swizzle(&store.Src[0].Register, TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
+                      TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+      util_dynarray_append_typed(&instructions, struct tgsi_full_instruction,
+                                 store);
    }
    assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
    unsigned count = util_dynarray_num_elements(&instructions, struct tgsi_full_instruction);

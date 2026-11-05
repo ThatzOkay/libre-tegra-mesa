@@ -302,6 +302,47 @@ grate_init_state(struct grate_context *context, uint32_t **ptrp)
    return 0;
 }
 
+static void grate_draw_vbo(struct pipe_context *pcontext,
+                           const struct pipe_draw_info *info,
+                           unsigned drawid_offset,
+                           const struct pipe_draw_indirect_info *indirect,
+                           const struct pipe_draw_start_count_bias *draws,
+                           unsigned num_draws);
+
+/**
+ * Draws with a dual-source blend state: once per pass of the plan (see
+ * fp/blend.h), with the program variant and the blend of that pass.
+ */
+static void
+grate_draw_dual(struct pipe_context *pcontext,
+                const struct pipe_draw_info *info, unsigned drawid_offset,
+                const struct pipe_draw_indirect_info *indirect,
+                const struct pipe_draw_start_count_bias *draws,
+                unsigned num_draws)
+{
+   struct grate_context *context = grate_context(pcontext);
+   struct grate_fragment_shader_state *fshader = context->fshader;
+
+   for (unsigned i = 0; i < context->dual_plan.num_passes; i++) {
+      struct grate_fragment_shader_state *variant =
+         grate_fragment_dual_variant(context, fshader,
+                                     &context->dual_plan.pass[i].output);
+
+      if (!variant)
+         continue;
+
+      context->fshader = variant;
+      context->blend_key = context->dual_keys[i];
+      context->dual_pass = i + 1;
+      grate_draw_vbo(pcontext, info, drawid_offset, indirect, draws,
+                     num_draws);
+   }
+
+   context->fshader = fshader;
+   context->blend_key = 0;
+   context->dual_pass = 0;
+}
+
 static void
 grate_draw_vbo(struct pipe_context *pcontext,
                const struct pipe_draw_info *info,
@@ -323,6 +364,12 @@ grate_draw_vbo(struct pipe_context *pcontext,
 
    if (!indirect && (!draws[0].count || !info->instance_count))
       return;
+
+   if (context->blend_dual && !context->dual_pass) {
+      grate_draw_dual(pcontext, info, drawid_offset, indirect, draws,
+                      num_draws);
+      return;
+   }
 
    if (context->rast->base.scissor &&
        (context->scissor.minx >= context->scissor.maxx ||
