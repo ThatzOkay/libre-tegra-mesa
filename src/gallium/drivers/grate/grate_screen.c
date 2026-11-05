@@ -229,6 +229,7 @@ grate_screen_init_caps(struct grate_screen *screen)
    // Bool values
    caps->npot_textures = true; // not really, but mesa requires it for now!`
    caps->blend_equation_separate = true;
+   caps->max_dual_source_render_targets = 1;
    caps->vertex_color_unclamped = true;  // probably irrelevant for GLES2
    caps->vertex_color_clamped = false; // probably irrelevant for GLES2
    caps->mixed_framebuffer_sizes = true;

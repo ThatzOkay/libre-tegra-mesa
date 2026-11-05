@@ -34,7 +34,19 @@ struct grate_fragment_shader_state {
    struct grate_blend_variant *variants;
    struct grate_fp_info info;
 
+   /* Dual-source blending: the programs of the passes, compiled from the
+    * same tokens (see grate_fragment_dual_variant()). */
+   struct grate_fp_output output;
+   struct grate_fragment_shader_state *dual_variants;
+   struct grate_fragment_shader_state *next_dual;
 };
+
+struct grate_context;
+
+struct grate_fragment_shader_state *
+grate_fragment_dual_variant(struct grate_context *context,
+                            struct grate_fragment_shader_state *shader,
+                            const struct grate_fp_output *output);
 
 const struct grate_shader_blob *
 grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,

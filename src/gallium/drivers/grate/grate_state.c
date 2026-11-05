@@ -275,10 +275,22 @@ grate_bind_blend_state(struct pipe_context *pcontext, void *so)
    const struct pipe_rt_blend_state *rt = blend ? &blend->rt[0] : NULL;
 
    ctx->blend_key = 0;
-   if (rt && !blend->independent_blend_enable && !blend->logicop_enable)
-      ctx->blend_key = grate_fp_blend_key(rt);
+   ctx->blend_dual = false;
+   if (rt && !blend->independent_blend_enable && !blend->logicop_enable) {
+      if (grate_fp_blend_is_dual(rt)) {
+         ctx->blend_dual = grate_fp_blend_dual_plan(rt, &ctx->dual_plan);
+         for (unsigned i = 0;
+              ctx->blend_dual && i < ctx->dual_plan.num_passes; i++) {
+            ctx->dual_keys[i] =
+               grate_fp_blend_key(&ctx->dual_plan.pass[i].rt);
+            ctx->blend_dual = ctx->dual_keys[i] != 0;
+         }
+      } else {
+         ctx->blend_key = grate_fp_blend_key(rt);
+      }
+   }
 
-   if (rt && rt->blend_enable && !ctx->blend_key) {
+   if (rt && rt->blend_enable && !ctx->blend_key && !ctx->blend_dual) {
       grate_loge("unsupported blend state: rgb func %u src %u dst %u, "
                  "alpha func %u src %u dst %u, logicop %u\n",
                  rt->rgb_func, rt->rgb_src_factor, rt->rgb_dst_factor,

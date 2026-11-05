@@ -59,7 +59,7 @@ struct grate_fp_shader {
    bool texture_rows;
    bool allocation_failed;
    /* a value lives in a global register (16-23): only valid while the
-    * sequencer has few pixels in flight, see grate_create_fs_state() */
+    * sequencer has few pixels in flight, see grate_compile_fs() */
    bool uses_globals;
    float immediates[GRATE_FP_MAX_IMMEDIATES][4];
    unsigned num_immediates;
@@ -69,10 +69,43 @@ struct grate_fp_shader {
    struct grate_fp_info info;
 };
 
+/**
+ * Which fragment output a fragment program stores as its colour. Dual-source
+ * blending (fp/blend.c) splits a draw into passes that each store one value
+ * computed from the shader's two outputs, src0 (output 0) and src1
+ * (output 1).
+ */
+enum grate_fp_output_mode {
+   /* output 0, as the application wrote it */
+   GRATE_FP_OUTPUT_SRC0,
+   /* output 1 */
+   GRATE_FP_OUTPUT_SRC1,
+   /* output 0 * factor(output 1), see grate_fp_dual_factor */
+   GRATE_FP_OUTPUT_SRC0_TIMES_FACTOR,
+};
+
+/* A blend factor made of src1 (the second fragment output). */
+enum grate_fp_dual_factor {
+   GRATE_FP_DUAL_ZERO,
+   GRATE_FP_DUAL_ONE,
+   GRATE_FP_DUAL_SRC1_COLOR,
+   GRATE_FP_DUAL_INV_SRC1_COLOR,
+   GRATE_FP_DUAL_SRC1_ALPHA,
+   GRATE_FP_DUAL_INV_SRC1_ALPHA,
+};
+
+struct grate_fp_output {
+   enum grate_fp_output_mode mode;
+   /* GRATE_FP_OUTPUT_SRC0_TIMES_FACTOR: the factor of the colour channels
+    * and of the alpha channel */
+   enum grate_fp_dual_factor factor[2];
+};
+
 void
 grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi);
 
-void
-grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi);
+void grate_tgsi_to_fp(struct grate_fp_shader *fp,
+                      struct tgsi_parse_context *tgsi,
+                      const struct grate_fp_output *output);
 
 #endif
