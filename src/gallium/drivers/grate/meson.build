@@ -25,6 +25,8 @@ files_libgrate = files(
   'drm/pushbuf.c',
   'drm/syncpt.c',
   'drm/tegra.h',
+  'fp/blend.c',
+  'fp/blend.h',
   'fp/fpir.h',
   'fp/pack.c',
   'fp/tgsi.c',

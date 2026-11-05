@@ -18,6 +18,7 @@
 #include "grate_screen.h"
 #include "grate_program.h"
 #include "grate_compiler.h"
+#include "fp/blend.h"
 #include "fp/fpir.h"
 #include "vp/vpir.h"
 
@@ -163,34 +164,21 @@ grate_delete_vs_state(struct pipe_context *pcontext, void *so)
    FREE(so);
 }
 
-/* Keep the application shader intact and append a source-over stage.
- * Its packed source is R2/R3; PSEQ reads colour target 1 into R0/R1.
+/**
+ * Keep the application shader intact and append the blend stage for key
+ * (see fp/blend.c). The stage is one more sequencer instruction, which
+ * reads the destination pixel into R0/R1, and its ALU packets.
  */
 static bool
-create_premultiplied_blob(const struct grate_shader_blob *source,
-                          unsigned fp_count, unsigned alu_count,
-                          struct grate_shader_blob *output)
+create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
+                  unsigned alu_count, uint32_t key,
+                  struct grate_shader_blob *output)
 {
-   if (fp_count >= 63 || alu_count >= 64)
+   uint32_t blend_words[GRATE_FP_BLEND_MAX_PACKETS * 8];
+   unsigned packets = grate_fp_blend_alu(key, blend_words);
+
+   if (!packets || fp_count >= 63 || alu_count + packets > 64)
       return false;
-   uint32_t blend_words[8];
-   for (unsigned c = 0; c < 4; c++) {
-      struct fp_alu_instr instruction = {
-         .op = FP_ALU_OP_MAD,
-         .dst = {.index = 2 + c / 2, .write_low_sub_reg = !(c & 1),
-                 .write_high_sub_reg = c & 1, .saturate = true},
-         .src = {
-            {.index = c / 2, .datatype = FP_DATATYPE_FIXED10,
-             .sub_reg_select_high = c & 1},
-            {.index = 3, .datatype = FP_DATATYPE_FIXED10,
-             .sub_reg_select_high = true, .minus_one = true, .negate = true},
-            {.index = 2 + c / 2, .datatype = FP_DATATYPE_FIXED10,
-             .sub_reg_select_high = c & 1},
-            {.index = 31, .datatype = FP_DATATYPE_FIXED10, .sub_reg_select_high = true},
-         },
-      };
-      grate_fp_pack_alu(blend_words + c * 2, &instruction);
-   }
    struct util_dynarray result;
    util_dynarray_init(&result, NULL);
 #define BLEND_PUSH(value) util_dynarray_append_typed(&result, uint32_t, (value))
@@ -222,8 +210,15 @@ create_premultiplied_blob(const struct grate_shader_blob *source,
          case REG_TGR3D_PSEQ_INST_DATA: extra = 1; last = 0x00810008; bit = 1; break;
          case REG_TGR3D_AT_REMAP_DATA: extra = 1; bit = 2; break;
          case REG_TGR3D_TEX_INST_DATA: extra = 1; bit = 4; break;
-         case REG_TGR3D_ALU_REMAP_DATA: extra = 1; last = (alu_count << 2) | 1; bit = 8; break;
-         case REG_TGR3D_ALU_INST_DATA: extra = 8; bit = 16; break;
+         case REG_TGR3D_ALU_REMAP_DATA:
+            extra = 1;
+            last = (alu_count << 2) | packets;
+            bit = 8;
+            break;
+         case REG_TGR3D_ALU_INST_DATA:
+            extra = 8 * packets;
+            bit = 16;
+            break;
          case REG_TGR3D_ALU_P2CX_DATA: extra = 1; bit = 32; break;
          case REG_TGR3D_DW_INST_DATA: extra = 1; last = 0x00028005; bit = 64; break;
          }
@@ -246,6 +241,40 @@ create_premultiplied_blob(const struct grate_shader_blob *source,
 fail:
    util_dynarray_fini(&result);
    return false;
+}
+
+/**
+ * The fragment program with the blend stage for key, built on first use.
+ * Returns NULL if it cannot be built.
+ */
+const struct grate_shader_blob *
+grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,
+                          uint32_t key)
+{
+   struct grate_blend_variant *variant;
+
+   for (variant = shader->variants; variant; variant = variant->next) {
+      if (variant->key == key)
+         return &variant->blob;
+   }
+
+   variant = CALLOC_STRUCT(grate_blend_variant);
+   if (!variant)
+      return NULL;
+
+   variant->key = key;
+   if (!create_blend_blob(&shader->blob, shader->num_fp_instrs,
+                          shader->num_alu_instrs, key, &variant->blob)) {
+      grate_loge("cannot build the blend variant for key 0x%08x "
+                 "(fragment program too long for the blend stage?)\n",
+                 key);
+      FREE(variant);
+      return NULL;
+   }
+
+   variant->next = shader->variants;
+   shader->variants = variant;
+   return &variant->blob;
 }
 
 static void
@@ -423,13 +452,8 @@ grate_create_fs_state(struct pipe_context *pcontext,
    so->blob.commands = buf.data;
    so->info = fp.info;
    free_fragment_ir(&fp);
-   if (!create_premultiplied_blob(&so->blob, num_fp_instrs, num_alu_instrs,
-                                 &so->premultiplied_blob)) {
-      grate_loge("failed to build premultiplied fragment variant\n");
-      FREE(so->blob.commands);
-      FREE(so);
-      return NULL;
-   }
+   so->num_fp_instrs = num_fp_instrs;
+   so->num_alu_instrs = num_alu_instrs;
    return so;
 }
 
@@ -446,7 +470,13 @@ grate_delete_fs_state(struct pipe_context *pcontext, void *so)
    struct grate_fragment_shader_state *shader = so;
    grate_trace();
    FREE(shader->blob.commands);
-   FREE(shader->premultiplied_blob.commands);
+   while (shader->variants) {
+      struct grate_blend_variant *variant = shader->variants;
+
+      shader->variants = variant->next;
+      FREE(variant->blob.commands);
+      FREE(variant);
+   }
    FREE(shader);
 }
 
