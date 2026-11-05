@@ -389,6 +389,10 @@ grate_screen_is_format_supported(struct pipe_screen *pscreen,
    if (target != PIPE_BUFFER && grate_pixel_format(format) < 0)
       return false;
 
+   /* The emulated Z24 formats are Z16NL (+ S8) underneath: no sampling, because a shader would have to decode Z16NL. */
+   if (grate_format_is_emulated_z24(format) && (usage & PIPE_BIND_SAMPLER_VIEW))
+      return false;
+
    /* RGBA storage is needed for sampler uploads.  Advertising it as a render
     * target also enables Mesa's GPU readback conversion path, which this
     * driver cannot yet execute (fragment uniforms and blits are incomplete).

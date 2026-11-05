@@ -41,7 +41,7 @@ grate_set_constant_buffer(struct pipe_context *pcontext, enum mesa_shader_stage 
 
 static void grate_add_render_target(struct grate_context *context,
                                     const struct pipe_surface *ref,
-                                    unsigned int slot)
+                                    unsigned int slot, bool stencil_plane)
 {
    if (!ref->texture) {
       fprintf(stderr, "%s: texture at %p null!", __func__, ref);
@@ -56,12 +56,19 @@ static void grate_add_render_target(struct grate_context *context,
    struct grate_resource *res = grate_resource(ref->texture);
    uint32_t rt_params;
    
-   rt_params  = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(res->format);
-   rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->pitch);
+   if (stencil_plane) {
+      /* The S8 plane that follows the depth plane in the same buffer. */
+      rt_params  = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(TGR3D_SURF_FORMAT_S8);
+      rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->stencil_pitch);
+   } else {
+      rt_params  = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(res->format);
+      rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->pitch);
+   }
    rt_params |= TGR3D_GLOBAL_SURFDESC_STRUCTURE(res->tiled);
    
    context->framebuffer.rt_params[slot] = rt_params;
    context->framebuffer.rt_bos[slot] = res->bo;
+   context->framebuffer.rt_offsets[slot] = stencil_plane ? res->stencil_offset : 0;
    context->framebuffer.rt_mask |= 1u << slot;
    context->framebuffer.num_rts = MAX2(context->framebuffer.num_rts, slot + 1);
 }
@@ -74,6 +81,7 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
    struct pipe_framebuffer_state *cso = &context->framebuffer.base;
    context->framebuffer.rt_mask = 0;
    context->framebuffer.num_rts = 0;
+   context->framebuffer.has_stencil = false;
 
    util_copy_framebuffer_state(cso, framebuffer);
 
@@ -82,11 +90,22 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
     */
    for (unsigned int i = 0; i < framebuffer->nr_cbufs; i++) {
       if (framebuffer->cbufs[i].texture)
-         grate_add_render_target(context, &framebuffer->cbufs[i], i + 1);
+         grate_add_render_target(context, &framebuffer->cbufs[i], i + 1, false);
    }
    
    if (framebuffer->zsbuf.texture) {
-      grate_add_render_target(context, &framebuffer->zsbuf, 0);
+      grate_add_render_target(context, &framebuffer->zsbuf, 0, false);
+
+      if (grate_resource(framebuffer->zsbuf.texture)->stencil_offset) {
+         /* Windows puts colour output n > 0 at slot n + 4 to keep slot 2 for stencil; we use n + 1, so a second colour
+          * buffer would share the slot. OpenGL ES 2 has one colour buffer: give up stencil rather than corrupt it. */
+         if (framebuffer->nr_cbufs > GRATE_STENCIL_SLOT - 1 && framebuffer->cbufs[GRATE_STENCIL_SLOT - 1].texture) {
+            fprintf(stderr, "GRATE: stencil is not available with more than one colour buffer\n");
+         } else {
+            grate_add_render_target(context, &framebuffer->zsbuf, GRATE_STENCIL_SLOT, true);
+            context->framebuffer.has_stencil = true;
+         }
+      }
    }
 
    /* prepare the scissor-registers for the non-scissor case */
@@ -201,7 +220,8 @@ static void
 grate_set_stencil_ref(struct pipe_context *pctx,
                       const struct pipe_stencil_ref stencil_ref)
 {
-   grate_unimplemented();
+   /* Emitted with every draw (emit_stencil_state). */
+   grate_context(pctx)->stencil_ref = stencil_ref;
 }
 
 static void
@@ -625,11 +645,12 @@ emit_render_targets(struct grate_context *context, uint32_t **ptrp)
       GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(i), 1));
       GRATE_PUSHBUF_WORD(*ptrp, fb->rt_params[i]);
       GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(i), 1));
-      grate_stream_push_reloc(stream, ptrp, fb->rt_bos[i], 0);
+      grate_stream_push_reloc(stream, ptrp, fb->rt_bos[i], fb->rt_offsets[i]);
    }
 
    uint32_t enable = fb->rt_mask;
-   if (fb->base.zsbuf.texture && context->zsa && context->zsa->base.depth_enabled)
+   if (fb->base.zsbuf.texture && context->zsa &&
+       (context->zsa->base.depth_enabled || (fb->has_stencil && context->zsa->base.stencil[0].enabled)))
       enable |= TGR3D_DW_ST_ENABLE_Z_TEST(TGR3D_STATE_ENABLED);
 
    GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_DW_ST_ENABLE, 1));
@@ -677,6 +698,66 @@ emit_zsa_state(struct grate_context *context, uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
    grate_stream_push_words(stream, ptrp, context->zsa->commands, context->zsa->num_commands, 0);
+}
+
+/* Gallium stencil op to the hardware's 3-bit code. Same order as the Windows driver's D3D mapping: zero, keep, replace,
+ * increment (clamp), decrement (clamp), invert, increment (wrap), decrement (wrap). */
+static uint32_t
+grate_stencil_op(enum pipe_stencil_op op)
+{
+   switch (op) {
+   case PIPE_STENCIL_OP_ZERO: return 0;
+   case PIPE_STENCIL_OP_KEEP: return 1;
+   case PIPE_STENCIL_OP_REPLACE: return 2;
+   case PIPE_STENCIL_OP_INCR: return 3;
+   case PIPE_STENCIL_OP_DECR: return 4;
+   case PIPE_STENCIL_OP_INVERT: return 5;
+   case PIPE_STENCIL_OP_INCR_WRAP: return 6;
+   case PIPE_STENCIL_OP_DECR_WRAP: return 7;
+   default: UNREACHABLE("unknown pipe_stencil_op");
+   }
+}
+
+/* Stencil test and operations, emitted on every draw after grate_init_state()'s defaults. The test is disabled when the
+ * framebuffer has no stencil plane or the application does not use it. */
+static void
+emit_stencil_state(struct grate_context *context, uint32_t **ptrp)
+{
+   const struct pipe_depth_stencil_alpha_state *zsa = context->zsa ? &context->zsa->base : NULL;
+   bool enabled = context->framebuffer.has_stencil && zsa && zsa->stencil[0].enabled;
+
+   /* One-sided stencil uses the front state for both faces. */
+   const struct pipe_stencil_state *face[2] = {
+      zsa ? &zsa->stencil[0] : NULL,
+      zsa ? (zsa->stencil[1].enabled ? &zsa->stencil[1] : &zsa->stencil[0]) : NULL,
+   };
+
+   uint32_t test[2], op[2];
+   for (unsigned i = 0; i < 2; i++) {
+      if (enabled) {
+         test[i] = face[i]->valuemask | (grate_compare_func(face[i]->func) << 8);
+         op[i] = grate_stencil_op(face[i]->fail_op) |
+                 (grate_stencil_op(face[i]->zfail_op) << 3) |
+                 (grate_stencil_op(face[i]->zpass_op) << 6) |
+                 ((uint32_t)face[i]->writemask << 9) |
+                 ((uint32_t)context->stencil_ref.ref_value[i] << 17);
+      } else {
+         test[i] = 0xff | (TGR3D_FUNC_ALWAYS << 8);
+         op[i] = 0;
+      }
+   }
+
+   uint32_t ctrl = TGR3D_QR_S_CTRL_S_SURF_PTR(GRATE_STENCIL_SLOT) |
+                   TGR3D_QR_S_CTRL_S_ENABLE(enabled) |
+                   TGR3D_QR_S_CTRL_QRAST_FB_WRITE(TGR3D_STATE_ENABLED);
+
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_QR_S_TEST_FRONT, 3));
+   GRATE_PUSHBUF_WORD(*ptrp, test[0]);
+   GRATE_PUSHBUF_WORD(*ptrp, test[1]);
+   GRATE_PUSHBUF_WORD(*ptrp, ctrl);
+   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_S_OPERATION_FRONT, 2));
+   GRATE_PUSHBUF_WORD(*ptrp, op[0]);
+   GRATE_PUSHBUF_WORD(*ptrp, op[1]);
 }
 
 static void
@@ -891,6 +972,7 @@ grate_emit_state(struct grate_context *context, uint32_t **ptrp)
    emit_guardband(context, ptrp);
    emit_scissor(context, ptrp);
    emit_zsa_state(context, ptrp);
+   emit_stencil_state(context, ptrp);
    emit_attribs(context, ptrp);
    emit_vs_uniforms(context, ptrp);
    emit_fs_uniforms(context, ptrp);
