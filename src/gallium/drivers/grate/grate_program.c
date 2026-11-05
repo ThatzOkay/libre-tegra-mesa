@@ -322,8 +322,14 @@ grate_create_fs_state(struct pipe_context *pcontext,
     */
    PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID((0x12c - 1) / 4));
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_CTL, 1));
-   PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(0x12c) |
-        TGR3D_PSEQ_CTL_MIN_OUT(0xc8) |
+   /* Only R0-R3 keep a pixel's value while many pixels are in flight. R4
+    * and up and the globals are storage of four lanes (x mod 4), shared by
+    * the pixels in flight, so a program that keeps a value in them needs
+    * the sequencer to hold at most 4 pixels (measured: 8 makes neighbouring
+    * pixels share a value, see docs/grate-fragment-registers.md). That is
+    * several times slower, so only such programs pay for it. */
+   PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(fp.uses_globals ? 0x4 : 0x12c) |
+        TGR3D_PSEQ_CTL_MIN_OUT(fp.uses_globals ? 0x2 : 0xc8) |
         TGR3D_PSEQ_CTL_MERGE_SPAN_STARTS | TGR3D_PSEQ_CTL_MERGE_REGISTERS |
         TGR3D_PSEQ_CTL_REMOVE_KILLED_PIXELS | TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS);
 
