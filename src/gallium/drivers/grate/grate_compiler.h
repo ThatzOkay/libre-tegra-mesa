@@ -23,6 +23,7 @@ struct grate_vp_shader {
    uint16_t output_mask;
    uint32_t immediates[GRATE_VP_MAX_IMMEDIATES][4]; /* raw 32-bit words, slot i of the immediates */
    unsigned num_immediates;
+   unsigned num_temps; /* TGSI temporaries declared; scratch temporaries start here */
 };
 
 struct grate_fp_info {

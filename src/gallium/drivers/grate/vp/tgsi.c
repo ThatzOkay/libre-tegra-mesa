@@ -328,12 +328,68 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
    }
 }
 
+/* A packed instruction has ONE attribute-fetch index and ONE uniform-fetch index
+ * shared by all its sources (see grate_vp_pack()). When an instruction reads a
+ * second, different attribute or uniform, copy that operand into a scratch
+ * temporary with a preceding MOV and read the temporary instead.
+ */
+static bool
+legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
+                 struct list_head *out)
+{
+   struct vp_src_operand *srcs[4] = {
+      &instr->vec.src[0], &instr->vec.src[1], &instr->vec.src[2],
+      &instr->scalar.src
+   };
+   int attr_fetch = -1, uniform_fetch = -1;
+   unsigned next_temp = vp->num_temps;
+   static const enum vp_swz identity[4] = { VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z, VP_SWZ_W };
+
+   for (unsigned i = 0; i < 4; ++i) {
+      struct vp_src_operand *src = srcs[i];
+      int *fetch;
+
+      if (src->file == VP_SRC_FILE_ATTRIB)
+         fetch = &attr_fetch;
+      else if (src->file == VP_SRC_FILE_UNIFORM)
+         fetch = &uniform_fetch;
+      else
+         continue;
+
+      if (*fetch < 0 || *fetch == src->index) {
+         *fetch = src->index;
+         continue;
+      }
+
+      /* the hardware has 63 usable temporaries (index 63 disables the write) */
+      if (next_temp >= 63) {
+         fprintf(stderr, "GRATE VERTEX: out of temporaries while splitting operand fetches\n");
+         return false;
+      }
+
+      struct vp_src_operand copy = *src;
+      memcpy(copy.swizzle, identity, sizeof(copy.swizzle));
+      copy.negate = false;
+      copy.absolute = false;
+
+      struct vp_instr *mov = emit_packed(emit_vMOV(dst_temp(next_temp, 0xf, false), copy),
+                                         emit_sNOP());
+      list_addtail(&mov->link, out);
+
+      /* the consumer keeps the original swizzle, negate and absolute */
+      src->file = VP_SRC_FILE_TEMP;
+      src->index = next_temp++;
+   }
+   return true;
+}
+
 void
 grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
 {
    list_inithead(&vp->instructions);
    vp->output_mask = 0;
    vp->num_immediates = 0;
+   vp->num_temps = 0;
 
    while (!tgsi_parse_end_of_tokens(tgsi)) {
       tgsi_parse_token(tgsi);
@@ -349,11 +405,20 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
          break;
       }
 
+      case TGSI_TOKEN_TYPE_DECLARATION: {
+         const struct tgsi_full_declaration *decl = &tgsi->FullToken.FullDeclaration;
+         if (decl->Declaration.File == TGSI_FILE_TEMPORARY &&
+             decl->Range.Last + 1 > vp->num_temps)
+            vp->num_temps = decl->Range.Last + 1;
+         break;
+      }
+
       case TGSI_TOKEN_TYPE_INSTRUCTION:
          if (tgsi->FullToken.FullInstruction.Instruction.Opcode != TGSI_OPCODE_END) {
             struct vp_instr *instr = tgsi_to_vp(vp, &tgsi->FullToken.FullInstruction);
             if (!instr) 
                continue;
+            legalize_fetches(vp, instr, &vp->instructions);
             list_addtail(&instr->link, &vp->instructions);
          }
          break;
