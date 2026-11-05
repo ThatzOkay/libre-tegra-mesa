@@ -120,6 +120,45 @@ allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
    return 31;
 }
 
+/* Only R0-R3 keep a value from one instruction to the next in a program that
+ * samples a computed coordinate (measured on the Tegra 3: a value parked in
+ * R4 and up, or in the global registers, is lost; R2/R3 survive). Rows are
+ * overwritten by every interpolation (R<k> for each interpolated channel k)
+ * and, once the instruction is done reading its operands, by the texture
+ * fetch (R2/R3, plus R0/R1 when the coordinate is staged); `clobber` applies to
+ * every value alive when the instruction starts, `clobber_after` only to those
+ * that outlive it. Pick a row for the value (temp, comp) born at instruction n that nothing
+ * overwrites while the value is still wanted.
+ */
+static int
+allocate_coordinate_row(struct grate_fp_shader *fp, const uint8_t *clobber, const uint8_t *clobber_after,
+                        uint8_t (*live_after)[GRATE_FP_MAX_TEMPS], unsigned count,
+                        unsigned n, unsigned temp, unsigned comp)
+{
+   for (unsigned reg = 0; reg < 4; reg++) {
+      /* A row whose value this instruction reads for the last time can take
+       * the result, like allocate_scalar() does. */
+      bool free_row = !fp->occupied[reg] || (fp->reusable[reg] == 3 && !fp->claimed[reg]);
+      if (!free_row || (clobber[n] & (1 << reg)))
+         continue;
+      bool safe = true;
+      /* live_after[j] holds what is live when instruction j starts, so j + 1 is what outlives it. */
+      for (unsigned j = n + 1; j < count && (live_after[j][temp] & (1 << comp)); j++) {
+         safe &= !(clobber[j] & (1 << reg));
+         if (live_after[j + 1][temp] & (1 << comp))
+            safe &= !(clobber_after[j] & (1 << reg));
+      }
+      if (!safe)
+         continue;
+      fp->occupied[reg] = fp->claimed[reg] = 3;
+      return reg;
+   }
+   if (!fp->allocation_failed)
+      fprintf(stderr, "GRATE FRAG: no row register survives to the texture fetch (spilling unsupported)\n");
+   fp->allocation_failed = true;
+   return 31;
+}
+
 static struct fp_alu_dst_operand
 fp_alu_dst(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst, int subreg, bool saturate)
 {
@@ -356,8 +395,11 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
-/* The initial TEX path supports an interpolated vec2 coordinate and one
- * base-level 2D sample. TEX returns packed fx10 channels in row registers 2/3.
+/* TEX supports a vec2 coordinate and one base-level 2D sample. The sampler
+ * reads its coordinate from R0/R1. A plain varying is interpolated straight
+ * into them; a coordinate computed by earlier instructions (for example the
+ * 0.5 * v + 0.5 remap in Tabula's wallpaper shader) is copied there first.
+ * TEX returns packed fx10 channels in row registers 2/3.
  */
 static void
 emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
@@ -366,24 +408,42 @@ emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    const struct tgsi_src_register *sampler = &tgsi->Src[1].Register;
    const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
    assert(tgsi->Texture.Texture == TGSI_TEXTURE_2D);
-   assert(coord->File == TGSI_FILE_INPUT && !coord->Negate && !coord->Absolute);
-   assert(coord->SwizzleX == 0 && coord->SwizzleY == 1);
+   assert((coord->File == TGSI_FILE_INPUT && !coord->Negate && !coord->Absolute) ||
+          coord->File == TGSI_FILE_TEMPORARY || coord->File == TGSI_FILE_IMMEDIATE);
+   assert(coord->File != TGSI_FILE_INPUT || (coord->SwizzleX == 0 && coord->SwizzleY == 1));
    assert(sampler->File == TGSI_FILE_SAMPLER && sampler->Index < 16);
 
    struct fp_instr *interp = CALLOC_STRUCT(fp_instr);
-   struct fp_mfu_instr *mfu = CALLOC_STRUCT(fp_mfu_instr);
    list_inithead(&interp->link);
-   list_inithead(&mfu->link);
-   setup_interpolation(mfu);
-   for (unsigned i = 0; i < 2; i++) {
-      mfu->var[i].op = FP_VAR_OP_FP20;
-      mfu->var[i].tram_row = coord->Index;
+   if (coord->File != TGSI_FILE_INPUT) {
+      struct fp_alu_instr_packet *stage = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&stage->link);
+      for (unsigned i = 0; i < 2; i++) {
+         struct fp_alu_dst_operand row = {
+            .index = i,
+            .write_low_sub_reg = true,
+            .write_high_sub_reg = true,
+         };
+         stage->slots[i] = fp_alu_sMOV(row, fp_tgsi_src(fp, coord, i, NULL));
+      }
+      interp->alu_sched.address = list_length(&fp->alu_instructions);
+      interp->alu_sched.num_instructions = 1;
+      list_addtail(&stage->link, &fp->alu_instructions);
+      list_addtail(&interp->link, &fp->fp_instructions);
+   } else {
+      struct fp_mfu_instr *mfu = CALLOC_STRUCT(fp_mfu_instr);
+      list_inithead(&mfu->link);
+      setup_interpolation(mfu);
+      for (unsigned i = 0; i < 2; i++) {
+         mfu->var[i].op = FP_VAR_OP_FP20;
+         mfu->var[i].tram_row = coord->Index;
+      }
+      fp->info.max_tram_row = MAX2(fp->info.max_tram_row, coord->Index + 1);
+      interp->mfu_sched.address = list_length(&fp->mfu_instructions);
+      interp->mfu_sched.num_instructions = 1;
+      list_addtail(&mfu->link, &fp->mfu_instructions);
+      list_addtail(&interp->link, &fp->fp_instructions);
    }
-   fp->info.max_tram_row = MAX2(fp->info.max_tram_row, coord->Index + 1);
-   interp->mfu_sched.address = list_length(&fp->mfu_instructions);
-   interp->mfu_sched.num_instructions = 1;
-   list_addtail(&mfu->link, &fp->mfu_instructions);
-   list_addtail(&interp->link, &fp->fp_instructions);
 
    struct fp_instr *sample = CALLOC_STRUCT(fp_instr);
    list_inithead(&sample->link);
@@ -721,6 +781,31 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
             live_after[n][reg->Index] |= tgsi_util_get_inst_usage_mask(inst, src);
       }
    }
+   /* Rows each instruction overwrites, and where the last sampled computed
+    * coordinate is: before that fetch values have to live in rows. */
+   uint8_t *clobber = calloc(count + 1, 1);
+   uint8_t *clobber_after = calloc(count + 1, 1);
+   int row_limit = -1;
+   assert(clobber && clobber_after);
+   for (unsigned n = 0; n < count; n++) {
+      const struct tgsi_full_instruction *inst = &code[n];
+      unsigned write_mask = inst->Instruction.NumDstRegs ? inst->Dst[0].Register.WriteMask : 0;
+      for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++) {
+         const struct tgsi_src_register *reg = &inst->Src[src].Register;
+         if (reg->File != TGSI_FILE_INPUT) continue;
+         unsigned swizzle[] = {reg->SwizzleX, reg->SwizzleY, reg->SwizzleZ, reg->SwizzleW};
+         for (unsigned c = 0; c < 4; c++)
+            if (inst->Instruction.Opcode == TGSI_OPCODE_TEX ? c < 2 : (write_mask & (1 << c)))
+               clobber[n] |= 1 << swizzle[c];
+      }
+      if (inst->Instruction.Opcode == TGSI_OPCODE_TEX) {
+         clobber_after[n] |= 0xc;
+         if (inst->Src[0].Register.File != TGSI_FILE_INPUT) {
+            clobber_after[n] |= 0x3;
+            row_limit = n;
+         }
+      }
+   }
    for (unsigned n = 0; n < count; n++) {
       const struct tgsi_full_instruction *inst = &code[n];
       bool single_input = true;
@@ -792,6 +877,8 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
             }
             fp->temp_dst[dst->Index][c] = (live_after[n + 1][dst->Index] & (1 << c)) ?
                                          (fp->texture_rows ? (2 + c / 2) | TEMP_FX10 | (c % 2 ? TEMP_HIGH : 0) :
+                                          (int)n < row_limit && kind == 0 ?
+                                          allocate_coordinate_row(fp, clobber, clobber_after, live_after, count, n, dst->Index, c) :
                                           allocate_scalar(fp, kind)) : 31;
          }
       }
@@ -828,6 +915,8 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi)
       }
       memset(fp->temp_src[fp->num_temporaries], -1, sizeof(fp->temp_src[0]));
    }
+   free(clobber_after);
+   free(clobber);
    free(live_after);
    util_dynarray_fini(&instructions);
 
