@@ -46,7 +46,7 @@ struct grate_context {
    struct grate_vertexbuf_state vbs;
    struct pipe_constant_buffer constant_buffer[PIPE_MAX_CONSTANT_BUFFERS]; // ??, stolen from other drivers but no idea
 
-   bool premultiplied_blend;
+   uint32_t blend_key; /* grate_fp_blend_key(), 0 = not blending */
 
    struct grate_zsa_state *zsa;
    struct pipe_stencil_ref stencil_ref;

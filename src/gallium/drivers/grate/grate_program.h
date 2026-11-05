@@ -19,12 +19,26 @@ struct grate_vertex_shader_state {
    unsigned num_immediates;
 };
 
+/* The fragment program with the blend stage for one blend state appended. */
+struct grate_blend_variant {
+   struct grate_blend_variant *next;
+   uint32_t key; /* see grate_fp_blend_key() */
+   struct grate_shader_blob blob;
+};
+
 struct grate_fragment_shader_state {
    struct pipe_shader_state base;
    struct grate_shader_blob blob;
-   struct grate_shader_blob premultiplied_blob;
+   unsigned num_fp_instrs;
+   unsigned num_alu_instrs;
+   struct grate_blend_variant *variants;
    struct grate_fp_info info;
+
 };
+
+const struct grate_shader_blob *
+grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,
+                          uint32_t key);
 
 void
 grate_context_program_init(struct pipe_context *pcontext);
