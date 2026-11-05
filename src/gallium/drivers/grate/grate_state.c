@@ -868,6 +868,17 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
       GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_LO(i), 2));
       GRATE_PUSHBUF_WORD(ptr, lo);
       GRATE_PUSHBUF_WORD(ptr, hi);
+      if (!pot_layout) {
+         /* A non-power-of-two descriptor keeps its level range in NPOT_AUX. Left zero (as
+          * grate_init_state() clears it), the sampler wraps coordinates at the next lower
+          * power of two even inside [0,1]: a 1366x753 texture sampled with REPEAT, which is
+          * what Catacomb composites its client buffers with, showed the left 1024 columns
+          * and top 512 rows again beyond x=1024 and y=512. With BASE_LEVEL_ONLY set the
+          * texture is addressed correctly across [0,1]; beyond 1.0 REPEAT then clamps to
+          * the edge, so REPEAT is exact only for coordinates in [0,1] on such textures. */
+         GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_NPOT_AUX(i), 1));
+         GRATE_PUSHBUF_WORD(ptr, TGR3D_TEX_TEXDESC_NPOT_AUX_BASE_LEVEL_ONLY(TGR3D_STATE_ENABLED));
+      }
    }
    *ptrp = ptr;
 }
