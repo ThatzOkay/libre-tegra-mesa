@@ -58,6 +58,9 @@ struct grate_fp_shader {
    bool late_rows;
    bool texture_rows;
    bool allocation_failed;
+   /* a value lives in a global register (16-23): only valid while the
+    * sequencer has few pixels in flight, see grate_create_fs_state() */
+   bool uses_globals;
    float immediates[GRATE_FP_MAX_IMMEDIATES][4];
    unsigned num_immediates;
    struct list_head fp_instructions;
