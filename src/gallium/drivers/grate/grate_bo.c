@@ -164,48 +164,49 @@ grate_bo_get_handle(struct grate_bo *bo, uint32_t *handle)
     return 0;
 }
 
-int grate_bo_wait(struct grate_bo *bo)
+int
+grate_bo_wait(struct grate_bo *bo)
 {
-    if (!bo->pending_channel)
-        return 0;
-    return drm_tegra_fence_wait(&bo->pending, 1000000000UL, "bo");
+   if (!bo->pending_channel)
+      return 0;
+   return drm_tegra_fence_wait(&bo->pending, 1000000000UL, "bo");
 }
 
 int grate_bo_map(struct grate_bo *bo, void **ptr)
 {
-    int wait_err = grate_bo_wait(bo);
-    if (wait_err)
-        return wait_err;
-    struct grate_device *drm = bo->drm;
+   int wait_err = grate_bo_wait(bo);
+   if (wait_err)
+      return wait_err;
+   struct grate_device *drm = bo->drm;
 
-    if (!bo->map) {
-        struct drm_tegra_gem_mmap args;
-        int err;
+   if (!bo->map) {
+      struct drm_tegra_gem_mmap args;
+      int err;
 
-        memset(&args, 0, sizeof(args));
-        args.handle = bo->handle;
+      memset(&args, 0, sizeof(args));
+      args.handle = bo->handle;
 
-        err = drmCommandWriteRead(drm->fd, DRM_TEGRA_GEM_MMAP, &args,
-                                  sizeof(args));
-        if (err < 0) {
-            grate_bo_loge(bo, "failed get mapping offset err %d (%s)\n",
-               err, strerror(-err));
-            return -errno;
-        }
+      err = drmCommandWriteRead(drm->fd, DRM_TEGRA_GEM_MMAP, &args,
+                                sizeof(args));
+      if (err < 0) {
+         grate_bo_loge(bo, "failed get mapping offset err %d (%s)\n", err,
+                       strerror(-err));
+         return -errno;
+      }
 
-        bo->offset = args.offset;
+      bo->offset = args.offset;
 
-        bo->map = os_mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           drm->fd, bo->offset);
-        if (bo->map == MAP_FAILED) {
-            grate_bo_loge(bo, "failed to map offset 0x%llX err %d (%s)\n",
-               args.offset, -errno, strerror(errno));
-            bo->map = NULL;
-            return -errno;
-        }
+      bo->map = os_mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        drm->fd, bo->offset);
+      if (bo->map == MAP_FAILED) {
+         grate_bo_loge(bo, "failed to map offset 0x%llX err %d (%s)\n",
+                       args.offset, -errno, strerror(errno));
+         bo->map = NULL;
+         return -errno;
+      }
 
-        grate_bo_logd(bo, "success\n");
-    }
+      grate_bo_logd(bo, "success\n");
+   }
 
     if (ptr)
         *ptr = bo->map;
@@ -233,26 +234,25 @@ int grate_bo_unmap(struct grate_bo *bo)
 
 int grate_bo_export(struct grate_bo *bo, uint32_t flags)
 {
-    int wait_err = grate_bo_wait(bo);
-    if (wait_err)
-        return wait_err;
-    int fd, err;
+   int wait_err = grate_bo_wait(bo);
+   if (wait_err)
+      return wait_err;
+   int fd, err;
 
-    /* DRM_RDWR: the importer (e.g. the compositor) needs to be able to
-     * write through this fd too, not just read it -- without it, CPU
-     * access to an imported scanout buffer (cursor updates, clears) fails.
-     * Ported from grate-surface-rt-48283c9.patch (github.com/grate-driver/
-     * mesa#19), which added the same flag at the old drm_tegra_bo_to_dmabuf()
-     * call site before that wrapper was folded into this file.
-     */
-    flags |= DRM_CLOEXEC | DRM_RDWR;
+   /* DRM_RDWR: the importer (e.g. the compositor) needs to be able to
+    * write through this fd too, not just read it -- without it, CPU
+    * access to an imported scanout buffer (cursor updates, clears) fails.
+    * Ported from grate-surface-rt-48283c9.patch (github.com/grate-driver/
+    * mesa#19), which added the same flag at the old drm_tegra_bo_to_dmabuf()
+    * call site before that wrapper was folded into this file.
+    */
+   flags |= DRM_CLOEXEC | DRM_RDWR;
 
-    err = drmPrimeHandleToFD(bo->drm->fd, bo->handle, flags, &fd);
-    if (err < 0) {
-        grate_bo_loge(bo, "failed err %d strerror(%s)\n",
-            err, strerror(-err));
-        return err;
-    }
+   err = drmPrimeHandleToFD(bo->drm->fd, bo->handle, flags, &fd);
+   if (err < 0) {
+      grate_bo_loge(bo, "failed err %d strerror(%s)\n", err, strerror(-err));
+      return err;
+   }
 
     return fd;
 }
@@ -265,18 +265,19 @@ int grate_bo_export(struct grate_bo *bo, uint32_t flags)
  * call site. Ported from grate-surface-rt-48283c9.patch (github.com/
  * grate-driver/mesa#19); this file's own version of that patch's fix.
  */
-static off_t fd_get_size(int fd)
+static off_t
+fd_get_size(int fd)
 {
-    off_t size;
+   off_t size;
 
-    size = lseek(fd, 0, SEEK_END);
-    if (size <= 0)
-        return -errno;
+   size = lseek(fd, 0, SEEK_END);
+   if (size <= 0)
+      return -errno;
 
-    if (lseek(fd, 0, SEEK_SET) != 0)
-        return -errno;
+   if (lseek(fd, 0, SEEK_SET) != 0)
+      return -errno;
 
-    return size;
+   return size;
 }
 
 struct grate_bo*
@@ -304,8 +305,9 @@ grate_bo_import(struct grate_device *drm, int fd)
          grate_loge("fd_get_size err %d strerror(%s)\n", (int) size, strerror((int) -size));
          goto error;
       }
-      if ((uint64_t) size > UINT32_MAX) {
-         grate_loge("fd_get_size %lld overflows bo->size (uint32_t)\n", (long long) size);
+      if ((uint64_t)size > UINT32_MAX) {
+         grate_loge("fd_get_size %lld overflows bo->size (uint32_t)\n",
+                    (long long)size);
          goto error;
       }
 

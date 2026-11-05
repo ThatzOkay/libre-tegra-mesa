@@ -39,10 +39,11 @@ struct grate_bo {
     uint32_t size;
     int32_t refcnt;
     void *map;
-    /* Last GPU use, including reads. The channel retains this BO until drain. */
+    /* Last GPU use, including reads. The channel retains this BO until drain.
+     */
     struct drm_tegra_channel *pending_channel;
     struct drm_tegra_fence pending;
-    
+
     /* List of channel mappings where made for this BO, for cleanup */
     struct util_dynarray channel_maps;
 };

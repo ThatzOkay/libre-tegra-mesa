@@ -181,7 +181,8 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
       return false;
    struct util_dynarray result;
    util_dynarray_init(&result, NULL);
-#define BLEND_PUSH(value) util_dynarray_append_typed(&result, uint32_t, (value))
+#define BLEND_PUSH(value)                                                    \
+   util_dynarray_append_typed(&result, uint32_t, (value))
    unsigned seen = 0;
    for (unsigned i = 0; i < (unsigned)source->num_commands;) {
       uint32_t command = source->commands[i++];
@@ -189,27 +190,42 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
       unsigned reg = (command >> 16) & 0xfff;
       unsigned count = command & 0xffff;
       if (opcode == 4) {
-         if (reg != REG_TGR3D_PSEQ_FLUSH) BLEND_PUSH(command);
+         if (reg != REG_TGR3D_PSEQ_FLUSH)
+            BLEND_PUSH(command);
          continue;
       }
-      if ((opcode != 1 && opcode != 2) || count > (unsigned)source->num_commands - i)
+      if ((opcode != 1 && opcode != 2) ||
+          count > (unsigned)source->num_commands - i)
          goto fail;
       const uint32_t *values = source->commands + i;
       i += count;
-      if (opcode == 1 && reg == REG_TGR3D_PSEQ_COMMAND_EVEN(0) && count == 1) {
-         BLEND_PUSH(command); BLEND_PUSH(0x20006000 | (fp_count + 1));
+      if (opcode == 1 && reg == REG_TGR3D_PSEQ_COMMAND_EVEN(0) &&
+          count == 1) {
+         BLEND_PUSH(command);
+         BLEND_PUSH(0x20006000 | (fp_count + 1));
          continue;
       }
       if (opcode == 1 && reg == REG_TGR3D_PSEQ_DWR_IF_STATE && count == 1) {
-         BLEND_PUSH(command); BLEND_PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(fp_count + 1));
+         BLEND_PUSH(command);
+         BLEND_PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(fp_count + 1));
          continue;
       }
       unsigned extra = 0, last = 0, bit = 0;
       if (opcode == 2) {
          switch (reg) {
-         case REG_TGR3D_PSEQ_INST_DATA: extra = 1; last = 0x00810008; bit = 1; break;
-         case REG_TGR3D_AT_REMAP_DATA: extra = 1; bit = 2; break;
-         case REG_TGR3D_TEX_INST_DATA: extra = 1; bit = 4; break;
+         case REG_TGR3D_PSEQ_INST_DATA:
+            extra = 1;
+            last = 0x00810008;
+            bit = 1;
+            break;
+         case REG_TGR3D_AT_REMAP_DATA:
+            extra = 1;
+            bit = 2;
+            break;
+         case REG_TGR3D_TEX_INST_DATA:
+            extra = 1;
+            bit = 4;
+            break;
          case REG_TGR3D_ALU_REMAP_DATA:
             extra = 1;
             last = (alu_count << 2) | packets;
@@ -219,20 +235,32 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
             extra = 8 * packets;
             bit = 16;
             break;
-         case REG_TGR3D_ALU_P2CX_DATA: extra = 1; bit = 32; break;
-         case REG_TGR3D_DW_INST_DATA: extra = 1; last = 0x00028005; bit = 64; break;
+         case REG_TGR3D_ALU_P2CX_DATA:
+            extra = 1;
+            bit = 32;
+            break;
+         case REG_TGR3D_DW_INST_DATA:
+            extra = 1;
+            last = 0x00028005;
+            bit = 64;
+            break;
          }
       }
       if (bit) {
-         if ((seen & bit) || count != (bit == 16 ? alu_count * 8 : fp_count)) goto fail;
+         if ((seen & bit) || count != (bit == 16 ? alu_count * 8 : fp_count))
+            goto fail;
          seen |= bit;
       }
       BLEND_PUSH((command & 0xffff0000) | (count + extra));
-      for (unsigned j = 0; j < count; j++) BLEND_PUSH(bit == 64 ? 0 : values[j]);
-      for (unsigned j = 0; j < extra; j++) BLEND_PUSH(bit == 16 ? blend_words[j] : last);
-      if (bit == 1) BLEND_PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
+      for (unsigned j = 0; j < count; j++)
+         BLEND_PUSH(bit == 64 ? 0 : values[j]);
+      for (unsigned j = 0; j < extra; j++)
+         BLEND_PUSH(bit == 16 ? blend_words[j] : last);
+      if (bit == 1)
+         BLEND_PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
    }
-   if (seen != 127) goto fail;
+   if (seen != 127)
+      goto fail;
    util_dynarray_trim(&result);
    output->commands = result.data;
    output->num_commands = result.size / sizeof(uint32_t);
@@ -281,17 +309,20 @@ static void
 free_fragment_ir(struct grate_fp_shader *fp)
 {
    while (!list_is_empty(&fp->fp_instructions)) {
-      struct fp_instr *inst = list_first_entry(&fp->fp_instructions, struct fp_instr, link);
+      struct fp_instr *inst =
+         list_first_entry(&fp->fp_instructions, struct fp_instr, link);
       list_del(&inst->link);
       FREE(inst);
    }
    while (!list_is_empty(&fp->mfu_instructions)) {
-      struct fp_mfu_instr *inst = list_first_entry(&fp->mfu_instructions, struct fp_mfu_instr, link);
+      struct fp_mfu_instr *inst =
+         list_first_entry(&fp->mfu_instructions, struct fp_mfu_instr, link);
       list_del(&inst->link);
       FREE(inst);
    }
    while (!list_is_empty(&fp->alu_instructions)) {
-      struct fp_alu_instr_packet *inst = list_first_entry(&fp->alu_instructions, struct fp_alu_instr_packet, link);
+      struct fp_alu_instr_packet *inst = list_first_entry(
+         &fp->alu_instructions, struct fp_alu_instr_packet, link);
       list_del(&inst->link);
       FREE(inst);
    }
@@ -390,7 +421,7 @@ grate_compile_fs(struct grate_context *context,
    }
 
    PUSH(host1x_opcode_nonincr(REG_TGR3D_TEX_INST_DATA, num_fp_instrs));
-   list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
+   list_for_each_entry (struct fp_instr, instr, &fp.fp_instructions, link)
       PUSH(instr->tex);
 
    PUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_REMAP_DATA, num_fp_instrs));

@@ -242,14 +242,17 @@ tgsi_src_to_vp(struct grate_vp_shader *vp, const struct tgsi_src_register *src)
       return attrib(src->Index, swizzle, negate, absolute);
 
    case TGSI_FILE_CONSTANT:
-      /* the application's uniforms follow the immediates, see grate_compiler.h */
-      return uniform(vp->num_immediates + src->Index, swizzle, negate, absolute);
+      /* the application's uniforms follow the immediates, see
+       * grate_compiler.h */
+      return uniform(vp->num_immediates + src->Index, swizzle, negate,
+                     absolute);
 
    case TGSI_FILE_TEMPORARY:
       return src_temp(src->Index, swizzle, negate, absolute);
 
    case TGSI_FILE_IMMEDIATE:
-      /* the values are recorded in grate_tgsi_to_vp() and uploaded to the first slots, see grate_compiler.h */
+      /* the values are recorded in grate_tgsi_to_vp() and uploaded to the
+       * first slots, see grate_compiler.h */
       assert(src->Index >= 0 && (unsigned)src->Index < vp->num_immediates);
       return uniform(src->Index, swizzle, negate, absolute);
 
@@ -328,22 +331,21 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
    }
 }
 
-/* A packed instruction has ONE attribute-fetch index and ONE uniform-fetch index
- * shared by all its sources (see grate_vp_pack()). When an instruction reads a
- * second, different attribute or uniform, copy that operand into a scratch
- * temporary with a preceding MOV and read the temporary instead.
+/* A packed instruction has ONE attribute-fetch index and ONE uniform-fetch
+ * index shared by all its sources (see grate_vp_pack()). When an instruction
+ * reads a second, different attribute or uniform, copy that operand into a
+ * scratch temporary with a preceding MOV and read the temporary instead.
  */
 static bool
 legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
                  struct list_head *out)
 {
-   struct vp_src_operand *srcs[4] = {
-      &instr->vec.src[0], &instr->vec.src[1], &instr->vec.src[2],
-      &instr->scalar.src
-   };
+   struct vp_src_operand *srcs[4] = {&instr->vec.src[0], &instr->vec.src[1],
+                                     &instr->vec.src[2], &instr->scalar.src};
    int attr_fetch = -1, uniform_fetch = -1;
    unsigned next_temp = vp->num_temps;
-   static const enum vp_swz identity[4] = { VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z, VP_SWZ_W };
+   static const enum vp_swz identity[4] = {VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z,
+                                           VP_SWZ_W};
 
    for (unsigned i = 0; i < 4; ++i) {
       struct vp_src_operand *src = srcs[i];
@@ -363,7 +365,8 @@ legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
 
       /* the hardware has 63 usable temporaries (index 63 disables the write) */
       if (next_temp >= 63) {
-         fprintf(stderr, "GRATE VERTEX: out of temporaries while splitting operand fetches\n");
+         fprintf(stderr, "GRATE VERTEX: out of temporaries while splitting "
+                         "operand fetches\n");
          return false;
       }
 
@@ -372,8 +375,8 @@ legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
       copy.negate = false;
       copy.absolute = false;
 
-      struct vp_instr *mov = emit_packed(emit_vMOV(dst_temp(next_temp, 0xf, false), copy),
-                                         emit_sNOP());
+      struct vp_instr *mov = emit_packed(
+         emit_vMOV(dst_temp(next_temp, 0xf, false), copy), emit_sNOP());
       list_addtail(&mov->link, out);
 
       /* the consumer keeps the original swizzle, negate and absolute */
@@ -395,18 +398,22 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
       tgsi_parse_token(tgsi);
       switch (tgsi->FullToken.Token.Type) {
       case TGSI_TOKEN_TYPE_IMMEDIATE: {
-         const struct tgsi_full_immediate *imm = &tgsi->FullToken.FullImmediate;
-         unsigned n = imm->Immediate.NrTokens - 1; /* number of 32-bit values: 1 to 4 */
+         const struct tgsi_full_immediate *imm =
+            &tgsi->FullToken.FullImmediate;
+         unsigned n =
+            imm->Immediate.NrTokens - 1; /* number of 32-bit values: 1 to 4 */
 
          assert(vp->num_immediates < GRATE_VP_MAX_IMMEDIATES);
          for (unsigned i = 0; i < 4; ++i)
-            vp->immediates[vp->num_immediates][i] = i < n ? imm->u[i].Uint : 0;
+            vp->immediates[vp->num_immediates][i] =
+               i < n ? imm->u[i].Uint : 0;
          vp->num_immediates++;
          break;
       }
 
       case TGSI_TOKEN_TYPE_DECLARATION: {
-         const struct tgsi_full_declaration *decl = &tgsi->FullToken.FullDeclaration;
+         const struct tgsi_full_declaration *decl =
+            &tgsi->FullToken.FullDeclaration;
          if (decl->Declaration.File == TGSI_FILE_TEMPORARY &&
              decl->Range.Last + 1 > vp->num_temps)
             vp->num_temps = decl->Range.Last + 1;

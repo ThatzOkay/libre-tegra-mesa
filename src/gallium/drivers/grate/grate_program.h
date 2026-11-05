@@ -15,7 +15,9 @@ struct grate_vertex_shader_state {
    struct pipe_shader_state base;
    struct grate_shader_blob blob;
    uint16_t output_mask;
-   uint32_t immediates[GRATE_VP_MAX_IMMEDIATES][4]; /* uploaded with the uniforms, see emit_vs_uniforms() */
+   uint32_t
+      immediates[GRATE_VP_MAX_IMMEDIATES]
+                [4]; /* uploaded with the uniforms, see emit_vs_uniforms() */
    unsigned num_immediates;
 };
 

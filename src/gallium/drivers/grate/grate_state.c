@@ -40,9 +40,10 @@ grate_set_constant_buffer(struct pipe_context *pcontext, enum mesa_shader_stage 
    util_copy_constant_buffer(&context->constant_buffer[shader], buffer);
 }
 
-static void grate_add_render_target(struct grate_context *context,
-                                    const struct pipe_surface *ref,
-                                    unsigned int slot, bool stencil_plane)
+static void
+grate_add_render_target(struct grate_context *context,
+                        const struct pipe_surface *ref, unsigned int slot,
+                        bool stencil_plane)
 {
    if (!ref->texture) {
       fprintf(stderr, "%s: texture at %p null!", __func__, ref);
@@ -56,22 +57,24 @@ static void grate_add_render_target(struct grate_context *context,
    }
    struct grate_resource *res = grate_resource(ref->texture);
    uint32_t rt_params;
-   
+
    if (stencil_plane) {
       /* The S8 plane that follows the depth plane in the same buffer. */
-      rt_params  = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(TGR3D_SURF_FORMAT_S8);
+      rt_params = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(TGR3D_SURF_FORMAT_S8);
       rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->stencil_pitch);
    } else {
-      rt_params  = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(res->format);
+      rt_params = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(res->format);
       rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->pitch);
    }
    rt_params |= TGR3D_GLOBAL_SURFDESC_STRUCTURE(res->tiled);
-   
+
    context->framebuffer.rt_params[slot] = rt_params;
    context->framebuffer.rt_bos[slot] = res->bo;
-   context->framebuffer.rt_offsets[slot] = stencil_plane ? res->stencil_offset : 0;
+   context->framebuffer.rt_offsets[slot] =
+      stencil_plane ? res->stencil_offset : 0;
    context->framebuffer.rt_mask |= 1u << slot;
-   context->framebuffer.num_rts = MAX2(context->framebuffer.num_rts, slot + 1);
+   context->framebuffer.num_rts =
+      MAX2(context->framebuffer.num_rts, slot + 1);
 }
 
 static void
@@ -91,19 +94,25 @@ grate_set_framebuffer_state(struct pipe_context *pcontext,
     */
    for (unsigned int i = 0; i < framebuffer->nr_cbufs; i++) {
       if (framebuffer->cbufs[i].texture)
-         grate_add_render_target(context, &framebuffer->cbufs[i], i + 1, false);
+         grate_add_render_target(context, &framebuffer->cbufs[i], i + 1,
+                                 false);
    }
    
    if (framebuffer->zsbuf.texture) {
       grate_add_render_target(context, &framebuffer->zsbuf, 0, false);
 
       if (grate_resource(framebuffer->zsbuf.texture)->stencil_offset) {
-         /* Windows puts colour output n > 0 at slot n + 4 to keep slot 2 for stencil; we use n + 1, so a second colour
-          * buffer would share the slot. OpenGL ES 2 has one colour buffer: give up stencil rather than corrupt it. */
-         if (framebuffer->nr_cbufs > GRATE_STENCIL_SLOT - 1 && framebuffer->cbufs[GRATE_STENCIL_SLOT - 1].texture) {
-            fprintf(stderr, "GRATE: stencil is not available with more than one colour buffer\n");
+         /* Windows puts colour output n > 0 at slot n + 4 to keep slot 2 for
+          * stencil; we use n + 1, so a second colour buffer would share the
+          * slot. OpenGL ES 2 has one colour buffer: give up stencil rather
+          * than corrupt it. */
+         if (framebuffer->nr_cbufs > GRATE_STENCIL_SLOT - 1 &&
+             framebuffer->cbufs[GRATE_STENCIL_SLOT - 1].texture) {
+            fprintf(stderr, "GRATE: stencil is not available with more than "
+                            "one colour buffer\n");
          } else {
-            grate_add_render_target(context, &framebuffer->zsbuf, GRATE_STENCIL_SLOT, true);
+            grate_add_render_target(context, &framebuffer->zsbuf,
+                                    GRATE_STENCIL_SLOT, true);
             context->framebuffer.has_stencil = true;
          }
       }
@@ -205,9 +214,11 @@ grate_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
    assert(shader == MESA_SHADER_FRAGMENT);
    assert(start_slot + num_views + unbind_num_trailing_slots <= 16);
    for (unsigned i = 0; i < num_views; i++)
-      pipe_sampler_view_reference(&ctx->sampler_views[start_slot + i], views ? views[i] : NULL);
+      pipe_sampler_view_reference(&ctx->sampler_views[start_slot + i],
+                                  views ? views[i] : NULL);
    for (unsigned i = 0; i < unbind_num_trailing_slots; i++)
-      pipe_sampler_view_reference(&ctx->sampler_views[start_slot + num_views + i], NULL);
+      pipe_sampler_view_reference(
+         &ctx->sampler_views[start_slot + num_views + i], NULL);
 }
 
 static void
@@ -657,15 +668,18 @@ emit_render_targets(struct grate_context *context, uint32_t **ptrp)
       if (!(fb->rt_mask & (1u << i)))
          continue;
 
-      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(i), 1));
+      GRATE_PUSHBUF_WORD(*ptrp,
+                         host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFDESC(i), 1));
       GRATE_PUSHBUF_WORD(*ptrp, fb->rt_params[i]);
-      GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(i), 1));
+      GRATE_PUSHBUF_WORD(*ptrp,
+                         host1x_opcode_incr(REG_TGR3D_GLOBAL_SURFADDR(i), 1));
       grate_stream_push_reloc(stream, ptrp, fb->rt_bos[i], fb->rt_offsets[i]);
    }
 
    uint32_t enable = fb->rt_mask;
    if (fb->base.zsbuf.texture && context->zsa &&
-       (context->zsa->base.depth_enabled || (fb->has_stencil && context->zsa->base.stencil[0].enabled)))
+       (context->zsa->base.depth_enabled ||
+        (fb->has_stencil && context->zsa->base.stencil[0].enabled)))
       enable |= TGR3D_DW_ST_ENABLE_Z_TEST(TGR3D_STATE_ENABLED);
 
    GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_DW_ST_ENABLE, 1));
@@ -689,9 +703,10 @@ emit_scissor(struct grate_context *context, uint32_t **ptrp)
    unsigned height = context->framebuffer.base.height;
    GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_SU_SCISSOR_X, 2));
    GRATE_PUSHBUF_WORD(*ptrp, TGR3D_SU_SCISSOR_X_MIN(MIN2(s->minx, width)) |
-                           TGR3D_SU_SCISSOR_X_MAX(MIN2(s->maxx, width)));
-   GRATE_PUSHBUF_WORD(*ptrp, TGR3D_SU_SCISSOR_Y_MIN(MIN2(s->miny, height)) |
-                           TGR3D_SU_SCISSOR_Y_MAX(MIN2(s->maxy, height)));
+                                TGR3D_SU_SCISSOR_X_MAX(MIN2(s->maxx, width)));
+   GRATE_PUSHBUF_WORD(*ptrp,
+                      TGR3D_SU_SCISSOR_Y_MIN(MIN2(s->miny, height)) |
+                         TGR3D_SU_SCISSOR_Y_MAX(MIN2(s->maxy, height)));
 }
 
 static void
@@ -715,42 +730,57 @@ emit_zsa_state(struct grate_context *context, uint32_t **ptrp)
    grate_stream_push_words(stream, ptrp, context->zsa->commands, context->zsa->num_commands, 0);
 }
 
-/* Gallium stencil op to the hardware's 3-bit code. Same order as the Windows driver's D3D mapping: zero, keep, replace,
- * increment (clamp), decrement (clamp), invert, increment (wrap), decrement (wrap). */
+/* Gallium stencil op to the hardware's 3-bit code. Same order as the Windows
+ * driver's D3D mapping: zero, keep, replace, increment (clamp), decrement
+ * (clamp), invert, increment (wrap), decrement (wrap). */
 static uint32_t
 grate_stencil_op(enum pipe_stencil_op op)
 {
    switch (op) {
-   case PIPE_STENCIL_OP_ZERO: return 0;
-   case PIPE_STENCIL_OP_KEEP: return 1;
-   case PIPE_STENCIL_OP_REPLACE: return 2;
-   case PIPE_STENCIL_OP_INCR: return 3;
-   case PIPE_STENCIL_OP_DECR: return 4;
-   case PIPE_STENCIL_OP_INVERT: return 5;
-   case PIPE_STENCIL_OP_INCR_WRAP: return 6;
-   case PIPE_STENCIL_OP_DECR_WRAP: return 7;
-   default: UNREACHABLE("unknown pipe_stencil_op");
+   case PIPE_STENCIL_OP_ZERO:
+      return 0;
+   case PIPE_STENCIL_OP_KEEP:
+      return 1;
+   case PIPE_STENCIL_OP_REPLACE:
+      return 2;
+   case PIPE_STENCIL_OP_INCR:
+      return 3;
+   case PIPE_STENCIL_OP_DECR:
+      return 4;
+   case PIPE_STENCIL_OP_INVERT:
+      return 5;
+   case PIPE_STENCIL_OP_INCR_WRAP:
+      return 6;
+   case PIPE_STENCIL_OP_DECR_WRAP:
+      return 7;
+   default:
+      UNREACHABLE("unknown pipe_stencil_op");
    }
 }
 
-/* Stencil test and operations, emitted on every draw after grate_init_state()'s defaults. The test is disabled when the
- * framebuffer has no stencil plane or the application does not use it. */
+/* Stencil test and operations, emitted on every draw after
+ * grate_init_state()'s defaults. The test is disabled when the framebuffer
+ * has no stencil plane or the application does not use it. */
 static void
 emit_stencil_state(struct grate_context *context, uint32_t **ptrp)
 {
-   const struct pipe_depth_stencil_alpha_state *zsa = context->zsa ? &context->zsa->base : NULL;
-   bool enabled = context->framebuffer.has_stencil && zsa && zsa->stencil[0].enabled;
+   const struct pipe_depth_stencil_alpha_state *zsa =
+      context->zsa ? &context->zsa->base : NULL;
+   bool enabled =
+      context->framebuffer.has_stencil && zsa && zsa->stencil[0].enabled;
 
    /* One-sided stencil uses the front state for both faces. */
    const struct pipe_stencil_state *face[2] = {
       zsa ? &zsa->stencil[0] : NULL,
-      zsa ? (zsa->stencil[1].enabled ? &zsa->stencil[1] : &zsa->stencil[0]) : NULL,
+      zsa ? (zsa->stencil[1].enabled ? &zsa->stencil[1] : &zsa->stencil[0])
+          : NULL,
    };
 
    uint32_t test[2], op[2];
    for (unsigned i = 0; i < 2; i++) {
       if (enabled) {
-         test[i] = face[i]->valuemask | (grate_compare_func(face[i]->func) << 8);
+         test[i] =
+            face[i]->valuemask | (grate_compare_func(face[i]->func) << 8);
          op[i] = grate_stencil_op(face[i]->fail_op) |
                  (grate_stencil_op(face[i]->zfail_op) << 3) |
                  (grate_stencil_op(face[i]->zpass_op) << 6) |
@@ -766,11 +796,13 @@ emit_stencil_state(struct grate_context *context, uint32_t **ptrp)
                    TGR3D_QR_S_CTRL_S_ENABLE(enabled) |
                    TGR3D_QR_S_CTRL_QRAST_FB_WRITE(TGR3D_STATE_ENABLED);
 
-   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_QR_S_TEST_FRONT, 3));
+   GRATE_PUSHBUF_WORD(*ptrp,
+                      host1x_opcode_incr(REG_TGR3D_QR_S_TEST_FRONT, 3));
    GRATE_PUSHBUF_WORD(*ptrp, test[0]);
    GRATE_PUSHBUF_WORD(*ptrp, test[1]);
    GRATE_PUSHBUF_WORD(*ptrp, ctrl);
-   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_S_OPERATION_FRONT, 2));
+   GRATE_PUSHBUF_WORD(
+      *ptrp, host1x_opcode_incr(REG_TGR3D_GLOBAL_S_OPERATION_FRONT, 2));
    GRATE_PUSHBUF_WORD(*ptrp, op[0]);
    GRATE_PUSHBUF_WORD(*ptrp, op[1]);
 }
@@ -788,19 +820,24 @@ emit_vs_uniforms(struct grate_context *context, uint32_t **ptrp)
       user_words = constbuf->buffer_size / 4;
    }
 
-   /* one block from slot 0: the shader's immediates, then the application's uniforms; see grate_compiler.h */
+   /* one block from slot 0: the shader's immediates, then the application's
+    * uniforms; see grate_compiler.h */
    unsigned len = num_imm * 4 + user_words;
    if (len == 0)
       return;
 
    assert(len <= 256 * 4);
 
-   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_imm(REG_TGR3D_VPE_CONST_OFFSET, 0));
-   GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_nonincr(REG_TGR3D_VPE_CONST_DATA, len));
+   GRATE_PUSHBUF_WORD(*ptrp,
+                      host1x_opcode_imm(REG_TGR3D_VPE_CONST_OFFSET, 0));
+   GRATE_PUSHBUF_WORD(*ptrp,
+                      host1x_opcode_nonincr(REG_TGR3D_VPE_CONST_DATA, len));
    if (num_imm)
-      grate_stream_push_words(stream, ptrp, context->vshader->immediates[0], num_imm * 4, 0);
+      grate_stream_push_words(stream, ptrp, context->vshader->immediates[0],
+                              num_imm * 4, 0);
    if (user_words)
-      grate_stream_push_words(stream, ptrp, constbuf->user_buffer, user_words, 0);
+      grate_stream_push_words(stream, ptrp, constbuf->user_buffer, user_words,
+                              0);
 }
 
 /* Tegra fragment constants are sign:1 exponent:6 mantissa:13 (bias 31).
@@ -826,7 +863,8 @@ static void
 emit_fs_uniforms(struct grate_context *context, uint32_t **ptrp)
 {
    const struct grate_fp_info *info = &context->fshader->info;
-   const struct pipe_constant_buffer *cb = &context->constant_buffer[MESA_SHADER_FRAGMENT];
+   const struct pipe_constant_buffer *cb =
+      &context->constant_buffer[MESA_SHADER_FRAGMENT];
    if (!info->num_constants)
       return;
    GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(0x820, info->num_constants));
@@ -834,8 +872,11 @@ emit_fs_uniforms(struct grate_context *context, uint32_t **ptrp)
       float value = info->constants[i].immediate;
       int word = info->constants[i].word;
       if (word >= 0) {
-         assert(cb->user_buffer && ((unsigned)word + 1) * sizeof(float) <= cb->buffer_size);
-         memcpy(&value, (const uint8_t *)cb->user_buffer + word * sizeof(float), sizeof(value));
+         assert(cb->user_buffer &&
+                ((unsigned)word + 1) * sizeof(float) <= cb->buffer_size);
+         memcpy(&value,
+                (const uint8_t *)cb->user_buffer + word * sizeof(float),
+                sizeof(value));
       }
       GRATE_PUSHBUF_WORD(*ptrp, fragment_fp20(value));
    }
@@ -909,8 +950,10 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
          continue;
       struct grate_resource *res = grate_resource(view->texture);
       assert(view->target == PIPE_TEXTURE_2D && view->u.tex.first_level == 0);
-      assert(view->u.tex.last_level == 0 && sampler->min_mip_filter == PIPE_TEX_MIPFILTER_NONE);
-      unsigned row_bytes = res->b.width0 * util_format_get_blocksize(res->b.format);
+      assert(view->u.tex.last_level == 0 &&
+             sampler->min_mip_filter == PIPE_TEX_MIPFILTER_NONE);
+      unsigned row_bytes =
+         res->b.width0 * util_format_get_blocksize(res->b.format);
       /* POT layout is tightly packed. NPOT layout rounds rows to 64 bytes,
        * even when the logical dimensions themselves are powers of two.
        */
@@ -921,14 +964,20 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
       bool native_layout = res->pitch == native_pitch ||
                            (res->b.height0 == 1 && res->pitch >= row_bytes);
       if (!native_layout)
-         fprintf(stderr, "GRATE unsupported sampler layout: %s %ux%u pitch=%u native=%u\n",
-                 util_format_name(res->b.format),res->b.width0,res->b.height0,res->pitch,native_pitch);
+         fprintf(
+            stderr,
+            "GRATE unsupported sampler layout: %s %ux%u pitch=%u native=%u\n",
+            util_format_name(res->b.format), res->b.width0, res->b.height0,
+            res->pitch, native_pitch);
       assert(native_layout);
       if (grate_debug & GRATE_DEBUG_TRACE)
-         fprintf(stderr, "GRATE sampler: %s view %s swizzle=%u,%u,%u,%u size=%ux%u pitch=%u format=%u\n",
-                 util_format_name(res->b.format), util_format_name(view->format),
-                 view->swizzle_r,view->swizzle_g,view->swizzle_b,view->swizzle_a,
-                 res->b.width0,res->b.height0,res->pitch,res->format);
+         fprintf(stderr,
+                 "GRATE sampler: %s view %s swizzle=%u,%u,%u,%u size=%ux%u "
+                 "pitch=%u format=%u\n",
+                 util_format_name(res->b.format),
+                 util_format_name(view->format), view->swizzle_r,
+                 view->swizzle_g, view->swizzle_b, view->swizzle_a,
+                 res->b.width0, res->b.height0, res->pitch, res->format);
       /* Texture channels follow GL order, independently of the framebuffer
        * store's BGRA packing. Use the view's format for reinterpretation. */
       unsigned texture_format = grate_pixel_format(view->format);
@@ -949,35 +998,48 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
          break;
       }
       uint32_t lo = TGR3D_TEX_TEXDESC_LO_SURF_FORMAT(texture_format);
-      if (sampler->wrap_s == PIPE_TEX_WRAP_CLAMP_TO_EDGE) lo |= 2;
-      else assert(sampler->wrap_s == PIPE_TEX_WRAP_REPEAT);
-      if (sampler->wrap_t == PIPE_TEX_WRAP_CLAMP_TO_EDGE) lo |= 1;
-      else assert(sampler->wrap_t == PIPE_TEX_WRAP_REPEAT);
-      if (sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR) lo |= TGR3D_TEX_TEXDESC_LO_LERP_MIN;
-      if (sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR) lo |= TGR3D_TEX_TEXDESC_LO_LERP_MAG;
+      if (sampler->wrap_s == PIPE_TEX_WRAP_CLAMP_TO_EDGE)
+         lo |= 2;
+      else
+         assert(sampler->wrap_s == PIPE_TEX_WRAP_REPEAT);
+      if (sampler->wrap_t == PIPE_TEX_WRAP_CLAMP_TO_EDGE)
+         lo |= 1;
+      else
+         assert(sampler->wrap_t == PIPE_TEX_WRAP_REPEAT);
+      if (sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR)
+         lo |= TGR3D_TEX_TEXDESC_LO_LERP_MIN;
+      if (sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR)
+         lo |= TGR3D_TEX_TEXDESC_LO_LERP_MAG;
       uint32_t hi = 0x80; /* base level only */
       if (pot_layout) {
          hi |= TGR3D_TEX_TEXDESC_HI_LOG2_WIDTH(util_logbase2(res->b.width0));
-         hi |= TGR3D_TEX_TEXDESC_HI_LOG2_HEIGHT(util_logbase2(res->b.height0));
+         hi |=
+            TGR3D_TEX_TEXDESC_HI_LOG2_HEIGHT(util_logbase2(res->b.height0));
       } else {
          hi |= 0x40 | TGR3D_TEX_TEXDESC_HI_WIDTH(res->b.width0) |
-                      TGR3D_TEX_TEXDESC_HI_HEIGHT(res->b.height0);
+               TGR3D_TEX_TEXDESC_HI_HEIGHT(res->b.height0);
       }
-      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXADDR(i), 1));
+      GRATE_PUSHBUF_WORD(ptr,
+                         host1x_opcode_incr(REG_TGR3D_TEX_TEXADDR(i), 1));
       grate_stream_push_reloc(stream, &ptr, res->bo, 0);
-      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_LO(i), 2));
+      GRATE_PUSHBUF_WORD(ptr,
+                         host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_LO(i), 2));
       GRATE_PUSHBUF_WORD(ptr, lo);
       GRATE_PUSHBUF_WORD(ptr, hi);
       if (!pot_layout) {
-         /* A non-power-of-two descriptor keeps its level range in NPOT_AUX. Left zero (as
-          * grate_init_state() clears it), the sampler wraps coordinates at the next lower
-          * power of two even inside [0,1]: a 1366x753 texture sampled with REPEAT, which is
-          * what Catacomb composites its client buffers with, showed the left 1024 columns
-          * and top 512 rows again beyond x=1024 and y=512. With BASE_LEVEL_ONLY set the
-          * texture is addressed correctly across [0,1]; beyond 1.0 REPEAT then clamps to
-          * the edge, so REPEAT is exact only for coordinates in [0,1] on such textures. */
-         GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_NPOT_AUX(i), 1));
-         GRATE_PUSHBUF_WORD(ptr, TGR3D_TEX_TEXDESC_NPOT_AUX_BASE_LEVEL_ONLY(TGR3D_STATE_ENABLED));
+         /* A non-power-of-two descriptor keeps its level range in NPOT_AUX.
+          * Left zero (as grate_init_state() clears it), the sampler wraps
+          * coordinates at the next lower power of two even inside [0,1]: a
+          * 1366x753 texture sampled with REPEAT, which is what Catacomb
+          * composites its client buffers with, showed the left 1024 columns
+          * and top 512 rows again beyond x=1024 and y=512. With
+          * BASE_LEVEL_ONLY set the texture is addressed correctly across
+          * [0,1]; beyond 1.0 REPEAT then clamps to the edge, so REPEAT is
+          * exact only for coordinates in [0,1] on such textures. */
+         GRATE_PUSHBUF_WORD(
+            ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_NPOT_AUX(i), 1));
+         GRATE_PUSHBUF_WORD(ptr, TGR3D_TEX_TEXDESC_NPOT_AUX_BASE_LEVEL_ONLY(
+                                    TGR3D_STATE_ENABLED));
       }
    }
    *ptrp = ptr;
