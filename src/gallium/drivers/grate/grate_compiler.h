@@ -9,21 +9,27 @@
 struct tgsi_parse_context;
 
 /*
- * Constant RAM layout of a vertex program. Immediates (TGSI_FILE_IMMEDIATE) come first: immediate i is vec4 slot i. The
- * application's uniforms (TGSI_FILE_CONSTANT) follow: uniform k is vec4 slot num_immediates + k. Both are uploaded as one
- * block starting at slot 0 (see emit_vs_uniforms()). A write to REG_TGR3D_VPE_CONST_OFFSET with a non-zero index was
- * found not to move the upload position (2026-10-31, on hardware: data written after it still landed in slot 0), so
- * everything must start at offset 0, and the layout has to be known when the program is compiled; this is why the
- * immediates are put first and the uniforms moved up, and not the other way round.
+ * Constant RAM layout of a vertex program. Immediates (TGSI_FILE_IMMEDIATE)
+ * come first: immediate i is vec4 slot i. The application's uniforms
+ * (TGSI_FILE_CONSTANT) follow: uniform k is vec4 slot num_immediates + k.
+ * Both are uploaded as one block starting at slot 0 (see emit_vs_uniforms()).
+ * A write to REG_TGR3D_VPE_CONST_OFFSET with a non-zero index was found not
+ * to move the upload position (2026-10-31, on hardware: data written after it
+ * still landed in slot 0), so everything must start at offset 0, and the
+ * layout has to be known when the program is compiled; this is why the
+ * immediates are put first and the uniforms moved up, and not the other way
+ * round.
  */
 #define GRATE_VP_MAX_IMMEDIATES 32
 
 struct grate_vp_shader {
    struct list_head instructions;
    uint16_t output_mask;
-   uint32_t immediates[GRATE_VP_MAX_IMMEDIATES][4]; /* raw 32-bit words, slot i of the immediates */
+   uint32_t immediates[GRATE_VP_MAX_IMMEDIATES]
+                      [4]; /* raw 32-bit words, slot i of the immediates */
    unsigned num_immediates;
-   unsigned num_temps; /* TGSI temporaries declared; scratch temporaries start here */
+   unsigned num_temps; /* TGSI temporaries declared; scratch temporaries start
+                          here */
 };
 
 struct grate_fp_info {
@@ -44,7 +50,7 @@ struct grate_fp_info {
 };
 
 #define GRATE_FP_MAX_IMMEDIATES 32
-#define GRATE_FP_MAX_TEMPS 64
+#define GRATE_FP_MAX_TEMPS      64
 
 struct grate_fp_shader {
    unsigned num_temporaries;

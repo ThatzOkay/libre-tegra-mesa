@@ -151,8 +151,9 @@ grate_pixel_format(enum pipe_format format)
       return TGR3D_SURF_FORMAT_A4B4G4R4;
    case PIPE_FORMAT_Z16_UNORM:
       return TGR3D_SURF_FORMAT_Z16;
-   /* The Tegra 3 has no 24-bit depth. Like the Windows driver, store D24 as 16-bit non-linear depth (the stencil
-    * of Z24S8 lives in a separate S8 plane, see grate_resource). */
+   /* The Tegra 3 has no 24-bit depth. Like the Windows driver, store D24 as
+    * 16-bit non-linear depth (the stencil of Z24S8 lives in a separate S8
+    * plane, see grate_resource). */
    case PIPE_FORMAT_Z24X8_UNORM:
    case PIPE_FORMAT_X8Z24_UNORM:
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
@@ -184,10 +185,12 @@ grate_format_is_emulated_z24(enum pipe_format format)
    }
 }
 
-/* Z16NL is a float-like 16-bit code: 3 exponent bits, 13 mantissa bits. The Windows driver's decode table (it builds one
- * so shaders can read the depth) turns a code into a 20-bit linear value: z20 = ((2^e - 1) << (20 - e)) | (m << max(6 - e, 0)),
- * and the 16-bit linear depth is z20 >> 4. Inverted here: e is the number of leading ones of z20 (at most 7), m the 13 bits
- * after the first zero.
+/* Z16NL is a float-like 16-bit code: 3 exponent bits, 13 mantissa bits. The
+ * Windows driver's decode table (it builds one so shaders can read the depth)
+ * turns a code into a 20-bit linear value: z20 = ((2^e - 1) << (20 - e)) | (m
+ * << max(6 - e, 0)), and the 16-bit linear depth is z20 >> 4. Inverted here:
+ * e is the number of leading ones of z20 (at most 7), m the 13 bits after the
+ * first zero.
  */
 uint16_t
 grate_pack_z16nl(double depth)
@@ -233,13 +236,15 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
             resource->pitch = align(template->width0 * 2, 256);
          else
             resource->pitch = align(resource->pitch, 256);
-      }
-      else if (template->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT))
+      } else if (template->bind &
+                 (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT))
          resource->pitch = align(resource->pitch, 32);
 
       /* The kernel reflects BOTTOM_UP framebuffers at scanout. GBM/KMS
        * buffers already use the display's normal row order. */
-      flags = (template->bind & PIPE_BIND_SCANOUT) ? 0 : DRM_TEGRA_GEM_CREATE_BOTTOM_UP;
+      flags = (template->bind & PIPE_BIND_SCANOUT)
+                 ? 0
+                 : DRM_TEGRA_GEM_CREATE_BOTTOM_UP;
    }
 
    if (template->target != PIPE_BUFFER) {
@@ -259,7 +264,8 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
     * textures can be sampled later, so allocate a native NPOT-compatible
     * stride rather than the framebuffer-only 32-byte alignment.
     */
-   if (template->target != PIPE_BUFFER && (template->bind & PIPE_BIND_SAMPLER_VIEW))
+   if (template->target != PIPE_BUFFER &&
+       (template->bind & PIPE_BIND_SAMPLER_VIEW))
       resource->pitch = align(resource->pitch, 64);
 
    size = resource->pitch * height;
@@ -444,12 +450,9 @@ pack_color(enum pipe_format format, const float *rgba)
 }
 
 static void
-fill(struct grate_stream *stream, uint32_t **ptrp,
-           struct grate_resource *dst,
-           unsigned base_offset, unsigned pitch,
-           uint32_t fill_value, int blocksize,
-           unsigned dstx, unsigned dsty,
-           unsigned width, unsigned height)
+fill(struct grate_stream *stream, uint32_t **ptrp, struct grate_resource *dst,
+     unsigned base_offset, unsigned pitch, uint32_t fill_value, int blocksize,
+     unsigned dstx, unsigned dsty, unsigned width, unsigned height)
 {
    uint32_t value;
    uint32_t *ptr = *ptrp;
@@ -481,8 +484,9 @@ fill(struct grate_stream *stream, uint32_t **ptrp,
    GRATE_PUSHBUF_WORD(ptr, 0x000000cc);      /* 0x020 - ropfade */
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x2b, 0x09));
-   grate_stream_push_reloc(stream, &ptr, dst->bo, base_offset);/* 0x02b - dstba */
-   GRATE_PUSHBUF_WORD(ptr, pitch);           /* 0x02e - dstst */
+   grate_stream_push_reloc(stream, &ptr, dst->bo,
+                           base_offset); /* 0x02b - dstba */
+   GRATE_PUSHBUF_WORD(ptr, pitch);       /* 0x02e - dstst */
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x35, 1));
 
@@ -498,15 +502,16 @@ fill(struct grate_stream *stream, uint32_t **ptrp,
    *ptrp = ptr;
 }
 
-/* Clears a depth/stencil surface. The emulated Z24 formats are two planes (Z16NL depth, S8 stencil), each filled on its
- * own, so clearing only one of them leaves the other alone; every other format is one fill of the packed value.
- * clear_flags is PIPE_CLEAR_DEPTH and/or PIPE_CLEAR_STENCIL.
+/* Clears a depth/stencil surface. The emulated Z24 formats are two planes
+ * (Z16NL depth, S8 stencil), each filled on its own, so clearing only one of
+ * them leaves the other alone; every other format is one fill of the packed
+ * value. clear_flags is PIPE_CLEAR_DEPTH and/or PIPE_CLEAR_STENCIL.
  */
 static void
 clear_zs(struct grate_stream *stream, uint32_t **ptrp,
          struct grate_resource *res, enum pipe_format format,
-         unsigned clear_flags, double depth, unsigned stencil,
-         unsigned x, unsigned y, unsigned width, unsigned height)
+         unsigned clear_flags, double depth, unsigned stencil, unsigned x,
+         unsigned y, unsigned width, unsigned height)
 {
    if (!grate_format_is_emulated_z24(format)) {
       fill(stream, ptrp, res, 0, res->pitch,
@@ -516,10 +521,12 @@ clear_zs(struct grate_stream *stream, uint32_t **ptrp,
    }
 
    if (clear_flags & PIPE_CLEAR_DEPTH)
-      fill(stream, ptrp, res, 0, res->pitch, grate_pack_z16nl(depth), 2, x, y, width, height);
+      fill(stream, ptrp, res, 0, res->pitch, grate_pack_z16nl(depth), 2, x, y,
+           width, height);
 
    if ((clear_flags & PIPE_CLEAR_STENCIL) && res->stencil_offset)
-      fill(stream, ptrp, res, res->stencil_offset, res->stencil_pitch, stencil & 0xff, 1, x, y, width, height);
+      fill(stream, ptrp, res, res->stencil_offset, res->stencil_pitch,
+           stencil & 0xff, 1, x, y, width, height);
 }
 
 static void
@@ -549,21 +556,21 @@ grate_clear(struct pipe_context *pcontext, unsigned int buffers,
       int i;
       for (i = 0; i < fb->nr_cbufs; ++i) {
          struct pipe_surface *dst = &fb->cbufs[i];
-         fill(stream, &ptr, 
-                  grate_resource(dst->texture),
-                  0, grate_resource(dst->texture)->pitch,
-                  pack_color(dst->format, color->f),
-                  util_format_get_blocksize(dst->format),
-                  0, 0, fb->width, fb->height);
+         fill(stream, &ptr, grate_resource(dst->texture), 0,
+              grate_resource(dst->texture)->pitch,
+              pack_color(dst->format, color->f),
+              util_format_get_blocksize(dst->format), 0, 0, fb->width,
+              fb->height);
       }
    }
 
    if (buffers & PIPE_CLEAR_DEPTH || buffers & PIPE_CLEAR_STENCIL) {
       if (fb->zsbuf.texture) {
-         /* TODO: handle the case where both are not set! (done for the Z24 formats, which have separate planes) */
-         clear_zs(stream, &ptr, grate_resource(fb->zsbuf.texture), fb->zsbuf.format,
-                  buffers & PIPE_CLEAR_DEPTHSTENCIL, depth, stencil,
-                  0, 0, fb->width, fb->height);
+         /* TODO: handle the case where both are not set! (done for the Z24
+          * formats, which have separate planes) */
+         clear_zs(stream, &ptr, grate_resource(fb->zsbuf.texture),
+                  fb->zsbuf.format, buffers & PIPE_CLEAR_DEPTHSTENCIL, depth,
+                  stencil, 0, 0, fb->width, fb->height);
       }
    }
    
@@ -590,14 +597,12 @@ grate_clear_render_target(struct pipe_context *pipe,
       grate_loge("grate_stream_begin() failed: %d\n", err);
       return;
    }
-   
-   fill(&context->gr2d->stream, &ptr,
-        grate_resource(dst->texture),
-        0, grate_resource(dst->texture)->pitch,
+
+   fill(&context->gr2d->stream, &ptr, grate_resource(dst->texture), 0,
+        grate_resource(dst->texture)->pitch,
         pack_color(dst->format, color->f),
-        util_format_get_blocksize(dst->format),
-        dstx, dsty, width, height);
-   
+        util_format_get_blocksize(dst->format), dstx, dsty, width, height);
+
    grate_stream_end(stream, &ptr);
    grate_stream_flush(stream, true);
 }
@@ -623,10 +628,11 @@ grate_clear_depth_stencil(struct pipe_context *pipe,
       grate_loge("grate_stream_begin() failed: %d\n", err);
       return;
    }
-   
-   clear_zs(&context->gr2d->stream, &ptr, grate_resource(dst->texture), dst->format,
-            clear_flags, depth, stencil, dstx, dsty, width, height);
-   
+
+   clear_zs(&context->gr2d->stream, &ptr, grate_resource(dst->texture),
+            dst->format, clear_flags, depth, stencil, dstx, dsty, width,
+            height);
+
    grate_stream_end(stream, &ptr);
    grate_stream_flush(stream, true);
 }

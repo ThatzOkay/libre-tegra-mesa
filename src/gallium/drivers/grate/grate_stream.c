@@ -71,7 +71,7 @@ grate_stream_create(struct grate_device *drm,
    stream->status    = GRATE_STREAM_FREE;
    stream->channel   = channel;
    stream->num_words = words_num;
-   
+
    ret = drm_tegra_syncpoint_new(stream->channel, &stream->syncpt);
    if (ret < 0) {
       fprintf(stderr, "%s: drm_tegra_syncpoint_new() failed %d\n", __func__, ret);

@@ -251,7 +251,7 @@ grate_screen_init_caps(struct grate_screen *screen)
    caps->glsl_feature_level =
    caps->glsl_feature_level_compatibility = 120; // no clue
    caps->essl_feature_level = 100; // no clue
-   caps->constant_buffer_offset_alignment = 4; // DWORD aligned, can do pure data GATHER 
+   caps->constant_buffer_offset_alignment = 4; // DWORD aligned, can do pure data GATHER
    /* gr2d blits currently copy bytes without format conversion. */
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_DEFAULT;
    caps->vendor_id = 0x10de;
@@ -390,8 +390,10 @@ grate_screen_is_format_supported(struct pipe_screen *pscreen,
    if (target != PIPE_BUFFER && grate_pixel_format(format) < 0)
       return false;
 
-   /* The emulated Z24 formats are Z16NL (+ S8) underneath: no sampling, because a shader would have to decode Z16NL. */
-   if (grate_format_is_emulated_z24(format) && (usage & PIPE_BIND_SAMPLER_VIEW))
+   /* The emulated Z24 formats are Z16NL (+ S8) underneath: no sampling,
+    * because a shader would have to decode Z16NL. */
+   if (grate_format_is_emulated_z24(format) &&
+       (usage & PIPE_BIND_SAMPLER_VIEW))
       return false;
 
    /* RGBA storage is needed for sampler uploads.  Advertising it as a render

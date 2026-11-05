@@ -10,9 +10,11 @@ struct grate_resource {
    unsigned int pitch;
    unsigned int tiled : 1;
    unsigned int format : 5;
-   /* Z24 depth/stencil formats: the GPU has no 24-bit depth. The depth plane is 16-bit non-linear (Z16NL, 2 bytes per
-    * pixel, rows `pitch` apart); a stencil format adds an 8-bit plane after it (stencil_offset bytes from the start of
-    * the buffer, rows `stencil_pitch` apart), which the GPU binds as its own surface. Both are 0 for every other format.
+   /* Z24 depth/stencil formats: the GPU has no 24-bit depth. The depth plane
+    * is 16-bit non-linear (Z16NL, 2 bytes per pixel, rows `pitch` apart); a
+    * stencil format adds an 8-bit plane after it (stencil_offset bytes from
+    * the start of the buffer, rows `stencil_pitch` apart), which the GPU
+    * binds as its own surface. Both are 0 for every other format.
     */
    unsigned int stencil_offset;
    unsigned int stencil_pitch;
@@ -27,13 +29,12 @@ grate_resource(struct pipe_resource *resource)
 int
 grate_pixel_format(enum pipe_format format);
 
-/* A 24-bit depth format that is stored as Z16NL (+ a separate S8 plane when it has stencil). */
-bool
-grate_format_is_emulated_z24(enum pipe_format format);
+/* A 24-bit depth format that is stored as Z16NL (+ a separate S8 plane when
+ * it has stencil). */
+bool grate_format_is_emulated_z24(enum pipe_format format);
 
 /* The 16-bit value Z16NL stores for a depth in [0, 1]. */
-uint16_t
-grate_pack_z16nl(double depth);
+uint16_t grate_pack_z16nl(double depth);
 
 void
 grate_context_resource_init(struct pipe_context *pcontext);

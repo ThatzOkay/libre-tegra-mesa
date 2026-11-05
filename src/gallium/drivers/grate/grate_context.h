@@ -14,7 +14,8 @@
 
 #include "fp/blend.h"
 
-/* Hardware surface slot of the stencil plane (slot 0 is depth, colour output i is slot i + 1). */
+/* Hardware surface slot of the stencil plane (slot 0 is depth, colour output
+ * i is slot i + 1). */
 #define GRATE_STENCIL_SLOT 2
 
 struct grate_framebuffer_state {
@@ -24,7 +25,8 @@ struct grate_framebuffer_state {
    uint32_t rt_params[REG_TGR3D_GLOBAL_SURFDESC_LENGTH];
    uint32_t rt_offsets[REG_TGR3D_GLOBAL_SURFDESC_LENGTH];
    uint32_t rt_mask;
-   /* The bound depth buffer has a stencil plane, bound as surface STENCIL_SLOT. */
+   /* The bound depth buffer has a stencil plane, bound as surface
+    * STENCIL_SLOT. */
    bool has_stencil;
 };
 
