@@ -48,6 +48,9 @@ struct grate_fp_info {
       float immediate;
    } constants[32];
    unsigned num_constants;
+   /* Register rows (groups of four registers R4k..R4k+3) the program needs,
+    * 1 to 4: GLOBAL_PIX_ATTR.NUM_ROWS + 1. Set by grate_tgsi_to_fp(). */
+   unsigned num_rows;
 };
 
 #define GRATE_FP_MAX_IMMEDIATES 32
@@ -64,10 +67,10 @@ struct grate_fp_shader {
    uint8_t reusable[72];
    bool late_rows;
    bool texture_rows;
+   /* the value being allocated lives across an SFU op, which needs rows R0-R3
+    * for its operand and result: keep it out of them */
+   bool avoid_rows;
    bool allocation_failed;
-   /* a value lives in a global register (16-23): only valid while the
-    * sequencer has few pixels in flight, see grate_compile_fs() */
-   bool uses_globals;
    float immediates[GRATE_FP_MAX_IMMEDIATES][4];
    unsigned num_immediates;
    struct list_head fp_instructions;

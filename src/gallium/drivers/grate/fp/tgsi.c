@@ -81,7 +81,6 @@ allocate_in_pool(struct grate_fp_shader *fp, const unsigned *regs,
 
             fp->occupied[reg] |= mask;
             fp->claimed[reg] |= mask;
-            fp->uses_globals |= reg >= 16 && reg < 24;
             return fx10 ? (reg | TEMP_FX10 | (half ? TEMP_HIGH : 0)) : reg;
          }
       }
@@ -92,12 +91,14 @@ allocate_in_pool(struct grate_fp_shader *fp, const unsigned *regs,
 /* Comparison results have their own boolean bank. Sampled UNORM colours
  * retain their exact FX10 representation through MOV/CMP, while arithmetic
  * uses FP20. R0-R3 become available after the last interpolation/TEX fetch.
- * A program that ends up using a global register is compiled to run with
- * four pixels in flight (see fp->uses_globals). */
+ * R4-R11 (rows 1 to 2 of the register file) hold a value for as long as it
+ * is wanted, whatever the fetches and interpolations do, like in the
+ * programs of NVIDIA's compiler: the program tells the hardware how many
+ * rows it uses (GLOBAL_PIX_ATTR.NUM_ROWS, see grate_compile_fs()). */
 static int
 allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
 {
-   static const unsigned globals[] = {16, 17, 18, 19, 20, 21, 22, 23};
+   static const unsigned overflow[] = {4, 5, 6, 7, 8, 9, 10, 11};
    static const unsigned rows[] = {0, 1, 2, 3};
    static const unsigned banks[] = {64, 65, 66, 67, 68, 69, 70, 71};
    int loc;
@@ -113,12 +114,12 @@ allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
    } else {
       bool fx10 = kind == 1;
 
-      if (fp->late_rows) {
+      if (fp->late_rows && !fp->avoid_rows) {
          loc = allocate_in_pool(fp, rows, ARRAY_SIZE(rows), fx10);
          if (loc >= 0)
             return loc;
       }
-      loc = allocate_in_pool(fp, globals, ARRAY_SIZE(globals), fx10);
+      loc = allocate_in_pool(fp, overflow, ARRAY_SIZE(overflow), fx10);
       if (loc >= 0)
          return loc;
    }
@@ -130,19 +131,18 @@ allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
    return 31;
 }
 
-/* Only R0-R3 keep a value from one instruction to the next while many
- * pixels are in flight (measured on the Tegra 3: a value parked in R4 and
- * up, or in the global registers, is shared by the pixels of a lane; see
- * docs/grate-fragment-registers.md). A fetch is a TEX and also the
- * interpolation of a varying, so a value that is alive across either has to
- * live in a row. Rows are overwritten by every interpolation (R<k> for each
+/* A fetch is a TEX and also the interpolation of a varying. A value that is
+ * alive across either lives in a register that neither overwrites: R4-R11
+ * (see allocate_scalar()), or, to keep the program in fewer register rows,
+ * one of R0-R3 that nothing overwrites while the value is wanted. Rows
+ * are overwritten by every interpolation (R<k> for each
  * interpolated channel k) and, once the instruction is done reading its
  * operands, by the texture fetch (R2/R3, plus R0/R1 when the coordinate is
  * staged); `clobber` applies to every value alive when the instruction
  * starts, `clobber_after` only to those that outlive it. Pick a row (a whole
  * row for an FP20 value, one half of it for an FX10 value) for the value
  * (temp, comp) born at instruction n that nothing overwrites while the value
- * is still wanted.
+ * is still wanted. Returns -1 when there is none.
  */
 static int
 allocate_coordinate_row(struct grate_fp_shader *fp, const uint8_t *clobber,
@@ -195,11 +195,27 @@ allocate_coordinate_row(struct grate_fp_shader *fp, const uint8_t *clobber,
          }
       }
    }
-   if (!fp->allocation_failed)
-      fprintf(stderr, "GRATE FRAG: no row register survives to the texture "
-                      "fetch (spilling unsupported)\n");
-   fp->allocation_failed = true;
-   return 31;
+   return -1;
+}
+
+/* The register for the value (temp, comp) of kind `kind` born at
+ * instruction n: if the value outlives a fetch or an interpolation, a row
+ * that survives it when there is one, else any register of the pool. */
+static int
+across_fetch(struct grate_fp_shader *fp, const uint8_t *clobber,
+             const uint8_t *clobber_after,
+             uint8_t (*live_after)[GRATE_FP_MAX_TEMPS], unsigned count,
+             unsigned n, unsigned temp, unsigned comp, unsigned kind,
+             bool is_tex, bool crosses)
+{
+   if (crosses && kind != 2 && !fp->avoid_rows) {
+      int loc = allocate_coordinate_row(fp, clobber, clobber_after,
+                                        live_after, count, n, temp, comp,
+                                        kind == 1, is_tex);
+      if (loc >= 0)
+         return loc;
+   }
+   return allocate_scalar(fp, kind);
 }
 
 static struct fp_alu_dst_operand
@@ -363,31 +379,6 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       src->SwizzleW == TGSI_SWIZZLE_W;
    for (unsigned c = 0; direct_pack && c < 4; c++)
       direct_pack = fp->temp_src[src->Index][c] == (int)c;
-   if (direct_pack)
-      output_stage = false;
-   /* The output stage computes each channel into a scratch global first.
-    * Take globals that no live temporary occupies (occupied also holds this
-    * instruction's own sources), so a scratch write cannot destroy a value
-    * that a later channel or instruction still reads.
-    */
-   unsigned scratch[4] = {16, 17, 18, 19};
-   if (output_stage) {
-      unsigned reg = 16;
-      for (unsigned c = 0; c < 4; c++) {
-         if (!(dst->WriteMask & (1 << c)))
-            continue;
-         while (reg < 24 && fp->occupied[reg])
-            reg++;
-         if (reg == 24) {
-            if (!fp->allocation_failed)
-               fprintf(stderr, "GRATE FRAG: scalar register bank exhausted "
-                               "(spilling unsupported)\n");
-            fp->allocation_failed = true;
-            break;
-         }
-         scratch[c] = reg++;
-      }
-   }
    struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
    int alu_instrs = 0;
    list_inithead(&alu->link);
@@ -441,11 +432,6 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       default:
          break;
       }
-      if (output_stage) {
-         op.dst.index = scratch[i];
-         op.dst.write_low_sub_reg = true;
-         op.dst.write_high_sub_reg = true;
-      }
       alu->slots[alu_instrs++] = op;
    }
    inst->alu_sched.num_instructions = 1;
@@ -468,25 +454,6 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
    }
 
    list_addtail(&alu->link, &fp->alu_instructions);
-   if (output_stage) {
-      struct fp_alu_instr_packet *nop = CALLOC_STRUCT(fp_alu_instr_packet);
-      struct fp_alu_instr_packet *store = CALLOC_STRUCT(fp_alu_instr_packet);
-      list_inithead(&nop->link);
-      list_inithead(&store->link);
-      unsigned slot = 0;
-      for (unsigned c = 0; c < 4; c++) {
-         struct fp_alu_dst_operand discard = {.index = 31};
-         nop->slots[c] = fp_alu_sMOV(discard, fp_alu_src_zero());
-         if (!(dst->WriteMask & (1 << c)))
-            continue;
-         struct fp_alu_src_operand value = {.index = scratch[c]};
-         store->slots[slot++] =
-            fp_alu_sMOV(fp_alu_dst(fp, dst, c, saturate), value);
-      }
-      list_addtail(&nop->link, &fp->alu_instructions);
-      list_addtail(&store->link, &fp->alu_instructions);
-      inst->alu_sched.num_instructions = 3;
-   }
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
@@ -615,11 +582,13 @@ emit_load_scalar(struct grate_fp_shader *fp,
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
-/* An MFU instruction of its own: run the SFU op on the ALU register reg and
- * write its result times factor into the rows out_row[0] and out_row[1]. */
+/* One SFU step. The SFU reads the row register `reg` (R0-R3 only) and
+ * writes its result back into it, before the ALU of the same step runs, so
+ * `alu` (if any) sees the result in `reg`. The multipliers are not used:
+ * all-zero multiplier fields are what NVIDIA's programs have. */
 static void
-emit_sfu_stage(struct grate_fp_shader *fp, enum fp_sfu_op op, unsigned reg,
-               const int out_row[2], enum fp_mfu_mul_src factor)
+emit_sfu_step(struct grate_fp_shader *fp, enum fp_sfu_op op, unsigned reg,
+              struct fp_alu_instr_packet *alu)
 {
    struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
    list_inithead(&inst->link);
@@ -627,51 +596,40 @@ emit_sfu_stage(struct grate_fp_shader *fp, enum fp_sfu_op op, unsigned reg,
    list_inithead(&mfu->link);
    mfu->sfu.op = op;
    mfu->sfu.reg = reg;
-   for (unsigned m = 0; m < 2; m++) {
-      mfu->mul[m].dst = FP_MFU_MUL_DST_ROW_REG_0 + out_row[m];
-      mfu->mul[m].src[0] = FP_MFU_MUL_SRC_SFU_RESULT;
-      mfu->mul[m].src[1] = factor;
-   }
    inst->mfu_sched.num_instructions = 1;
    inst->mfu_sched.address = list_length(&fp->mfu_instructions);
    list_addtail(&mfu->link, &fp->mfu_instructions);
+   if (alu) {
+      inst->alu_sched.num_instructions = 1;
+      inst->alu_sched.address = list_length(&fp->alu_instructions);
+      list_addtail(&alu->link, &fp->alu_instructions);
+   }
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
-/* RCP, RSQ, SQRT, LG2, EX2 and POW of computed scalars (spikes S5 and S6,
- * tools/gpu/grate-sfu-test.c): the SFU reads any ALU register, but it
- * returns its result only through the two MFU multipliers, which can write
- * the row registers R0-R3 only. The SFU is an MFU instruction, which like an
- * interpolation is a boundary after which only R0-R3 still hold a pixel's
- * value, so the operand goes through a free row too (a global is only safe
- * in a program without a fetch). So: copy the operand into a free row (this
- * also converts FX10 to FP20), run the op in an MFU instruction of its own
- * with the result going straight into the destination if that is a row, else
- * into a second free row followed by a copy.
- *
- * Measured on the tablet: RCP, RSQ, SQRT and LG2 are one SFU op. EX2 needs
- * PREEX2 first, which builds 2^floor(v) * (1 + frac(v)); the EX2 after it
- * reads the row PREEX2 wrote and corrects the mantissa to 2^frac(v). POW is
- * EX2(y * LG2(x)): the multiplier of the LG2 stage takes y from a row of its
- * own as its second factor. */
+/* RCP, RSQ, SQRT, LG2, EX2 and POW of computed scalars, the way NVIDIA's
+ * compiler does them (decoded from its output for division, sqrt, rsqrt,
+ * exp2, log2 and pow, see docs/grate-register-bug-handoff.md): the SFU op
+ * runs on a row register R0-R3 and replaces its value in place, one op per
+ * step, and the ALU of the same step reads the result from that register.
+ * So: copy the operand into a free row (this also converts FX10 to FP20),
+ * run the op, and store the register into the destination in the same
+ * step. EX2 is PREEX2 in one step, which builds 2^floor(v) * (1 + frac(v)),
+ * and EX2 in the next, which corrects the mantissa to 2^frac(v). POW is
+ * LG2, an ALU multiply by the exponent in the same step, PREEX2, EX2. The
+ * SFU reads R0-R3 only (measured: R4 to R15 as its operand return nothing
+ * useful), so the allocator keeps values that live across an SFU op out of
+ * the rows (fp->avoid_rows). */
 static void
 emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
 {
    unsigned opcode = tgsi->Instruction.Opcode;
    bool is_pow = opcode == TGSI_OPCODE_POW;
-   bool saturate = tgsi->Instruction.Saturate != 0;
    const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
    const struct tgsi_src_register *src = &tgsi->Src[0].Register;
    const struct tgsi_src_register *src_y =
       is_pow ? &tgsi->Src[1].Register : NULL;
    unsigned comp = src->SwizzleX;
-   unsigned first = 0;
-   for (; first < 4 && !(dst->WriteMask & (1 << first)); first++)
-      ;
-   assert(first < 4);
-   int dst_loc =
-      dst->File == TGSI_FILE_TEMPORARY ? fp->temp_dst[dst->Index][first] : -1;
-   bool dst_is_row = dst_loc >= 0 && dst_loc < 4;
 
    /* Free rows: not holding a value that is still wanted (the destination
     * has been claimed already, so it is not among them). */
@@ -682,43 +640,18 @@ emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
          free_rows[num_free++] = reg;
    }
 
-   /* POW: the row that holds the exponent for the multiplier */
-   int y_row = -1;
-   if (is_pow && num_free) {
-      y_row = free_rows[0];
-      for (unsigned i = 1; i < num_free; i++)
-         free_rows[i - 1] = free_rows[i];
-      num_free--;
-   }
-
-   /* the operand's row, and where the multipliers write */
+   /* POW: the row that holds the exponent for the multiplication */
    int in_reg = num_free ? free_rows[0] : -1;
-   if (in_reg >= 0 && is_pow && src_y->File == TGSI_FILE_INPUT &&
-       in_reg == (int)src_y->SwizzleX) {
-      /* the exponent's interpolation would overwrite the base */
-      in_reg = -1;
-   }
-   if (in_reg < 0) {
-      /* no free row: a global works in a program without a fetch */
-      for (unsigned reg = 16; reg < 24; reg++) {
-         if (!fp->occupied[reg]) {
-            in_reg = reg;
-            fp->uses_globals = true;
-            break;
-         }
+   int y_row = -1;
+   if (is_pow && num_free > 1) {
+      y_row = free_rows[1];
+      if (src_y->File == TGSI_FILE_INPUT && in_reg == (int)src_y->SwizzleX) {
+         /* the exponent's interpolation would overwrite the base */
+         in_reg = free_rows[1];
+         y_row = free_rows[0];
       }
    }
-   int out_row[2] = {-1, -1};
-   if (dst_is_row) {
-      out_row[0] = dst_loc;
-      out_row[1] = in_reg >= 0 && in_reg < 4 ? in_reg : dst_loc;
-   } else {
-      unsigned used = in_reg >= 0 && in_reg < 4 ? 1 : 0;
-      out_row[0] = num_free > used ? free_rows[used] : in_reg;
-      out_row[1] = out_row[0];
-   }
-   if (in_reg < 0 || out_row[0] < 0 || out_row[0] >= 4 ||
-       (is_pow && y_row < 0)) {
+   if (in_reg < 0 || (is_pow && y_row < 0)) {
       if (!fp->allocation_failed)
          fprintf(stderr, "GRATE FRAG: no free register for the SFU op "
                          "(spilling unsupported)\n");
@@ -726,74 +659,69 @@ emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
       return;
    }
 
-   /* A: operands -> in_reg (and y_row) */
+   /* the operands go into rows */
    emit_load_scalar(fp, src, comp, in_reg, opcode == TGSI_OPCODE_RSQ);
    if (is_pow)
       emit_load_scalar(fp, src_y, src_y->SwizzleX, y_row, false);
 
-   /* B: out rows <- the op on in_reg */
-   switch (opcode) {
-   case TGSI_OPCODE_RCP:
-      emit_sfu_stage(fp, FP_SFU_OP_RCP, in_reg, out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      break;
-   case TGSI_OPCODE_RSQ:
-      emit_sfu_stage(fp, FP_SFU_OP_RSQ, in_reg, out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      break;
-   case TGSI_OPCODE_SQRT:
-      emit_sfu_stage(fp, FP_SFU_OP_SQRT, in_reg, out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      break;
-   case TGSI_OPCODE_LG2:
-      emit_sfu_stage(fp, FP_SFU_OP_LG2, in_reg, out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      break;
-   case TGSI_OPCODE_EX2:
-      emit_sfu_stage(fp, FP_SFU_OP_PREEX2, in_reg, out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      emit_sfu_stage(fp, FP_SFU_OP_EX2, out_row[0], out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      break;
-   case TGSI_OPCODE_POW:
-      emit_sfu_stage(fp, FP_SFU_OP_LG2, in_reg, out_row,
-                     FP_MFU_MUL_SRC_ROW_REG_0 + y_row);
-      emit_sfu_stage(fp, FP_SFU_OP_PREEX2, out_row[0], out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      emit_sfu_stage(fp, FP_SFU_OP_EX2, out_row[0], out_row,
-                     FP_MFU_MUL_SRC_CONST_1);
-      break;
-   default:
-      UNREACHABLE("not an SFU opcode");
-   }
-
-   if (dst_is_row && dst->File == TGSI_FILE_TEMPORARY &&
-       dst->WriteMask == (1u << first) && !saturate)
-      return; /* the multiplier wrote the destination */
-
-   /* C: destination <- row */
-   struct fp_instr *c = CALLOC_STRUCT(fp_instr);
-   list_inithead(&c->link);
+   /* the store of the result into the destination, in the last step */
    struct fp_alu_instr_packet *store = CALLOC_STRUCT(fp_alu_instr_packet);
    list_inithead(&store->link);
    unsigned slot = 0;
    for (unsigned i = 0; i < 4; i++) {
       if (!(dst->WriteMask & (1 << i)))
          continue;
-      struct fp_alu_src_operand r = fp_alu_src_row(out_row[0]);
+      struct fp_alu_src_operand r = fp_alu_src_row(in_reg);
       r.datatype = FP_DATATYPE_FP20;
       store->slots[slot++] =
          fp_alu_sMOV(fp_alu_dst(fp, dst, i, tgsi->Instruction.Saturate), r);
    }
-   c->alu_sched.address = list_length(&fp->alu_instructions);
-   c->alu_sched.num_instructions = 1;
-   list_addtail(&store->link, &fp->alu_instructions);
-   if (dst->File == TGSI_FILE_OUTPUT) {
-      c->dw.enable = true;
-      c->dw.index = dst->Index + 1;
-      c->dw.src_regs = FP_DW_REGS_R2_R3;
+
+   switch (opcode) {
+   case TGSI_OPCODE_RCP:
+      emit_sfu_step(fp, FP_SFU_OP_RCP, in_reg, store);
+      break;
+   case TGSI_OPCODE_RSQ:
+      emit_sfu_step(fp, FP_SFU_OP_RSQ, in_reg, store);
+      break;
+   case TGSI_OPCODE_SQRT:
+      emit_sfu_step(fp, FP_SFU_OP_SQRT, in_reg, store);
+      break;
+   case TGSI_OPCODE_LG2:
+      emit_sfu_step(fp, FP_SFU_OP_LG2, in_reg, store);
+      break;
+   case TGSI_OPCODE_EX2:
+      emit_sfu_step(fp, FP_SFU_OP_PREEX2, in_reg, NULL);
+      emit_sfu_step(fp, FP_SFU_OP_EX2, in_reg, store);
+      break;
+   case TGSI_OPCODE_POW: {
+      struct fp_alu_instr_packet *scale = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&scale->link);
+      struct fp_alu_dst_operand r = {.index = in_reg,
+                                     .write_low_sub_reg = true,
+                                     .write_high_sub_reg = true};
+      struct fp_alu_src_operand x = fp_alu_src_row(in_reg);
+      x.datatype = FP_DATATYPE_FP20;
+      scale->slots[0] = fp_alu_sMOV(r, x);
+      scale->slots[0].src[1] = fp_alu_src_row(y_row);
+      scale->slots[0].src[1].datatype = FP_DATATYPE_FP20;
+      emit_sfu_step(fp, FP_SFU_OP_LG2, in_reg, scale);
+      emit_sfu_step(fp, FP_SFU_OP_PREEX2, in_reg, NULL);
+      emit_sfu_step(fp, FP_SFU_OP_EX2, in_reg, store);
+      break;
    }
-   list_addtail(&c->link, &fp->fp_instructions);
+   default:
+      UNREACHABLE("not an SFU opcode");
+   }
+
+   /* the output write goes with the step that stores the colour */
+   if (dst->File == TGSI_FILE_OUTPUT) {
+      struct fp_instr *last =
+         list_last_entry(&fp->fp_instructions, struct fp_instr, link);
+      last->dw.enable = true;
+      last->dw.index = dst->Index + 1;
+      last->dw.src_regs = FP_DW_REGS_R2_R3;
+   }
 }
 
 /* The component of src that TGSI component k reads. */
@@ -1544,7 +1472,6 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
    fp->num_immediates = 0;
    fp->num_temporaries = 0;
    fp->allocation_failed = false;
-   fp->uses_globals = false;
    memset(fp->occupied, 0, sizeof(fp->occupied));
    memset(fp->temp_src, -1, sizeof(fp->temp_src));
    memset(fp->temp_dst, -1, sizeof(fp->temp_dst));
@@ -1756,14 +1683,28 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                if (packed)
                   kind = 1;
             }
+            fp->avoid_rows = false;
+            for (unsigned m = n + 1; m < count && !fp->avoid_rows; m++) {
+               switch (code[m].Instruction.Opcode) {
+               case TGSI_OPCODE_RCP:
+               case TGSI_OPCODE_RSQ:
+               case TGSI_OPCODE_SQRT:
+               case TGSI_OPCODE_LG2:
+               case TGSI_OPCODE_EX2:
+               case TGSI_OPCODE_POW:
+                  fp->avoid_rows =
+                     live_after[m + 1][dst->Index] & (1 << c);
+                  break;
+               default:
+                  break;
+               }
+            }
             memset(fp->reusable, 0, sizeof(fp->reusable));
             bool simple = inst->Instruction.Opcode != TGSI_OPCODE_TEX;
             for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++)
                simple &= inst->Src[src].Register.File != TGSI_FILE_INPUT;
             if (simple) {
-               for (unsigned reg = 0; reg < 24; reg++) {
-                  if (reg >= 4 && reg < 16)
-                     continue;
+               for (unsigned reg = 0; reg < 12; reg++) {
                   unsigned needed = 0;
                   for (unsigned t = 0; t < fp->num_temporaries; t++)
                      for (unsigned k = 0; k < 4; k++) {
@@ -1810,12 +1751,11 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                (live_after[n + 1][dst->Index] & (1 << c))
                   ? (fp->texture_rows
                         ? (2 + c / 2) | TEMP_FX10 | (c % 2 ? TEMP_HIGH : 0)
-                     : (int)n < row_limit && kind != 2
-                        ? allocate_coordinate_row(
+                        : across_fetch(
                              fp, clobber, clobber_after, live_after, count, n,
-                             dst->Index, c, kind == 1,
-                             inst->Instruction.Opcode == TGSI_OPCODE_TEX)
-                        : allocate_scalar(fp, kind))
+                             dst->Index, c, kind,
+                             inst->Instruction.Opcode == TGSI_OPCODE_TEX,
+                             (int)n < row_limit))
                   : 31;
          }
       }
