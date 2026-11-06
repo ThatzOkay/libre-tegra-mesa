@@ -365,6 +365,11 @@ grate_draw_vbo(struct pipe_context *pcontext,
    if (!indirect && (!draws[0].count || !info->instance_count))
       return;
 
+   /* A shader that failed to compile is never created, so the state tracker
+    * binds none. Skip the draw instead of dereferencing it. */
+   if (!context->vshader || !context->fshader)
+      return;
+
    if (context->blend_dual && !context->dual_pass) {
       grate_draw_dual(pcontext, info, drawid_offset, indirect, draws,
                       num_draws);
