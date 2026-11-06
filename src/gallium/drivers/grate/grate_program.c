@@ -174,17 +174,23 @@ grate_delete_vs_state(struct pipe_context *pcontext, void *so)
 /**
  * Keep the application shader intact and append the blend stage for key
  * (see fp/blend.c). The stage is one more sequencer instruction, which
- * reads the destination pixel into R0/R1, and its ALU packets.
+ * reads the destination pixel into R0/R1, and its ALU packets. With more
+ * than one register row the program is a whole number of rounds long and the
+ * rows of a step are those of its index modulo `rows`: the stage becomes the
+ * first step of one more round (it reads the destination into the row 0
+ * registers and the output write on it reads R2/R3 of row 0), followed by
+ * empty steps to the end of that round.
  */
 static bool
 create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
-                  unsigned alu_count, uint32_t key,
+                  unsigned alu_count, unsigned rows, uint32_t key,
                   struct grate_shader_blob *output)
 {
    uint32_t blend_words[GRATE_FP_BLEND_MAX_PACKETS * 8];
    unsigned packets = grate_fp_blend_alu(key, blend_words);
 
-   if (!packets || fp_count >= 63 || alu_count + packets > 64)
+   if (!packets || fp_count + rows > 63 || alu_count + packets > 64 ||
+       fp_count % rows)
       return false;
    struct util_dynarray result;
    util_dynarray_init(&result, NULL);
@@ -209,32 +215,32 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
       if (opcode == 1 && reg == REG_TGR3D_PSEQ_COMMAND_EVEN(0) &&
           count == 1) {
          BLEND_PUSH(command);
-         BLEND_PUSH(0x20006000 | (fp_count + 1));
+         BLEND_PUSH(0x20006000 | (fp_count + rows));
          continue;
       }
       if (opcode == 1 && reg == REG_TGR3D_PSEQ_DWR_IF_STATE && count == 1) {
          BLEND_PUSH(command);
-         BLEND_PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(fp_count + 1));
+         BLEND_PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(fp_count + rows));
          continue;
       }
       unsigned extra = 0, last = 0, bit = 0;
       if (opcode == 2) {
          switch (reg) {
          case REG_TGR3D_PSEQ_INST_DATA:
-            extra = 1;
+            extra = rows;
             last = 0x00810008;
             bit = 1;
             break;
          case REG_TGR3D_AT_REMAP_DATA:
-            extra = 1;
+            extra = rows;
             bit = 2;
             break;
          case REG_TGR3D_TEX_INST_DATA:
-            extra = 1;
+            extra = rows;
             bit = 4;
             break;
          case REG_TGR3D_ALU_REMAP_DATA:
-            extra = 1;
+            extra = rows;
             last = (alu_count << 2) | packets;
             bit = 8;
             break;
@@ -243,11 +249,11 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
             bit = 16;
             break;
          case REG_TGR3D_ALU_P2CX_DATA:
-            extra = 1;
+            extra = rows;
             bit = 32;
             break;
          case REG_TGR3D_DW_INST_DATA:
-            extra = 1;
+            extra = rows;
             last = 0x00028005;
             bit = 64;
             break;
@@ -261,8 +267,12 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
       BLEND_PUSH((command & 0xffff0000) | (count + extra));
       for (unsigned j = 0; j < count; j++)
          BLEND_PUSH(bit == 64 ? 0 : values[j]);
-      for (unsigned j = 0; j < extra; j++)
-         BLEND_PUSH(bit == 16 ? blend_words[j] : last);
+      for (unsigned j = 0; j < extra; j++) {
+         if (bit == 16)
+            BLEND_PUSH(blend_words[j]);
+         else
+            BLEND_PUSH(j == 0 ? last : 0);
+      }
       if (bit == 1)
          BLEND_PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
    }
@@ -299,7 +309,8 @@ grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,
 
    variant->key = key;
    if (!create_blend_blob(&shader->blob, shader->num_fp_instrs,
-                          shader->num_alu_instrs, key, &variant->blob)) {
+                          shader->num_alu_instrs, shader->info.num_rows, key,
+                          &variant->blob)) {
       grate_loge("cannot build the blend variant for key 0x%08x "
                  "(fragment program too long for the blend stage?)\n",
                  key);
@@ -336,6 +347,148 @@ free_fragment_ir(struct grate_fp_shader *fp)
 }
 
 /**
+ * Lay the steps out for a program with more than one register row.
+ *
+ * The ALU packets name absolute registers, but the units around them work
+ * on the row `step % rows` (R0-R3 of that row are R(4k)..R(4k+3), k =
+ * step % rows): the interpolator writes it, the texture unit reads its
+ * coordinates from it and writes its result to R2/R3 of it, and the output
+ * write reads the colour from R0/R1 or R2/R3 of the row of the step that
+ * holds it. NVIDIA's programs also always start with ALU work, the program
+ * is a whole number of rounds long, and (measured on the tablet) these are
+ * all needed. So: put every step with an interpolation, an SFU op or a
+ * fetch on a multiple of `rows` (the row that our ALU code names R0-R3),
+ * with empty steps in between, pad the program to a multiple of `rows`,
+ * put the output write on the first step of the last round (it fires at the
+ * end of its round and reads R2/R3 of row 0 there) and give every round an
+ * ALU packet on its first step, which writes nothing if there is no other.
+ */
+static void
+align_to_rows(struct grate_fp_shader *fp)
+{
+   unsigned rows = fp->info.num_rows;
+
+   if (rows <= 1 || list_is_empty(&fp->fp_instructions))
+      return;
+
+   struct fp_dw_instr dw = {0};
+   list_for_each_entry(struct fp_instr, instr, &fp->fp_instructions, link) {
+      if (instr->dw.enable) {
+         dw = instr->dw;
+         memset(&instr->dw, 0, sizeof(instr->dw));
+      }
+   }
+
+   struct list_head steps;
+   list_inithead(&steps);
+   unsigned count = 0;
+   list_for_each_entry_safe(struct fp_instr, instr, &fp->fp_instructions,
+                            link) {
+      bool row_unit = instr->mfu_sched.num_instructions ||
+                      (instr->tex & (1 << 10));
+
+      list_del(&instr->link);
+      while (row_unit && count % rows) {
+         struct fp_instr *spacer = CALLOC_STRUCT(fp_instr);
+         list_inithead(&spacer->link);
+         list_addtail(&spacer->link, &steps);
+         count++;
+      }
+      list_addtail(&instr->link, &steps);
+      count++;
+   }
+   while (count % rows) {
+      struct fp_instr *spacer = CALLOC_STRUCT(fp_instr);
+      list_inithead(&spacer->link);
+      list_addtail(&spacer->link, &steps);
+      count++;
+   }
+   list_replace(&steps, &fp->fp_instructions);
+
+   /* The output write fires at the end of the round of the step it is on and
+    * reads R2/R3 of the row `step % rows`: the first step of the last round
+    * sees all the ALU work and reads row 0. */
+   unsigned index = 0;
+   list_for_each_entry(struct fp_instr, instr, &fp->fp_instructions, link) {
+      if (index == count - rows)
+         instr->dw = dw;
+      index++;
+   }
+
+   /* Rebuild the list of ALU packets, one run per step:
+    * - an ALU packet on a step that is not the first of its round runs only
+    *   when the first step of the round has an ALU packet too, so a round
+    *   that has none gets a packet that writes nothing;
+    * - a dependent ALU packet needs a packet in between (two packet
+    *   latency): between two steps of the same round there is none, so a
+    *   step whose successor in the round has ALU work ends with a packet
+    *   that writes nothing (a step change between rounds is enough). */
+   struct fp_alu_instr_packet **old =
+      CALLOC(list_length(&fp->alu_instructions) + 1, sizeof(*old));
+   unsigned num_old = 0;
+   list_for_each_entry(struct fp_alu_instr_packet, packet,
+                       &fp->alu_instructions, link)
+      old[num_old++] = packet;
+
+   struct list_head packets;
+   list_inithead(&packets);
+   unsigned address = 0, step = 0;
+   list_for_each_entry(struct fp_instr, instr, &fp->fp_instructions, link) {
+      unsigned first = instr->alu_sched.address;
+      unsigned num = instr->alu_sched.num_instructions;
+      struct fp_instr *next =
+         instr->link.next == &fp->fp_instructions
+            ? NULL
+            : list_entry(instr->link.next, struct fp_instr, link);
+      bool round_start = step % rows == 0;
+      bool next_in_round = next && (step + 1) % rows != 0;
+      bool next_has_alu = next && (next->alu_sched.num_instructions ||
+                                   next->mfu_sched.num_instructions ||
+                                   (next->tex & (1 << 10)));
+      unsigned nops_before = 0, nops_after = 0;
+
+      if (round_start && num == 0)
+         nops_before = 1;
+      if (next_in_round && next_has_alu && (num || nops_before))
+         nops_after = 1;
+      /* the next step is the first of a round: it needs nothing; if the
+       * next step is not a round start but has ALU work while this one has
+       * none, there is nothing to wait for either */
+
+      instr->alu_sched.address = address;
+      instr->alu_sched.num_instructions = num + nops_before + nops_after;
+      if (instr->alu_sched.num_instructions > 3) {
+         fp->allocation_failed = true;
+         fprintf(stderr, "GRATE FRAG: too many ALU packets in step %u of a "
+                         "multi-row program\n", step);
+      }
+      for (unsigned i = 0; i < nops_before + num + nops_after; i++) {
+         struct fp_alu_instr_packet *copy =
+            CALLOC_STRUCT(fp_alu_instr_packet);
+         list_inithead(&copy->link);
+         if (i >= nops_before && i < nops_before + num) {
+            *copy = *old[first + i - nops_before];
+            list_inithead(&copy->link);
+         } else {
+            for (unsigned slot = 0; slot < 4; slot++)
+               for (unsigned operand = 0; operand < 4; operand++)
+                  copy->slots[slot].src[operand].index = 31;
+         }
+         list_addtail(&copy->link, &packets);
+         address++;
+      }
+      step++;
+   }
+   list_for_each_entry_safe(struct fp_alu_instr_packet, packet,
+                            &fp->alu_instructions, link) {
+      list_del(&packet->link);
+      FREE(packet);
+   }
+   FREE(old);
+   list_replace(&packets, &fp->alu_instructions);
+}
+
+/**
  * Compiles the program of so->base.tokens, storing the output the mode asks
  * for, into so->blob and so->info.
  */
@@ -358,26 +511,45 @@ grate_compile_fs(struct grate_context *context,
       return false;
    }
 
+   /* Register rows: R0-R3 are row 1, R4-R7 row 2, and so on. The hardware
+    * keeps that many rows per pixel in flight, so a program that writes R11
+    * needs three, and fewer pixels fit in flight. */
+   unsigned max_reg = 0;
+   list_for_each_entry(struct fp_alu_instr_packet, packet,
+                       &fp.alu_instructions, link) {
+      for (unsigned slot = 0; slot < 4; slot++) {
+         const struct fp_alu_dst_operand *dst = &packet->slots[slot].dst;
+         if ((dst->write_low_sub_reg || dst->write_high_sub_reg) &&
+             dst->index < 16)
+            max_reg = MAX2(max_reg, dst->index);
+      }
+   }
+   fp.info.num_rows = max_reg / 4 + 1;
+
+   align_to_rows(&fp);
+
    struct util_dynarray buf;
    util_dynarray_init(&buf, NULL);
 
 #define PUSH(x) util_dynarray_append_typed(&buf, uint32_t, (x))
    PUSH(host1x_opcode_incr(REG_TGR3D_GLOBAL_PIX_ATTR, 1));
-   /* One pixel row, with the matching sequencer capacity used by libgrate.
-    * The old capacity/flow-control combination only worked reliably for a
-    * single pipeline batch. MUL with independently interpolated operands
-    * needs more than one batch.
-    */
-   PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID((0x12c - 1) / 4));
+   /* The register file holds `capacity` pixel rows in flight: a program
+    * with more register rows (R4-R7, R8-R11, ...) gets proportionally fewer
+    * quad ids. The numbers are those of NVIDIA's driver for a capacity of
+    * 0x12c (NvArdLoadFragmentProgram_SingleEpoch_General: MAX_QID =
+    * (capacity - 1) >> 2, >> 3, / 12, >> 4 for 1 to 4 rows). A value in R4
+    * or above is only kept per pixel when NUM_ROWS covers it; the
+    * programs that used the globals 16-23 for it needed MAX_OUT 4. */
+   static const unsigned max_qid_for_rows[] = {0, (0x12c - 1) >> 2,
+                                               (0x12c - 1) >> 3,
+                                               (0x12c - 1) / 12,
+                                               (0x12c - 1) >> 4};
+   assert(fp.info.num_rows >= 1 && fp.info.num_rows <= 4);
+   PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID(max_qid_for_rows[fp.info.num_rows]) |
+        TGR3D_GLOBAL_PIX_ATTR_NUM_ROWS(fp.info.num_rows - 1));
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_CTL, 1));
-   /* Only R0-R3 keep a pixel's value while many pixels are in flight. R4
-    * and up and the globals are storage of four lanes (x mod 4), shared by
-    * the pixels in flight, so a program that keeps a value in them needs
-    * the sequencer to hold at most 4 pixels (measured: 8 makes neighbouring
-    * pixels share a value, see docs/grate-fragment-registers.md). That is
-    * several times slower, so only such programs pay for it. */
-   PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(fp.uses_globals ? 0x4 : 0x12c) |
-        TGR3D_PSEQ_CTL_MIN_OUT(fp.uses_globals ? 0x2 : 0xc8) |
+   PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(0x12c) |
+        TGR3D_PSEQ_CTL_MIN_OUT(0xc8) |
         TGR3D_PSEQ_CTL_MERGE_SPAN_STARTS | TGR3D_PSEQ_CTL_MERGE_REGISTERS |
         TGR3D_PSEQ_CTL_REMOVE_KILLED_PIXELS |
         TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS);
