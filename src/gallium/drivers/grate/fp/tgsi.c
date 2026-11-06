@@ -566,21 +566,94 @@ emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    list_addtail(&sample->link, &fp->fp_instructions);
 }
 
-/* RCP of a computed scalar (spike S5, tools/gpu/grate-sfu-test.c): the SFU
- * reads any ALU register, but it returns its result only through the two
- * MFU multipliers, which can write the row registers R0-R3 only. The SFU is
- * an MFU instruction, which like an interpolation is a boundary after which
- * only R0-R3 still hold a pixel's value, so the operand goes through a free
- * row too (a global is only safe in a program without a fetch). So: copy
- * the operand into a free row (this also converts FX10 to FP20), run RCP in
- * an MFU instruction of its own with the result going straight into the
- * destination if that is a row, else into a second free row followed by a
- * copy. */
+/* Copy component comp of src into the ALU register index, interpolating a
+ * varying first. This also converts FX10 to FP20. absolute copies the
+ * magnitude. */
 static void
-emit_RCP(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
+emit_load_scalar(struct grate_fp_shader *fp,
+                 const struct tgsi_src_register *src, unsigned comp,
+                 int index, bool absolute)
 {
+   struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
+   list_inithead(&inst->link);
+   struct fp_alu_instr_packet *copy = CALLOC_STRUCT(fp_alu_instr_packet);
+   list_inithead(&copy->link);
+   struct fp_alu_dst_operand g = {.index = index,
+                                  .write_low_sub_reg = true,
+                                  .write_high_sub_reg = true};
+   struct tgsi_src_register one_comp = *src;
+   one_comp.SwizzleX = one_comp.SwizzleY = one_comp.SwizzleZ =
+      one_comp.SwizzleW = comp;
+   struct fp_mfu_instr *interp = NULL;
+   if (src->File == TGSI_FILE_INPUT) {
+      /* a varying is interpolated first, into the row of its channel */
+      interp = CALLOC_STRUCT(fp_mfu_instr);
+      list_inithead(&interp->link);
+      setup_interpolation(interp);
+   }
+   struct fp_alu_src_operand value = fp_tgsi_src(fp, &one_comp, 0, interp);
+   value.absolute_value |= absolute;
+   copy->slots[0] = fp_alu_sMOV(g, value);
+   if (interp) {
+      inst->mfu_sched.num_instructions = 1;
+      inst->mfu_sched.address = list_length(&fp->mfu_instructions);
+      list_addtail(&interp->link, &fp->mfu_instructions);
+   }
+   inst->alu_sched.address = list_length(&fp->alu_instructions);
+   inst->alu_sched.num_instructions = 1;
+   list_addtail(&copy->link, &fp->alu_instructions);
+   list_addtail(&inst->link, &fp->fp_instructions);
+}
+
+/* An MFU instruction of its own: run the SFU op on the ALU register reg and
+ * write its result times factor into the rows out_row[0] and out_row[1]. */
+static void
+emit_sfu_stage(struct grate_fp_shader *fp, enum fp_sfu_op op, unsigned reg,
+               const int out_row[2], enum fp_mfu_mul_src factor)
+{
+   struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
+   list_inithead(&inst->link);
+   struct fp_mfu_instr *mfu = CALLOC_STRUCT(fp_mfu_instr);
+   list_inithead(&mfu->link);
+   mfu->sfu.op = op;
+   mfu->sfu.reg = reg;
+   for (unsigned m = 0; m < 2; m++) {
+      mfu->mul[m].dst = FP_MFU_MUL_DST_ROW_REG_0 + out_row[m];
+      mfu->mul[m].src[0] = FP_MFU_MUL_SRC_SFU_RESULT;
+      mfu->mul[m].src[1] = factor;
+   }
+   inst->mfu_sched.num_instructions = 1;
+   inst->mfu_sched.address = list_length(&fp->mfu_instructions);
+   list_addtail(&mfu->link, &fp->mfu_instructions);
+   list_addtail(&inst->link, &fp->fp_instructions);
+}
+
+/* RCP, RSQ, SQRT, LG2, EX2 and POW of computed scalars (spikes S5 and S6,
+ * tools/gpu/grate-sfu-test.c): the SFU reads any ALU register, but it
+ * returns its result only through the two MFU multipliers, which can write
+ * the row registers R0-R3 only. The SFU is an MFU instruction, which like an
+ * interpolation is a boundary after which only R0-R3 still hold a pixel's
+ * value, so the operand goes through a free row too (a global is only safe
+ * in a program without a fetch). So: copy the operand into a free row (this
+ * also converts FX10 to FP20), run the op in an MFU instruction of its own
+ * with the result going straight into the destination if that is a row, else
+ * into a second free row followed by a copy.
+ *
+ * Measured on the tablet: RCP, RSQ, SQRT and LG2 are one SFU op. EX2 needs
+ * PREEX2 first, which builds 2^floor(v) * (1 + frac(v)); the EX2 after it
+ * reads the row PREEX2 wrote and corrects the mantissa to 2^frac(v). POW is
+ * EX2(y * LG2(x)): the multiplier of the LG2 stage takes y from a row of its
+ * own as its second factor. */
+static void
+emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
+{
+   unsigned opcode = tgsi->Instruction.Opcode;
+   bool is_pow = opcode == TGSI_OPCODE_POW;
+   bool saturate = tgsi->Instruction.Saturate != 0;
    const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
    const struct tgsi_src_register *src = &tgsi->Src[0].Register;
+   const struct tgsi_src_register *src_y =
+      is_pow ? &tgsi->Src[1].Register : NULL;
    unsigned comp = src->SwizzleX;
    unsigned first = 0;
    for (; first < 4 && !(dst->WriteMask & (1 << first)); first++)
@@ -599,8 +672,22 @@ emit_RCP(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
          free_rows[num_free++] = reg;
    }
 
+   /* POW: the row that holds the exponent for the multiplier */
+   int y_row = -1;
+   if (is_pow && num_free) {
+      y_row = free_rows[0];
+      for (unsigned i = 1; i < num_free; i++)
+         free_rows[i - 1] = free_rows[i];
+      num_free--;
+   }
+
    /* the operand's row, and where the multipliers write */
    int in_reg = num_free ? free_rows[0] : -1;
+   if (in_reg >= 0 && is_pow && src_y->File == TGSI_FILE_INPUT &&
+       in_reg == (int)src_y->SwizzleX) {
+      /* the exponent's interpolation would overwrite the base */
+      in_reg = -1;
+   }
    if (in_reg < 0) {
       /* no free row: a global works in a program without a fetch */
       for (unsigned reg = 16; reg < 24; reg++) {
@@ -620,62 +707,58 @@ emit_RCP(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
       out_row[0] = num_free > used ? free_rows[used] : in_reg;
       out_row[1] = out_row[0];
    }
-   if (in_reg < 0 || out_row[0] < 0 || out_row[0] >= 4) {
+   if (in_reg < 0 || out_row[0] < 0 || out_row[0] >= 4 ||
+       (is_pow && y_row < 0)) {
       if (!fp->allocation_failed)
-         fprintf(stderr, "GRATE FRAG: no free register for RCP "
+         fprintf(stderr, "GRATE FRAG: no free register for the SFU op "
                          "(spilling unsupported)\n");
       fp->allocation_failed = true;
       return;
    }
 
-   /* A: operand -> in_reg */
-   struct fp_instr *a = CALLOC_STRUCT(fp_instr);
-   list_inithead(&a->link);
-   struct fp_alu_instr_packet *copy = CALLOC_STRUCT(fp_alu_instr_packet);
-   list_inithead(&copy->link);
-   struct fp_alu_dst_operand g = {.index = in_reg,
-                                  .write_low_sub_reg = true,
-                                  .write_high_sub_reg = true};
-   struct tgsi_src_register one_comp = *src;
-   one_comp.SwizzleX = one_comp.SwizzleY = one_comp.SwizzleZ =
-      one_comp.SwizzleW = comp;
-   struct fp_mfu_instr *interp = NULL;
-   if (src->File == TGSI_FILE_INPUT) {
-      /* a varying is interpolated first, into the row of its channel */
-      interp = CALLOC_STRUCT(fp_mfu_instr);
-      list_inithead(&interp->link);
-      setup_interpolation(interp);
-   }
-   copy->slots[0] = fp_alu_sMOV(g, fp_tgsi_src(fp, &one_comp, 0, interp));
-   if (interp) {
-      a->mfu_sched.num_instructions = 1;
-      a->mfu_sched.address = list_length(&fp->mfu_instructions);
-      list_addtail(&interp->link, &fp->mfu_instructions);
-   }
-   a->alu_sched.address = list_length(&fp->alu_instructions);
-   a->alu_sched.num_instructions = 1;
-   list_addtail(&copy->link, &fp->alu_instructions);
-   list_addtail(&a->link, &fp->fp_instructions);
+   /* A: operands -> in_reg (and y_row) */
+   emit_load_scalar(fp, src, comp, in_reg, opcode == TGSI_OPCODE_RSQ);
+   if (is_pow)
+      emit_load_scalar(fp, src_y, src_y->SwizzleX, y_row, false);
 
-   /* B: out rows <- 1 / in_reg */
-   struct fp_instr *b = CALLOC_STRUCT(fp_instr);
-   list_inithead(&b->link);
-   struct fp_mfu_instr *mfu = CALLOC_STRUCT(fp_mfu_instr);
-   list_inithead(&mfu->link);
-   mfu->sfu.op = FP_SFU_OP_RCP;
-   mfu->sfu.reg = in_reg;
-   for (unsigned m = 0; m < 2; m++) {
-      mfu->mul[m].dst = FP_MFU_MUL_DST_ROW_REG_0 + out_row[m];
-      mfu->mul[m].src[0] = FP_MFU_MUL_SRC_SFU_RESULT;
-      mfu->mul[m].src[1] = FP_MFU_MUL_SRC_CONST_1;
+   /* B: out rows <- the op on in_reg */
+   switch (opcode) {
+   case TGSI_OPCODE_RCP:
+      emit_sfu_stage(fp, FP_SFU_OP_RCP, in_reg, out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      break;
+   case TGSI_OPCODE_RSQ:
+      emit_sfu_stage(fp, FP_SFU_OP_RSQ, in_reg, out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      break;
+   case TGSI_OPCODE_SQRT:
+      emit_sfu_stage(fp, FP_SFU_OP_SQRT, in_reg, out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      break;
+   case TGSI_OPCODE_LG2:
+      emit_sfu_stage(fp, FP_SFU_OP_LG2, in_reg, out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      break;
+   case TGSI_OPCODE_EX2:
+      emit_sfu_stage(fp, FP_SFU_OP_PREEX2, in_reg, out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      emit_sfu_stage(fp, FP_SFU_OP_EX2, out_row[0], out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      break;
+   case TGSI_OPCODE_POW:
+      emit_sfu_stage(fp, FP_SFU_OP_LG2, in_reg, out_row,
+                     FP_MFU_MUL_SRC_ROW_REG_0 + y_row);
+      emit_sfu_stage(fp, FP_SFU_OP_PREEX2, out_row[0], out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      emit_sfu_stage(fp, FP_SFU_OP_EX2, out_row[0], out_row,
+                     FP_MFU_MUL_SRC_CONST_1);
+      break;
+   default:
+      UNREACHABLE("not an SFU opcode");
    }
-   b->mfu_sched.num_instructions = 1;
-   b->mfu_sched.address = list_length(&fp->mfu_instructions);
-   list_addtail(&mfu->link, &fp->mfu_instructions);
-   list_addtail(&b->link, &fp->fp_instructions);
 
    if (dst_is_row && dst->File == TGSI_FILE_TEMPORARY &&
-       dst->WriteMask == (1u << first))
+       dst->WriteMask == (1u << first) && !saturate)
       return; /* the multiplier wrote the destination */
 
    /* C: destination <- row */
@@ -719,7 +802,12 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
       emit_TEX(fp, inst);
       break;
    case TGSI_OPCODE_RCP:
-      emit_RCP(fp, inst);
+   case TGSI_OPCODE_RSQ:
+   case TGSI_OPCODE_SQRT:
+   case TGSI_OPCODE_LG2:
+   case TGSI_OPCODE_EX2:
+   case TGSI_OPCODE_POW:
+      emit_SFU(fp, inst);
       break;
    case TGSI_OPCODE_MOV:
       emit_vALU(fp, &inst->Dst[0].Register, saturate, &inst->Src[0].Register,
