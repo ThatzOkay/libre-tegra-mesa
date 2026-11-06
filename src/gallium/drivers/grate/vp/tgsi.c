@@ -261,6 +261,10 @@ tgsi_src_to_vp(struct grate_vp_shader *vp, const struct tgsi_src_register *src)
    }
 }
 
+static bool
+legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
+                 struct list_head *out);
+
 static struct vp_instr *
 tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
 {
@@ -314,6 +318,35 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
                                    tgsi_src_to_vp(vp, &inst->Src[2].Register)),
                          emit_sNOP());
 
+   case TGSI_OPCODE_LRP: {
+      /* LRP(a, b, c) = a * b + (1 - a) * c, as two multiply-adds around a
+       * temporary t = c - a * c. The first goes out here, the caller adds the
+       * second. t gets a temporary of its own, which keeps the scratch
+       * temporaries of legalize_fetches() off it. */
+      static const enum vp_swz identity[4] = {VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z,
+                                              VP_SWZ_W};
+      if (vp->num_temps >= 62) {
+         fprintf(stderr, "GRATE VERTEX: out of temporaries for LRP\n");
+         vp->failed = true;
+         return 0;
+      }
+      unsigned t = vp->num_temps++;
+      struct vp_src_operand a = tgsi_src_to_vp(vp, &inst->Src[0].Register);
+      struct vp_src_operand minus_a = a;
+      minus_a.negate = !a.negate;
+      struct vp_src_operand c = tgsi_src_to_vp(vp, &inst->Src[2].Register);
+      struct vp_instr *first =
+         emit_packed(emit_vMAD(dst_temp(t, 0xf, false), minus_a, c, c),
+                     emit_sNOP());
+      legalize_fetches(vp, first, &vp->instructions);
+      list_addtail(&first->link, &vp->instructions);
+      return emit_packed(
+         emit_vMAD(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate), a,
+                   tgsi_src_to_vp(vp, &inst->Src[1].Register),
+                   src_temp(t, identity, false, false)),
+         emit_sNOP());
+   }
+
    case TGSI_OPCODE_RSQ:
       return emit_packed(emit_vNOP(),
                          emit_sRSQ(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
@@ -325,8 +358,16 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
                                     tgsi_src_to_vp(vp, &inst->Src[0].Register)));
 
    default:
-      fprintf(stderr, "GRATE VERTEX TGSI UNIMPLEMENTED: 0x%02x\n", inst->Instruction.Opcode);
-      assert(0);
+      /* Not a bug of the application: this compiler knows a small part of
+       * TGSI, and real programs use more. Refuse the shader (no shader is
+       * created, the draws that need it are skipped, see grate_draw_vbo())
+       * instead of aborting the whole process, which took a browser's
+       * compositor down for one missing opcode. The message names the
+       * opcode to implement next. The instruction is dropped from the
+       * program, which is discarded anyway. */
+      fprintf(stderr, "GRATE VERTEX TGSI UNIMPLEMENTED: 0x%02x\n",
+              inst->Instruction.Opcode);
+      vp->failed = true;
       return 0;
    }
 }
@@ -393,6 +434,7 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
    vp->output_mask = 0;
    vp->num_immediates = 0;
    vp->num_temps = 0;
+   vp->failed = false;
 
    while (!tgsi_parse_end_of_tokens(tgsi)) {
       tgsi_parse_token(tgsi);
@@ -425,7 +467,8 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
             struct vp_instr *instr = tgsi_to_vp(vp, &tgsi->FullToken.FullInstruction);
             if (!instr) 
                continue;
-            legalize_fetches(vp, instr, &vp->instructions);
+            if (!legalize_fetches(vp, instr, &vp->instructions))
+               vp->failed = true;
             list_addtail(&instr->link, &vp->instructions);
          }
          break;

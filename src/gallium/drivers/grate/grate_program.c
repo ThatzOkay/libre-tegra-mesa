@@ -119,6 +119,13 @@ grate_create_vs_state(struct pipe_context *pcontext,
 
    struct grate_vp_shader vp;
    grate_tgsi_to_vp(&vp, &parser);
+   tgsi_parse_free(&parser);
+   if (vp.failed) {
+      /* refused: the draws that need this shader are skipped, see
+       * grate_draw_vbo() */
+      FREE(so);
+      return NULL;
+   }
 
    int num_instructions = list_length(&vp.instructions);
    assert(num_instructions < 256);

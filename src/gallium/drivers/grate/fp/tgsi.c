@@ -428,6 +428,16 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
          op.op = FP_ALU_OP_CSEL;
          op.src[2] = fp_tgsi_src(fp, third, i, mfu);
          break;
+      case TGSI_OPCODE_MAD:
+         op.src[2] = fp_tgsi_src(fp, third, i, mfu);
+         break;
+      case TGSI_OPCODE_MIN:
+         /* like ADD, the second value is the third source: with it in the
+          * second one the op returned min(a * b, 0) (measured) */
+         op.op = FP_ALU_OP_MIN;
+         op.src[1] = fp_alu_src_one();
+         op.src[2] = b;
+         break;
       default:
          break;
       }
@@ -786,6 +796,92 @@ emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    list_addtail(&c->link, &fp->fp_instructions);
 }
 
+/* The component of src that TGSI component k reads. */
+static unsigned
+src_component(const struct tgsi_src_register *src, unsigned k)
+{
+   unsigned swizzle[] = {src->SwizzleX, src->SwizzleY, src->SwizzleZ,
+                         src->SwizzleW};
+   return swizzle[k];
+}
+
+/* DP2, DP3 and DP4: the sum of a.k * b.k as a multiply and fused
+ * multiply-adds, which leave the running sum in channel W of the scratch
+ * temporary. Every step reads component k of both operands in all channels,
+ * so the result lands in each channel of the destination. An MFU packet
+ * interpolates one vec4 and every interpolation overwrites the rows of the
+ * channels it reads, so a varying operand is copied into the scratch's X, Y
+ * and Z first (DP2 and DP3 only: DP4 has no channel left for the sum). */
+static void
+emit_DP(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
+{
+   unsigned n = tgsi->Instruction.Opcode == TGSI_OPCODE_DP2   ? 2
+                : tgsi->Instruction.Opcode == TGSI_OPCODE_DP3 ? 3
+                                                              : 4;
+   bool saturate = tgsi->Instruction.Saturate != 0;
+   const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
+   struct tgsi_src_register src[2] = {tgsi->Src[0].Register,
+                                      tgsi->Src[1].Register};
+   bool is_input[2] = {src[0].File == TGSI_FILE_INPUT,
+                       src[1].File == TGSI_FILE_INPUT};
+   bool same_input = is_input[0] && is_input[1] &&
+                     !memcmp(&src[0], &src[1], sizeof(src[0]));
+   if ((is_input[0] || is_input[1]) &&
+       (n == 4 || (is_input[0] && is_input[1] && !same_input))) {
+      if (!fp->allocation_failed)
+         fprintf(stderr, "GRATE FRAG: DP4 of a varying, or DP of two "
+                         "different varyings, is not supported\n");
+      fp->allocation_failed = true;
+      return;
+   }
+
+   assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
+   /* the scratch must not take the register of an operand that a later step
+    * still reads, even if this instruction reads it for the last time */
+   memset(fp->reusable, 0, sizeof(fp->reusable));
+   struct tgsi_dst_register stage = {0};
+   stage.File = TGSI_FILE_TEMPORARY;
+   stage.Index = fp->num_temporaries;
+   stage.WriteMask = TGSI_WRITEMASK_XYZ;
+   for (unsigned s = 0; s < 2; s++) {
+      if (!is_input[s] || (s == 1 && same_input))
+         continue;
+      emit_vALU(fp, &stage, false, &src[s], NULL, NULL, TGSI_OPCODE_MOV);
+      src[s].File = TGSI_FILE_TEMPORARY;
+      src[s].Index = stage.Index;
+      src[s].Negate = src[s].Absolute = 0;
+      src[s].SwizzleX = TGSI_SWIZZLE_X;
+      src[s].SwizzleY = TGSI_SWIZZLE_Y;
+      src[s].SwizzleZ = TGSI_SWIZZLE_Z;
+      src[s].SwizzleW = TGSI_SWIZZLE_W;
+   }
+   if (same_input)
+      src[1] = src[0];
+
+   struct tgsi_dst_register sum = stage;
+   sum.WriteMask = TGSI_WRITEMASK_W;
+   struct tgsi_src_register sum_src = {0};
+   sum_src.File = TGSI_FILE_TEMPORARY;
+   sum_src.Index = stage.Index;
+   sum_src.SwizzleX = sum_src.SwizzleY = sum_src.SwizzleZ =
+      sum_src.SwizzleW = TGSI_SWIZZLE_W;
+
+   for (unsigned k = 0; k < n; k++) {
+      struct tgsi_src_register a = src[0];
+      struct tgsi_src_register b = src[1];
+      a.SwizzleX = a.SwizzleY = a.SwizzleZ = a.SwizzleW =
+         src_component(&src[0], k);
+      b.SwizzleX = b.SwizzleY = b.SwizzleZ = b.SwizzleW =
+         src_component(&src[1], k);
+      if (k == n - 1)
+         emit_vALU(fp, dst, saturate, &a, &b, &sum_src, TGSI_OPCODE_MAD);
+      else if (k == 0)
+         emit_vALU(fp, &sum, false, &a, &b, NULL, TGSI_OPCODE_MUL);
+      else
+         emit_vALU(fp, &sum, false, &a, &b, &sum_src, TGSI_OPCODE_MAD);
+   }
+}
+
 static void
 emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *inst)
 {
@@ -818,6 +914,7 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
    case TGSI_OPCODE_SLT:
    case TGSI_OPCODE_SGE:
    case TGSI_OPCODE_SEQ:
+   case TGSI_OPCODE_MIN:
    case TGSI_OPCODE_MUL: {
       const struct tgsi_src_register *a = &inst->Src[0].Register;
       const struct tgsi_src_register *b = &inst->Src[1].Register;
@@ -882,9 +979,72 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
       break;
    }
 
+   case TGSI_OPCODE_DP2:
+   case TGSI_OPCODE_DP3:
+   case TGSI_OPCODE_DP4:
+      emit_DP(fp, inst);
+      break;
+
+   case TGSI_OPCODE_LRP: {
+      /* LRP(a, b, c) = a * b + (1 - a) * c, as two multiply-adds around a
+       * scratch t = c - a * c. An MFU packet interpolates one vec4, so the
+       * varyings among the operands have to be the same one. */
+      const struct tgsi_src_register *a = &inst->Src[0].Register;
+      const struct tgsi_src_register *b = &inst->Src[1].Register;
+      const struct tgsi_src_register *c = &inst->Src[2].Register;
+      const struct tgsi_src_register *operands[] = {a, b, c};
+      int input = -1;
+      for (unsigned i = 0; i < 3; i++) {
+         if (operands[i]->File != TGSI_FILE_INPUT)
+            continue;
+         if (input >= 0 && input != operands[i]->Index) {
+            if (!fp->allocation_failed)
+               fprintf(stderr, "GRATE FRAG: LRP of two different varyings is "
+                               "not supported\n");
+            fp->allocation_failed = true;
+            return;
+         }
+         input = operands[i]->Index;
+      }
+      assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
+      /* t must not take the register of an operand that the second step
+       * still reads, even if this instruction reads it for the last time. */
+      memset(fp->reusable, 0, sizeof(fp->reusable));
+      struct tgsi_dst_register scratch = {0};
+      scratch.File = TGSI_FILE_TEMPORARY;
+      scratch.Index = fp->num_temporaries;
+      scratch.WriteMask = inst->Dst[0].Register.WriteMask;
+      struct tgsi_src_register minus_a = *a;
+      minus_a.Negate = !a->Negate;
+      emit_vALU(fp, &scratch, false, &minus_a, c, c, TGSI_OPCODE_MAD);
+      struct tgsi_src_register t = {0};
+      t.File = TGSI_FILE_TEMPORARY;
+      t.Index = scratch.Index;
+      t.SwizzleX = TGSI_SWIZZLE_X;
+      t.SwizzleY = TGSI_SWIZZLE_Y;
+      t.SwizzleZ = TGSI_SWIZZLE_Z;
+      t.SwizzleW = TGSI_SWIZZLE_W;
+      emit_vALU(fp, &inst->Dst[0].Register, saturate, a, b, &t,
+                TGSI_OPCODE_MAD);
+      break;
+   }
+
    default:
-      fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x\n", inst->Instruction.Opcode);
-      assert(0);
+      /* An instruction this compiler cannot express is not a bug of the
+       * application: the compiler is a straight-line translator for a small
+       * part of TGSI (no control flow, no dot products beyond DP3/DP4, ...)
+       * and real programs, Firefox's WebRender above all, use more than it
+       * knows. Refuse the shader like a register shortage does: no shader
+       * is created, the draws that need it are skipped (see grate_draw_vbo())
+       * and the application lives on. Aborting here took the whole process,
+       * and with it the browser's compositor, down for one missing opcode.
+       * The message stays, naming the opcode to implement next; it is
+       * printed even after an earlier failure, since a missing opcode says
+       * more than a register shortage does. */
+      fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x\n",
+              inst->Instruction.Opcode);
+      fp->allocation_failed = true;
+      break;
    }
 }
 
