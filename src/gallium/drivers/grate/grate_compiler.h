@@ -30,6 +30,7 @@ struct grate_vp_shader {
    unsigned num_immediates;
    unsigned num_temps; /* TGSI temporaries declared; scratch temporaries start
                           here */
+   bool failed; /* the program cannot be compiled: refuse the shader */
 };
 
 struct grate_fp_info {
