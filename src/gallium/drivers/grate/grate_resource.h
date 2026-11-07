@@ -20,6 +20,14 @@ struct grate_resource {
    unsigned int stencil_pitch;
 };
 
+/* A resource holds the memory of one level only. A transfer of a higher
+ * level gets scratch memory instead, so that it cannot overwrite level 0.
+ */
+struct grate_transfer {
+   struct pipe_transfer b;
+   void *scratch;
+};
+
 static inline struct grate_resource *
 grate_resource(struct pipe_resource *resource)
 {

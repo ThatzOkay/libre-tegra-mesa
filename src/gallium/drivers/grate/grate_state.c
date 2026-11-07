@@ -950,8 +950,10 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
          continue;
       struct grate_resource *res = grate_resource(view->texture);
       assert(view->target == PIPE_TEXTURE_2D && view->u.tex.first_level == 0);
-      assert(view->u.tex.last_level == 0 &&
-             sampler->min_mip_filter == PIPE_TEX_MIPFILTER_NONE);
+      /* Only the base level is programmed (BASE_LEVEL_ONLY below), so a
+       * mipmapped texture, or a mipmap filter, samples level 0. This is
+       * what the descriptor does anyway; it only gives up the smoothing
+       * of minified textures, instead of aborting the application. */
       unsigned row_bytes =
          res->b.width0 * util_format_get_blocksize(res->b.format);
       /* POT layout is tightly packed. NPOT layout rounds rows to 64 bytes,

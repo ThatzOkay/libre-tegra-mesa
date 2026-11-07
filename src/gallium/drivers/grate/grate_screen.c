@@ -543,7 +543,8 @@ grate_screen_create(int fd)
    grate_screen_init_shader_caps(screen);
    grate_screen_init_caps(screen);
 
-   slab_create_parent(&screen->transfer_pool, sizeof(struct pipe_transfer), 16);
+   slab_create_parent(&screen->transfer_pool, sizeof(struct grate_transfer),
+                      16);
 
    return &screen->base;
 }

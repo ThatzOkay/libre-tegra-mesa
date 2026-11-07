@@ -4,6 +4,7 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_pack_color.h"
+#include "util/u_surface.h"
 #include "util/u_transfer.h"
 #include "util/u_inlines.h"
 
@@ -88,27 +89,42 @@ grate_resource_transfer_map(struct pipe_context *pcontext,
    if (usage & PIPE_MAP_DIRECTLY)
       return NULL;
 
-   ptrans = slab_alloc(&context->transfer_pool);
-   if (!ptrans)
+   struct grate_transfer *gtrans = slab_zalloc(&context->transfer_pool);
+   if (!gtrans)
       return NULL;
+   ptrans = &gtrans->b;
 
-   if (grate_bo_map(resource->bo, &ret))
-      return NULL;
-
-   memset(ptrans, 0, sizeof(*ptrans));
+   if (level > 0) {
+      /* Only level 0 has memory (the sampler is programmed for the base
+       * level only). Give writes to the other levels, such as the ones of
+       * glGenerateMipmap(), scratch memory: they would land on level 0. */
+      unsigned stride =
+         align(box->width * util_format_get_blocksize(presource->format), 4);
+      gtrans->scratch = CALLOC(1, (size_t)stride * box->height * box->depth);
+      if (!gtrans->scratch) {
+         slab_free(&context->transfer_pool, gtrans);
+         return NULL;
+      }
+      ptrans->stride = stride;
+      ret = gtrans->scratch;
+   } else {
+      if (grate_bo_map(resource->bo, &ret)) {
+         slab_free(&context->transfer_pool, gtrans);
+         return NULL;
+      }
+      ptrans->stride = resource->pitch;
+      ret = (uint8_t *)ret + box->y * resource->pitch +
+            box->x * util_format_get_blocksize(presource->format);
+   }
 
    pipe_resource_reference(&ptrans->resource, presource);
-   ptrans->resource = presource;
    ptrans->level = level;
    ptrans->usage = usage;
    ptrans->box = *box;
-   ptrans->stride = resource->pitch;
    ptrans->layer_stride = ptrans->stride;
    *transfer = ptrans;
 
-   return (uint8_t *)ret +
-          box->y * resource->pitch +
-          box->x * util_format_get_blocksize(presource->format);
+   return ret;
 }
 
 static void
@@ -124,8 +140,12 @@ grate_resource_transfer_unmap(struct pipe_context *pcontext,
                               struct pipe_transfer *transfer)
 {
    struct grate_context *context = grate_context(pcontext);
+   struct grate_transfer *gtrans = (struct grate_transfer *)transfer;
 
-   grate_bo_unmap(grate_resource(transfer->resource)->bo);
+   if (gtrans->scratch)
+      FREE(gtrans->scratch);
+   else
+      grate_bo_unmap(grate_resource(transfer->resource)->bo);
 
    pipe_resource_reference(&transfer->resource, NULL);
    slab_free(&context->transfer_pool, transfer);
@@ -350,15 +370,38 @@ grate_screen_resource_init(struct pipe_screen *pscreen)
 
 static void
 grate_resource_copy_region(struct pipe_context *pcontext,
-                           struct pipe_resource *dst,
-                           unsigned int dst_level,
+                           struct pipe_resource *pdst, unsigned int dst_level,
                            unsigned int dstx, unsigned dsty,
-                           unsigned int dstz,
-                           struct pipe_resource *src,
-                           unsigned int src_level,
-                           const struct pipe_box *box)
+                           unsigned int dstz, struct pipe_resource *psrc,
+                           unsigned int src_level, const struct pipe_box *box)
 {
-   grate_unimplemented();
+   struct grate_resource *dst = grate_resource(pdst);
+   struct grate_resource *src = grate_resource(psrc);
+   void *dst_map, *src_map;
+
+   /* Only level 0 has memory, and the copy is done by the CPU on linear
+    * resources: this is what Mesa uses to carry the image over when it
+    * reallocates a texture to give it mipmap levels. */
+   if (dst_level > 0 || src_level > 0)
+      return;
+   if (dst->tiled || src->tiled ||
+       util_format_get_blocksize(pdst->format) !=
+          util_format_get_blocksize(psrc->format)) {
+      grate_unimplemented();
+      return;
+   }
+
+   /* the mapping waits for the GPU */
+   if (grate_bo_map(src->bo, &src_map) || grate_bo_map(dst->bo, &dst_map))
+      return;
+
+   util_copy_box(dst_map, pdst->format, dst->pitch, 0, dstx, dsty, dstz,
+                 box->width, box->height, box->depth, src_map, src->pitch, 0,
+                 box->x, box->y, box->z);
+
+   grate_bo_unmap(src->bo);
+   if (dst->bo != src->bo)
+      grate_bo_unmap(dst->bo);
 }
 
 static void
