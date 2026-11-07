@@ -203,6 +203,16 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
       tmp.rC_absolute = instr->scalar.src.absolute;
    }
 
+   tmp.condition_set = instr->cond.set;
+   tmp.condition_flags_write_enable = instr->cond.set;
+   if (instr->cond.check) {
+      tmp.condition_check = 1;
+      tmp.predicate_lt = instr->cond.lt;
+      tmp.predicate_eq = instr->cond.eq;
+      tmp.predicate_gt = instr->cond.gt;
+      tmp.predicate_swizzle = vp_swizzle(instr->cond.swizzle);
+   }
+
    tmp.end_of_program = end_of_program;
 
    /* copy packed instruction into destination */

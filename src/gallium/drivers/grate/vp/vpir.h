@@ -103,10 +103,21 @@ struct vp_scalar_instr {
    struct vp_src_operand src;
 };
 
+/* The condition flags: one per lane, less than / equal / greater than zero,
+ * set from the vector result. An instruction may then be predicated on them
+ * (lane i of the write follows the flag selected by swizzle[i]). */
+struct vp_condition {
+   bool set;   /* set the flags from the vector result */
+   bool check; /* write only the lanes whose flag is in lt/eq/gt */
+   bool lt, eq, gt;
+   enum vp_swz swizzle[4];
+};
+
 struct vp_instr {
    struct list_head link;
    struct vp_vec_instr vec;
    struct vp_scalar_instr scalar;
+   struct vp_condition cond;
 };
 
 void
