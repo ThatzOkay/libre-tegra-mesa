@@ -161,6 +161,8 @@ GEN_V_BINOP(DP3)
 GEN_V_BINOP(DP4)
 GEN_V_BINOP(SLT)
 GEN_V_BINOP(MAX)
+GEN_V_BINOP(MIN)
+GEN_V_BINOP(SNE)
 
 static struct vp_vec_instr
 emit_vMAD(struct vp_dst_operand dst, struct vp_src_operand src0,
@@ -310,6 +312,93 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
                                    tgsi_src_to_vp(vp, &inst->Src[0].Register),
                                    tgsi_src_to_vp(vp, &inst->Src[1].Register)),
                          emit_sNOP());
+
+   case TGSI_OPCODE_MIN:
+      return emit_packed(
+         emit_vMIN(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                   tgsi_src_to_vp(vp, &inst->Src[0].Register),
+                   tgsi_src_to_vp(vp, &inst->Src[1].Register)),
+         emit_sNOP());
+
+   case TGSI_OPCODE_SNE:
+      return emit_packed(
+         emit_vSNE(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                   tgsi_src_to_vp(vp, &inst->Src[0].Register),
+                   tgsi_src_to_vp(vp, &inst->Src[1].Register)),
+         emit_sNOP());
+
+   case TGSI_OPCODE_DP2: {
+      /* The vector unit has no two-component dot product. t = a * b, then
+       * dst = t.x + t.y in every lane (TGSI replicates the result). */
+      static const enum vp_swz xxxx[4] = {VP_SWZ_X, VP_SWZ_X, VP_SWZ_X,
+                                          VP_SWZ_X};
+      static const enum vp_swz yyyy[4] = {VP_SWZ_Y, VP_SWZ_Y, VP_SWZ_Y,
+                                          VP_SWZ_Y};
+      if (vp->num_temps >= 62) {
+         fprintf(stderr, "GRATE VERTEX: out of temporaries for DP2\n");
+         vp->failed = true;
+         return 0;
+      }
+      unsigned t = vp->num_temps++;
+      struct vp_instr *mul =
+         emit_packed(emit_vMUL(dst_temp(t, 0xf, false),
+                               tgsi_src_to_vp(vp, &inst->Src[0].Register),
+                               tgsi_src_to_vp(vp, &inst->Src[1].Register)),
+                     emit_sNOP());
+      legalize_fetches(vp, mul, &vp->instructions);
+      list_addtail(&mul->link, &vp->instructions);
+      return emit_packed(
+         emit_vADD(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                   src_temp(t, xxxx, false, false),
+                   src_temp(t, yyyy, false, false)),
+         emit_sNOP());
+   }
+
+   case TGSI_OPCODE_CMP: {
+      /* dst = src0 < 0 ? src1 : src2, as m = (src0 < 0) ? 1 : 0 and
+       * dst = m * (src1 - src2) + src2. The vector unit has no immediate
+       * zero, so it is made as src0 - src0 (src0 is finite in practice). */
+      static const enum vp_swz identity[4] = {VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z,
+                                              VP_SWZ_W};
+      if (vp->num_temps >= 61) {
+         fprintf(stderr, "GRATE VERTEX: out of temporaries for CMP\n");
+         vp->failed = true;
+         return 0;
+      }
+      unsigned t = vp->num_temps++;
+      unsigned m = vp->num_temps++;
+      struct vp_src_operand s0 = tgsi_src_to_vp(vp, &inst->Src[0].Register);
+      struct vp_src_operand minus_s0 = s0;
+      minus_s0.negate = !s0.negate;
+      struct vp_src_operand s2 = tgsi_src_to_vp(vp, &inst->Src[2].Register);
+      struct vp_src_operand minus_s2 = s2;
+      minus_s2.negate = !s2.negate;
+
+      struct vp_instr *zero = emit_packed(
+         emit_vADD(dst_temp(t, 0xf, false), s0, minus_s0), emit_sNOP());
+      legalize_fetches(vp, zero, &vp->instructions);
+      list_addtail(&zero->link, &vp->instructions);
+
+      struct vp_instr *mask =
+         emit_packed(emit_vSLT(dst_temp(m, 0xf, false), s0,
+                               src_temp(t, identity, false, false)),
+                     emit_sNOP());
+      legalize_fetches(vp, mask, &vp->instructions);
+      list_addtail(&mask->link, &vp->instructions);
+
+      struct vp_instr *diff = emit_packed(
+         emit_vADD(dst_temp(t, 0xf, false),
+                   tgsi_src_to_vp(vp, &inst->Src[1].Register), minus_s2),
+         emit_sNOP());
+      legalize_fetches(vp, diff, &vp->instructions);
+      list_addtail(&diff->link, &vp->instructions);
+
+      return emit_packed(
+         emit_vMAD(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                   src_temp(m, identity, false, false),
+                   src_temp(t, identity, false, false), s2),
+         emit_sNOP());
+   }
 
    case TGSI_OPCODE_MAD:
       return emit_packed(emit_vMAD(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
