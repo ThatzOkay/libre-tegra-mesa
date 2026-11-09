@@ -5,6 +5,7 @@
 #include "util/u_bitcast.h"
 #include "util/u_draw.h"
 #include "util/u_helpers.h"
+#include "util/u_inlines.h"
 #include "util/u_prim.h"
 
 #include "grate_common.h"
@@ -309,6 +310,156 @@ static void grate_draw_vbo(struct pipe_context *pcontext,
                            const struct pipe_draw_start_count_bias *draws,
                            unsigned num_draws);
 
+/* Keep the existing draw-count limit. Strip segments share their last
+ * vertices; fans also need their original anchor, and loops must close only
+ * once, after the last segment. Rebuild indices for those two cases.
+ */
+#define GRATE_MAX_DRAW_COUNT 2047
+
+static unsigned
+grate_split_index(const void *indices, unsigned size, unsigned index)
+{
+   switch (size) {
+   case 1:
+      return ((const uint8_t *)indices)[index];
+   case 2:
+      return ((const uint16_t *)indices)[index];
+   case 4:
+      return ((const uint32_t *)indices)[index];
+   default:
+      return index;
+   }
+}
+
+static bool
+grate_draw_pivot(struct pipe_context *pcontext,
+                 const struct pipe_draw_info *info,
+                 const struct pipe_draw_start_count_bias *draw,
+                 unsigned *pivot)
+{
+   *pivot = draw->start;
+   if (!info->index_size ||
+       (info->mode != MESA_PRIM_TRIANGLE_FAN &&
+        info->mode != MESA_PRIM_LINE_LOOP))
+      return true;
+
+   /* PIVOT_VTX names a vertex, not a position in the index buffer. Read
+    * before beginning the stream, since a resource map may wait for the GPU.
+    */
+   if (info->has_user_indices) {
+      *pivot = grate_split_index(info->index.user, info->index_size,
+                                 draw->start);
+      return true;
+   }
+
+   uint64_t offset = (uint64_t)draw->start * info->index_size;
+   if (offset + info->index_size > info->index.resource->width0) {
+      grate_loge("pivot index is outside the index buffer\n");
+      return false;
+   }
+   struct pipe_transfer *transfer;
+   const void *indices = pipe_buffer_map_range(
+      pcontext, info->index.resource, offset, info->index_size, PIPE_MAP_READ,
+      &transfer);
+   if (!indices) {
+      grate_loge("could not map the pivot index\n");
+      return false;
+   }
+   *pivot = grate_split_index(indices, info->index_size, 0);
+   pipe_buffer_unmap(pcontext, transfer);
+   return true;
+}
+
+static void
+grate_split_draw(struct pipe_context *pcontext,
+                 const struct pipe_draw_info *info, unsigned drawid_offset,
+                 const struct pipe_draw_start_count_bias *draw)
+{
+   struct pipe_draw_start_count_bias part = *draw;
+   unsigned count = draw->count;
+   unsigned limit = GRATE_MAX_DRAW_COUNT;
+   unsigned overlap = 0;
+
+   switch (info->mode) {
+   case MESA_PRIM_POINTS:
+      break;
+   case MESA_PRIM_LINES:
+      count -= count % 2;
+      limit -= limit % 2;
+      break;
+   case MESA_PRIM_TRIANGLES:
+      count -= count % 3;
+      limit -= limit % 3;
+      break;
+   case MESA_PRIM_LINE_STRIP:
+      overlap = 1;
+      break;
+   case MESA_PRIM_TRIANGLE_STRIP:
+      /* Restart each strip on an even triangle to preserve winding. */
+      limit &= ~1u;
+      overlap = 2;
+      break;
+   case MESA_PRIM_TRIANGLE_FAN:
+   case MESA_PRIM_LINE_LOOP: {
+      struct pipe_draw_info indexed = *info;
+      struct pipe_transfer *transfer = NULL;
+      const void *indices = info->index_size ? info->index.user : NULL;
+      uint32_t batch[GRATE_MAX_DRAW_COUNT];
+      bool fan = info->mode == MESA_PRIM_TRIANGLE_FAN;
+      uint64_t cursor = fan ? 1 : 0;
+      uint64_t end = (uint64_t)count + !fan;
+
+      if (info->index_size && !info->has_user_indices) {
+         indices = pipe_buffer_map(pcontext, info->index.resource,
+                                   PIPE_MAP_READ, &transfer);
+         if (!indices) {
+            grate_loge("could not map indices to split draw\n");
+            return;
+         }
+      }
+
+      indexed.mode = fan ? MESA_PRIM_TRIANGLE_FAN : MESA_PRIM_LINE_STRIP;
+      indexed.index_size = sizeof(batch[0]);
+      indexed.has_user_indices = true;
+      indexed.index.user = batch;
+      part.start = 0;
+
+      while (cursor < end) {
+         unsigned n = 0;
+         if (fan)
+            batch[n++] = grate_split_index(indices, info->index_size,
+                                           draw->start);
+         while (n < limit && cursor < end) {
+            unsigned vertex = cursor == count ? 0 : cursor;
+            batch[n++] = grate_split_index(indices, info->index_size,
+                                           draw->start + vertex);
+            cursor++;
+         }
+         part.count = n;
+         grate_draw_vbo(pcontext, &indexed, drawid_offset, NULL, &part, 1);
+         if (cursor < end)
+            cursor--;
+      }
+
+      if (transfer)
+         pipe_buffer_unmap(pcontext, transfer);
+      return;
+   }
+   default:
+      grate_loge("cannot split primitive type %u\n", info->mode);
+      return;
+   }
+
+   while (count) {
+      part.count = MIN2(count, limit);
+      grate_draw_vbo(pcontext, info, drawid_offset, NULL, &part, 1);
+      if (part.count == count)
+         break;
+      part.start += part.count - overlap;
+      count -= part.count - overlap;
+   }
+}
+
 /**
  * Draws with a dual-source blend state: once per pass of the plan (see
  * fp/blend.h), with the program variant and the blend of that pass.
@@ -357,6 +508,14 @@ grate_draw_vbo(struct pipe_context *pcontext,
    struct grate_stream *stream = &context->gr3d->stream;
    uint32_t *ptr;
 
+   if (!num_draws)
+      return;
+
+   if (indirect) {
+      util_draw_indirect(pcontext, info, drawid_offset, indirect);
+      return;
+   }
+
    if (num_draws > 1) {
       util_draw_multi(pcontext, info, drawid_offset, indirect, draws, num_draws);
       return;
@@ -381,6 +540,15 @@ grate_draw_vbo(struct pipe_context *pcontext,
         context->scissor.miny >= context->scissor.maxy ||
         context->scissor.minx >= context->framebuffer.base.width ||
         context->scissor.miny >= context->framebuffer.base.height))
+      return;
+
+   if (draws[0].count > GRATE_MAX_DRAW_COUNT) {
+      grate_split_draw(pcontext, info, drawid_offset, draws);
+      return;
+   }
+
+   unsigned pivot;
+   if (!grate_draw_pivot(pcontext, info, draws, &pivot))
       return;
 
    err = grate_stream_begin(stream, &ptr);
@@ -465,7 +633,7 @@ grate_draw_vbo(struct pipe_context *pcontext,
    value  = TGR3D_IDX_SET_PRIM_DRAW_MODE(index_size);
    value |= context->rast->draw_params;
    value |= TGR3D_IDX_SET_PRIM_PRIM_TYPE(grate_primitive_type(info->mode));
-   value |= TGR3D_IDX_SET_PRIM_PIVOT_VTX(draws[0].start);
+   value |= TGR3D_IDX_SET_PRIM_PIVOT_VTX(pivot);
    value |= TGR3D_IDX_SET_PRIM_INVALIDATE_DMACACHE;
    value |= TGR3D_IDX_SET_PRIM_INVALIDATE_VTXCACHE;
 
@@ -475,11 +643,12 @@ grate_draw_vbo(struct pipe_context *pcontext,
    err = grate_stream_push_sync_cond(stream, &ptr, DRM_TEGRA_SYNC_COND_RD_DONE);
    if (err < 0) {
       grate_loge("grate_stream_push_sync_cond() failed: %d\n", err);
+      if (info->index_size && info->has_user_indices)
+         pipe_resource_reference(&index_buffer, NULL);
       return;
    }
 
    unsigned count = draws[0].count;
-   assert(count > 0 && count < (1 << 11));
    value  = TGR3D_IDX_DRAW_PRIM_VTX_COUNT(count - 1);
    value |= TGR3D_IDX_DRAW_PRIM_START_VTX(offset);
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_IDX_DRAW_PRIM, 1));
@@ -493,6 +662,9 @@ grate_draw_vbo(struct pipe_context *pcontext,
    err = grate_stream_flush(stream, false);
    if (err < 0)
       grate_loge("grate_stream_flush() failed: %d\n", err);
+
+   if (info->index_size && info->has_user_indices)
+      pipe_resource_reference(&index_buffer, NULL);
 }
 
 void
