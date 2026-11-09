@@ -2,12 +2,18 @@
 #define GRATE_RESOURCE_H
 
 #include "pipe/p_screen.h"
+#include "pipe/p_state.h"
 #include "util/u_transfer.h"
 
 struct grate_resource {
    struct pipe_resource b;
    struct grate_bo *bo;
+   /* Linear sampler copy for imported buffers with a non-native stride. */
+   struct grate_bo *sampler_bo;
    unsigned int pitch;
+   unsigned int level_pitch[PIPE_MAX_TEXTURE_LEVELS];
+   unsigned int level_offset[PIPE_MAX_TEXTURE_LEVELS];
+   unsigned int level_height[PIPE_MAX_TEXTURE_LEVELS];
    unsigned int tiled : 1;
    unsigned int format : 5;
    /* Z24 depth/stencil formats: the GPU has no 24-bit depth. The depth plane
@@ -20,12 +26,8 @@ struct grate_resource {
    unsigned int stencil_pitch;
 };
 
-/* A resource holds the memory of one level only. A transfer of a higher
- * level gets scratch memory instead, so that it cannot overwrite level 0.
- */
 struct grate_transfer {
    struct pipe_transfer b;
-   void *scratch;
 };
 
 static inline struct grate_resource *
