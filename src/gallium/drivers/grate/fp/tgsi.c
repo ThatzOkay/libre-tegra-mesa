@@ -59,6 +59,162 @@ fp_alu_sMOV(struct fp_alu_dst_operand dst, struct fp_alu_src_operand src)
 #define TEMP_FX10 0x100
 #define TEMP_HIGH 0x200
 
+/* Save one scalar through R0. Surface-4 ST_R20 preserves its FP20 value;
+ * an FX10 source is converted before the store. */
+static void
+emit_spill_scalar(struct grate_fp_shader *fp, int loc, uint16_t args)
+{
+   struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
+   struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
+   struct fp_alu_src_operand src = {
+      .index = loc & 0x7f,
+      .datatype = (loc & TEMP_FX10) ? FP_DATATYPE_FIXED10 : FP_DATATYPE_FP20,
+      .sub_reg_select_high = !!(loc & TEMP_HIGH),
+   };
+   struct fp_alu_dst_operand dst = {
+      .index = 0,
+      .write_low_sub_reg = true,
+      .write_high_sub_reg = true,
+   };
+
+   list_inithead(&inst->link);
+   list_inithead(&alu->link);
+   alu->slots[0] = fp_alu_sMOV(dst, src);
+   inst->alu_sched.address = list_length(&fp->alu_instructions);
+   inst->alu_sched.num_instructions = 1;
+   inst->dw.enable = true;
+   inst->dw.spill = true;
+   inst->dw.index = GRATE_FP_SPILL_SURFACE;
+   inst->dw.spill_args = args;
+   inst->dw.write_killed = true;
+   inst->dw.cache_persistent = true;
+   list_addtail(&alu->link, &fp->alu_instructions);
+   list_addtail(&inst->link, &fp->fp_instructions);
+}
+
+/* The load on row 3 supplies R12 to this round's ALU. Restore only the
+ * original half of an FX10 destination, preserving its other scalar. */
+static void
+emit_reload_scalar(struct grate_fp_shader *fp, int loc, uint16_t args)
+{
+   struct fp_instr *inst = CALLOC_STRUCT(fp_instr);
+   struct fp_alu_instr_packet *alu = CALLOC_STRUCT(fp_alu_instr_packet);
+   struct fp_alu_dst_operand dst = {
+      .index = loc & 0x7f,
+      .write_low_sub_reg = !(loc & TEMP_HIGH),
+      .write_high_sub_reg = !(loc & TEMP_FX10) || (loc & TEMP_HIGH),
+   };
+
+   list_inithead(&inst->link);
+   list_inithead(&alu->link);
+   alu->slots[0] = fp_alu_sMOV(dst, fp_alu_src_row(12));
+   inst->alu_sched.address = list_length(&fp->alu_instructions);
+   inst->alu_sched.num_instructions = 1;
+   inst->spill_load = true;
+   /* OP=LD_R20, READ_KILLED, SURF=4; ARGS encode the load address. */
+   inst->pseq = 0x01240000 | args;
+   list_addtail(&alu->link, &fp->alu_instructions);
+   list_addtail(&inst->link, &fp->fp_instructions);
+}
+
+static unsigned
+scalar_mask(int loc)
+{
+   return (loc & TEMP_FX10) ? ((loc & TEMP_HIGH) ? 2 : 1) : 3;
+}
+
+/* The old value is dead if a write replaces it before its next read. Such
+ * values, and values never read again, are the cheapest spill victims. */
+static unsigned
+next_scalar_use(const struct grate_fp_shader *fp, unsigned temp,
+                unsigned comp)
+{
+   const struct tgsi_full_instruction *first = fp->current_instruction + 1;
+   for (const struct tgsi_full_instruction *inst = first; inst < fp->code_end;
+        inst++) {
+      for (unsigned s = 0; s < inst->Instruction.NumSrcRegs; s++) {
+         const struct tgsi_src_register *src = &inst->Src[s].Register;
+         if (src->File == TGSI_FILE_TEMPORARY && src->Index == temp &&
+             (tgsi_util_get_inst_usage_mask(inst, s) & (1 << comp)))
+            return inst - first;
+      }
+      for (unsigned d = 0; d < inst->Instruction.NumDstRegs; d++) {
+         const struct tgsi_dst_register *dst = &inst->Dst[d].Register;
+         if (dst->File == TGSI_FILE_TEMPORARY && dst->Index == temp &&
+             (dst->WriteMask & (1 << comp)))
+            return fp->code_end - first;
+      }
+   }
+   return fp->code_end - first;
+}
+
+/* Sources of this TGSI instruction and destinations already allocated for
+ * it cannot be evicted: their packets have not executed yet. */
+static bool
+spill_victim(struct grate_fp_shader *fp)
+{
+   if (!fp->current_instruction || !fp->code_end)
+      return false;
+   unsigned free_slot;
+   for (free_slot = 0; free_slot < GRATE_FP_MAX_SPILLS; free_slot++)
+      if (!fp->spill_used[free_slot])
+         break;
+
+   bool found = false;
+   unsigned victim_temp = 0, victim_comp = 0, distance = 0;
+   for (unsigned t = 0; t < fp->num_temporaries; t++) {
+      for (unsigned c = 0; c < 4; c++) {
+         int loc = fp->temp_src[t][c];
+         unsigned reg = loc & 0x7f;
+         unsigned mask = scalar_mask(loc);
+
+         if (loc < 0 || reg < 4 || reg > 15 || reg == 12 || fp->pinned[reg] ||
+             fp->claimed[reg])
+            continue;
+         if (fp->spill_slot[t][c] < 0 && free_slot == GRATE_FP_MAX_SPILLS)
+            continue;
+         bool aliased = false;
+         for (unsigned u = 0; u < fp->num_temporaries; u++) {
+            for (unsigned k = 0; k < 4; k++) {
+               int other = fp->temp_src[u][k];
+               if ((u != t || k != c) && other >= 0 &&
+                   (other & 0x7f) == reg && (scalar_mask(other) & mask))
+                  aliased = true;
+            }
+         }
+         if (aliased)
+            continue;
+         unsigned next = next_scalar_use(fp, t, c);
+         if (!found || next > distance) {
+            found = true;
+            distance = next;
+            victim_temp = t;
+            victim_comp = c;
+         }
+      }
+   }
+   if (!found)
+      return false;
+   int loc = fp->temp_src[victim_temp][victim_comp];
+   unsigned reg = loc & 0x7f;
+   unsigned mask = scalar_mask(loc);
+   int cached = fp->spill_slot[victim_temp][victim_comp];
+   unsigned slot = cached >= 0 ? (unsigned)cached : free_slot;
+   if (cached < 0) {
+      emit_spill_scalar(fp, loc, 12 | (slot << 4));
+      fp->spill_used[slot] = true;
+      fp->spill_fx10[slot] = !!(loc & TEMP_FX10);
+      fp->spill_slot[victim_temp][victim_comp] = slot;
+      fp->info.num_spill_slots = MAX2(fp->info.num_spill_slots, slot + 1);
+   }
+   fp->temp_src[victim_temp][victim_comp] = -2 - (int)slot;
+   if (fp->temp_dst[victim_temp][victim_comp] == loc)
+      fp->temp_dst[victim_temp][victim_comp] = -2 - (int)slot;
+   fp->occupied[reg] &= ~mask;
+   fp->reusable[reg] &= ~mask;
+   return true;
+}
+
 /* Take a register of `regs` for a scalar: a whole register (FP20), or one
  * half of it (FX10). Prefer a register whose value this instruction reads
  * for the last time. Returns the encoded location, or -1. */
@@ -91,15 +247,19 @@ allocate_in_pool(struct grate_fp_shader *fp, const unsigned *regs,
 /* Comparison results have their own boolean bank. Sampled UNORM colours
  * retain their exact FX10 representation through MOV/CMP, while arithmetic
  * uses FP20. R0-R3 become available after the last interpolation/TEX fetch.
- * R4-R11 (rows 1 to 2 of the register file) hold a value for as long as it
+ * R4-R15 (three additional register rows) hold a value for as long as it
  * is wanted, whatever the fetches and interpolations do, like in the
  * programs of NVIDIA's compiler: the program tells the hardware how many
  * rows it uses (GLOBAL_PIX_ATTR.NUM_ROWS, see grate_compile_fs()). */
 static int
 allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
 {
-   static const unsigned overflow[] = {4, 5, 6, 7, 8, 9, 10, 11};
+   static const unsigned overflow[] = {4,  5,  6,  7,  8,  9,
+                                       10, 11, 12, 13, 14, 15};
+   static const unsigned spill_regs[] = {4,  5,  6,  7,  8, 9,
+                                         10, 11, 13, 14, 15};
    static const unsigned rows[] = {0, 1, 2, 3};
+   static const unsigned spill_rows[] = {1, 2, 3};
    static const unsigned banks[] = {64, 65, 66, 67, 68, 69, 70, 71};
    int loc;
 
@@ -115,24 +275,35 @@ allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
       bool fx10 = kind == 1;
 
       if (fp->late_rows && !fp->avoid_rows) {
-         loc = allocate_in_pool(fp, rows, ARRAY_SIZE(rows), fx10);
+         loc = fp->spilling
+                  ? allocate_in_pool(fp, spill_rows, ARRAY_SIZE(spill_rows),
+                                     fx10)
+                  : allocate_in_pool(fp, rows, ARRAY_SIZE(rows), fx10);
          if (loc >= 0)
             return loc;
       }
-      loc = allocate_in_pool(fp, overflow, ARRAY_SIZE(overflow), fx10);
+      const unsigned *pool = fp->spilling ? spill_regs : overflow;
+      unsigned num_regs =
+         fp->spilling ? ARRAY_SIZE(spill_regs) : ARRAY_SIZE(overflow);
+      loc = allocate_in_pool(fp, pool, num_regs, fx10);
       if (loc >= 0)
          return loc;
+      while (fp->spilling && spill_victim(fp)) {
+         loc = allocate_in_pool(fp, pool, num_regs, fx10);
+         if (loc >= 0)
+            return loc;
+      }
    }
 
-   if (!fp->allocation_failed)
-      fprintf(stderr, "GRATE FRAG: scalar register bank exhausted (spilling "
-                      "unsupported)\n");
+   if (!fp->allocation_failed && fp->spilling)
+      fprintf(stderr, "GRATE FRAG: scalar register bank exhausted\n");
    fp->allocation_failed = true;
+   fp->register_pressure = true;
    return 31;
 }
 
 /* A fetch is a TEX and also the interpolation of a varying. A value that is
- * alive across either lives in a register that neither overwrites: R4-R11
+ * alive across either lives in a register that neither overwrites: R4-R15
  * (see allocate_scalar()), or, to keep the program in fewer register rows,
  * one of R0-R3 that nothing overwrites while the value is wanted. Rows
  * are overwritten by every interpolation (R<k> for each
@@ -157,6 +328,8 @@ allocate_coordinate_row(struct grate_fp_shader *fp, const uint8_t *clobber,
     * reading. */
    for (unsigned attempt = 0; attempt < (is_tex ? 2u : 1u); attempt++) {
       for (unsigned reg = 0; reg < 4; reg++) {
+         if (fp->spilling && reg == 0)
+            continue;
          if (is_tex && attempt == 0 ? reg != 2 + comp / 2
                                     : (is_tex && reg >= 2))
             continue;
@@ -654,8 +827,9 @@ emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    if (in_reg < 0 || (is_pow && y_row < 0)) {
       if (!fp->allocation_failed)
          fprintf(stderr, "GRATE FRAG: no free register for the SFU op "
-                         "(spilling unsupported)\n");
+                         "for the SFU operation\n");
       fp->allocation_failed = true;
+      fp->register_pressure = true;
       return;
    }
 
@@ -855,7 +1029,7 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
          struct tgsi_dst_register scratch = {0};
          scratch.File = TGSI_FILE_TEMPORARY;
          scratch.Index = fp->num_temporaries;
-         scratch.WriteMask = TGSI_WRITEMASK_XYZW;
+         scratch.WriteMask = inst->Dst[0].Register.WriteMask;
          emit_vALU(fp, &scratch, false, a, NULL, NULL, TGSI_OPCODE_MOV);
          staged.File = TGSI_FILE_TEMPORARY;
          staged.Index = fp->num_temporaries;
@@ -891,7 +1065,7 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
          struct tgsi_dst_register scratch = {0};
          scratch.File = TGSI_FILE_TEMPORARY;
          scratch.Index = fp->num_temporaries;
-         scratch.WriteMask = TGSI_WRITEMASK_XYZW;
+         scratch.WriteMask = inst->Dst[0].Register.WriteMask;
          emit_vALU(fp, &scratch, false, *inputs[i], NULL, NULL,
                    TGSI_OPCODE_MOV);
          staged.File = TGSI_FILE_TEMPORARY;
@@ -1457,9 +1631,74 @@ build_dual_output(struct grate_fp_shader *fp,
    return true;
 }
 
+/* The spill allocator pins the operands of a whole instruction. Splitting
+ * independent lanes lets a three-source vector operation run without
+ * keeping all twelve source scalars resident simultaneously. */
+static void
+scalarize_for_spilling(struct util_dynarray *instructions)
+{
+   struct util_dynarray out;
+   util_dynarray_init(&out, NULL);
+   util_dynarray_foreach (instructions, struct tgsi_full_instruction, code) {
+      bool split = code->Instruction.NumDstRegs == 1;
+      switch (code->Instruction.Opcode) {
+      case TGSI_OPCODE_MOV:
+      case TGSI_OPCODE_ADD:
+      case TGSI_OPCODE_MUL:
+      case TGSI_OPCODE_MIN:
+      case TGSI_OPCODE_SLT:
+      case TGSI_OPCODE_SGE:
+      case TGSI_OPCODE_SEQ:
+      case TGSI_OPCODE_CMP:
+      case TGSI_OPCODE_LRP:
+         break;
+      default:
+         split = false;
+         break;
+      }
+      if (!split) {
+         util_dynarray_append_typed(&out, struct tgsi_full_instruction,
+                                    *code);
+         continue;
+      }
+      const struct tgsi_dst_register *dst = &code->Dst[0].Register;
+      split &= dst->File == TGSI_FILE_TEMPORARY && !dst->Indirect;
+      for (unsigned s = 0; s < code->Instruction.NumSrcRegs; s++) {
+         const struct tgsi_src_register *src = &code->Src[s].Register;
+         split &= !src->Indirect;
+         if (src->File != TGSI_FILE_TEMPORARY || src->Index != dst->Index)
+            continue;
+         /* A vector instruction reads every source before writing. Leave
+          * it intact if an earlier scalar write would destroy a source
+          * that a later lane still needs, such as MOV t.xy, t.yx. */
+         for (unsigned lane = 0; lane < 4; lane++) {
+            unsigned component = src_component(src, lane);
+            if ((dst->WriteMask & (1 << lane)) && component < lane &&
+                (dst->WriteMask & (1 << component)))
+               split = false;
+         }
+      }
+      if (!split) {
+         util_dynarray_append_typed(&out, struct tgsi_full_instruction,
+                                    *code);
+         continue;
+      }
+      for (unsigned lane = 0; lane < 4; lane++) {
+         if (!(dst->WriteMask & (1 << lane)))
+            continue;
+         struct tgsi_full_instruction scalar = *code;
+         scalar.Dst[0].Register.WriteMask = 1 << lane;
+         util_dynarray_append_typed(&out, struct tgsi_full_instruction,
+                                    scalar);
+      }
+   }
+   util_dynarray_fini(instructions);
+   *instructions = out;
+}
+
 void
 grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
-                 const struct grate_fp_output *output)
+                 const struct grate_fp_output *output, bool spilling)
 {
    list_inithead(&fp->fp_instructions);
    list_inithead(&fp->alu_instructions);
@@ -1467,14 +1706,24 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
 
    fp->info.num_inputs = 0;
    fp->info.num_constants = 0;
+   fp->info.num_spill_slots = 0;
    fp->info.color_input = -1;
    fp->info.max_tram_row = 1;
    fp->num_immediates = 0;
    fp->num_temporaries = 0;
    fp->allocation_failed = false;
+   fp->spilling = spilling;
+   fp->avoid_rows = false;
+   fp->register_pressure = false;
+   fp->current_instruction = NULL;
+   fp->code_end = NULL;
+   memset(fp->pinned, 0, sizeof(fp->pinned));
+   memset(fp->spill_used, 0, sizeof(fp->spill_used));
+   memset(fp->spill_fx10, 0, sizeof(fp->spill_fx10));
    memset(fp->occupied, 0, sizeof(fp->occupied));
    memset(fp->temp_src, -1, sizeof(fp->temp_src));
    memset(fp->temp_dst, -1, sizeof(fp->temp_dst));
+   memset(fp->spill_slot, -1, sizeof(fp->spill_slot));
    struct util_dynarray instructions;
    util_dynarray_init(&instructions, NULL);
 
@@ -1567,11 +1816,14 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                                  store);
    }
    assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
+   if (fp->spilling)
+      scalarize_for_spilling(&instructions);
    unsigned count =
       util_dynarray_num_elements(&instructions, struct tgsi_full_instruction);
    struct tgsi_full_instruction *code = instructions.data;
    count = forward_tex_coord(code, count);
    count = eliminate_dead_code(code, count);
+   fp->code_end = code + count;
    uint8_t (*live_after)[GRATE_FP_MAX_TEMPS] =
       calloc(count + 1, sizeof(*live_after));
    assert(live_after);
@@ -1634,6 +1886,7 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
    for (unsigned n = 0; n < count; n++) {
       const struct tgsi_full_instruction *inst = &code[n];
       bool single_input = true;
+      fp->current_instruction = inst;
       int input = -1;
       for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++) {
          const struct tgsi_src_register *reg = &inst->Src[src].Register;
@@ -1651,6 +1904,51 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
       memset(fp->reusable, 0, sizeof(fp->reusable));
       memcpy(fp->temp_dst, fp->temp_src, sizeof(fp->temp_dst));
       memset(fp->temp_dst[fp->num_temporaries], -1, sizeof(fp->temp_dst[0]));
+      if (fp->spilling) {
+         memset(fp->pinned, 0, sizeof(fp->pinned));
+         /* Pin every resident source before loading any spilled source.
+          * Swizzles and partial opcode reads are included in this mask. */
+         for (unsigned s = 0; s < inst->Instruction.NumSrcRegs; s++) {
+            const struct tgsi_src_register *src = &inst->Src[s].Register;
+            if (src->File != TGSI_FILE_TEMPORARY)
+               continue;
+            unsigned used = tgsi_util_get_inst_usage_mask(inst, s);
+            for (unsigned c = 0; c < 4; c++) {
+               int loc = fp->temp_src[src->Index][c];
+               if ((used & (1 << c)) && loc >= 0 && loc != 31)
+                  fp->pinned[loc & 0x7f] |= scalar_mask(loc);
+            }
+         }
+         for (unsigned s = 0; s < inst->Instruction.NumSrcRegs; s++) {
+            const struct tgsi_src_register *src = &inst->Src[s].Register;
+            if (src->File != TGSI_FILE_TEMPORARY)
+               continue;
+            unsigned used = tgsi_util_get_inst_usage_mask(inst, s);
+            for (unsigned c = 0; c < 4; c++) {
+               int old = fp->temp_src[src->Index][c];
+               if (!(used & (1 << c)) || old >= -1)
+                  continue;
+               unsigned slot = -2 - old;
+               /* The current instruction may still interpolate or fetch
+                * into R1-R3 before consuming the reloaded source. */
+               bool avoid_rows = fp->avoid_rows;
+               fp->avoid_rows = true;
+               int loc = allocate_scalar(fp, fp->spill_fx10[slot] ? 1 : 0);
+               fp->avoid_rows = avoid_rows;
+               if (fp->allocation_failed)
+                  break;
+               emit_reload_scalar(fp, loc, 12 | (slot << 6));
+               fp->temp_src[src->Index][c] = loc;
+               fp->temp_dst[src->Index][c] = loc;
+               fp->pinned[loc & 0x7f] |= scalar_mask(loc);
+            }
+         }
+         /* Loaded inputs have the same reuse opportunities as inputs that
+          * were resident already. Output allocation claims them later. */
+         memset(fp->claimed, 0, sizeof(fp->claimed));
+         if (fp->allocation_failed)
+            break;
+      }
       bool predicate = inst->Instruction.Opcode == TGSI_OPCODE_SLT ||
                        inst->Instruction.Opcode == TGSI_OPCODE_SGE ||
                        inst->Instruction.Opcode == TGSI_OPCODE_SEQ;
@@ -1704,7 +2002,7 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
             for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++)
                simple &= inst->Src[src].Register.File != TGSI_FILE_INPUT;
             if (simple) {
-               for (unsigned reg = 0; reg < 12; reg++) {
+               for (unsigned reg = 0; reg < 16; reg++) {
                   unsigned needed = 0;
                   for (unsigned t = 0; t < fp->num_temporaries; t++)
                      for (unsigned k = 0; k < 4; k++) {
@@ -1781,13 +2079,31 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
          }
          fprintf(stderr, "\n");
       }
+      if (fp->allocation_failed)
+         break;
       emit_tgsi_instr(fp, inst);
+      if (fp->allocation_failed)
+         break;
       memset(fp->occupied, 0, sizeof(fp->occupied));
       for (unsigned t = 0; t < fp->num_temporaries; t++) {
          for (unsigned c = 0; c < 4; c++) {
             int reg = fp->temp_dst[t][c];
+            if (fp->spilling && fp->spill_slot[t][c] >= 0) {
+               bool written = false;
+               for (unsigned d = 0; d < inst->Instruction.NumDstRegs; d++) {
+                  const struct tgsi_dst_register *dst =
+                     &inst->Dst[d].Register;
+                  written |= dst->File == TGSI_FILE_TEMPORARY &&
+                             dst->Index == t && (dst->WriteMask & (1 << c));
+               }
+               if (written || !(live_after[n + 1][t] & (1 << c))) {
+                  fp->spill_used[fp->spill_slot[t][c]] = false;
+                  fp->spill_slot[t][c] = -1;
+               }
+            }
             if (live_after[n + 1][t] & (1 << c)) {
-               assert(reg >= 0 || fp->allocation_failed);
+               assert(reg >= 0 || (fp->spilling && reg < -1) ||
+                      fp->allocation_failed);
                fp->temp_src[t][c] = reg;
                if (reg >= 0 && reg != 31) {
                   unsigned mask =
@@ -1801,6 +2117,8 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
       }
       memset(fp->temp_src[fp->num_temporaries], -1, sizeof(fp->temp_src[0]));
    }
+   fp->current_instruction = NULL;
+   fp->code_end = NULL;
    free(clobber_after);
    free(clobber);
    free(live_after);

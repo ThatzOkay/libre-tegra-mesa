@@ -7,6 +7,7 @@
 #include <stdbool.h>
 
 struct tgsi_parse_context;
+struct tgsi_full_instruction;
 
 /*
  * Constant RAM layout of a vertex program. Immediates (TGSI_FILE_IMMEDIATE)
@@ -51,20 +52,36 @@ struct grate_fp_info {
    /* Register rows (groups of four registers R4k..R4k+3) the program needs,
     * 1 to 4: GLOBAL_PIX_ATTR.NUM_ROWS + 1. Set by grate_tgsi_to_fp(). */
    unsigned num_rows;
+   unsigned num_spill_slots;
 };
 
 #define GRATE_FP_MAX_IMMEDIATES 32
 #define GRATE_FP_MAX_TEMPS      64
+#define GRATE_FP_MAX_SPILLS     256
+/* P128 elements, four pixels per quad, and 19 quad IDs at four rows. */
+#define GRATE_FP_SPILL_SURFACE 4
+#define GRATE_FP_SPILL_STRIDE  (16 * 4 * 19)
 
 struct grate_fp_shader {
    unsigned num_temporaries;
-   /* Encoded scalar locations: register[6:0], FX10 bit 8, high half bit 9.
+   /* Encoded scalar locations: register[6:0], FX10 bit 8, high half bit 9;
+    * -1 is absent and -2-slot names an FP20 scalar in the spill surface.
     * The extra virtual temporary is reserved for interpolation staging. */
    int temp_src[GRATE_FP_MAX_TEMPS + 1][4];
    int temp_dst[GRATE_FP_MAX_TEMPS + 1][4];
+   /* A clean backing slot remains valid after a reload until this
+    * virtual component is overwritten or dies. */
+   int spill_slot[GRATE_FP_MAX_TEMPS + 1][4];
    uint8_t occupied[72];
    uint8_t claimed[72];
    uint8_t reusable[72];
+   bool spilling;
+   bool register_pressure;
+   const struct tgsi_full_instruction *current_instruction;
+   const struct tgsi_full_instruction *code_end;
+   uint8_t pinned[72];
+   bool spill_used[GRATE_FP_MAX_SPILLS];
+   bool spill_fx10[GRATE_FP_MAX_SPILLS];
    bool late_rows;
    bool texture_rows;
    /* the value being allocated lives across an SFU op, which needs rows R0-R3
@@ -116,6 +133,6 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi);
 
 void grate_tgsi_to_fp(struct grate_fp_shader *fp,
                       struct tgsi_parse_context *tgsi,
-                      const struct grate_fp_output *output);
+                      const struct grate_fp_output *output, bool spilling);
 
 #endif

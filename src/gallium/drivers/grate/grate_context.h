@@ -39,6 +39,8 @@ struct grate_context {
    struct pipe_context base;
 
    struct grate_device *drm;
+   struct grate_bo *spill_bo;
+   unsigned spill_size;
    struct grate_channel *gr2d;
    struct grate_channel *gr3d;
 
