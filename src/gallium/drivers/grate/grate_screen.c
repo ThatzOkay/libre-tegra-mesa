@@ -342,7 +342,12 @@ grate_screen_init_shader_caps(struct grate_screen *screen)
    caps->max_tex_indirections = 128;
    caps->max_inputs = 16;
    caps->max_outputs = 16;
-   caps->max_const_buffer0_size = 32 * sizeof(float);
+   /* Uniform declarations may be much larger than the set of scalar words
+    * referenced by a program. fp_constant() compacts that set and rejects
+    * programs that cannot share the physical bank with their immediates.
+    */
+   caps->max_const_buffer0_size =
+      GRATE_FP_UNIFORM_COMPONENTS * sizeof(float);
    caps->max_const_buffers = 1;
    caps->max_temps = 16; // scalars
    caps->max_texture_samplers = 16;
