@@ -23,6 +23,10 @@ struct tgsi_full_instruction;
  */
 #define GRATE_VP_MAX_IMMEDIATES 32
 
+/* Logical uniforms are compacted into the scalar FP20 constant bank. */
+#define GRATE_FP_MAX_CONSTANTS 32
+#define GRATE_FP_UNIFORM_COMPONENTS 256
+
 struct grate_vp_shader {
    struct list_head instructions;
    uint16_t output_mask;
@@ -47,7 +51,7 @@ struct grate_fp_info {
    struct {
       int word; /* -1 for an immediate */
       float immediate;
-   } constants[32];
+   } constants[GRATE_FP_MAX_CONSTANTS];
    unsigned num_constants;
    /* Register rows (groups of four registers R4k..R4k+3) the program needs,
     * 1 to 4: GLOBAL_PIX_ATTR.NUM_ROWS + 1. Set by grate_tgsi_to_fp(). */

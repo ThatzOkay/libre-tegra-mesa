@@ -881,6 +881,9 @@ emit_fs_uniforms(struct grate_context *context, uint32_t **ptrp)
       &context->constant_buffer[MESA_SHADER_FRAGMENT];
    if (!info->num_constants)
       return;
+   /* The advertised uniform buffer is logical storage. Only referenced
+    * scalar words occupy the physical bank, alongside shader immediates.
+    */
    GRATE_PUSHBUF_WORD(*ptrp, host1x_opcode_incr(0x820, info->num_constants));
    for (unsigned i = 0; i < info->num_constants; i++) {
       float value = info->constants[i].immediate;
