@@ -428,14 +428,33 @@ fp_alu_dst(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
    return ret;
 }
 
+/* With derivatives, r32, r40, r48 and r56 are the quad exchange registers
+ * (NVIDIA's compiler allocates constants around them), so the constant slots
+ * 0, 8, 16 and 24 are left out. */
+static bool
+fp_constant_reserved(const struct grate_fp_shader *fp, unsigned i)
+{
+   return fp->uses_derivatives && i % 8 == 0;
+}
+
 static struct fp_alu_src_operand
 fp_constant(struct grate_fp_shader *fp, int word, float immediate)
 {
    unsigned i;
    for (i = 0; i < fp->info.num_constants; i++) {
-      if (fp->info.constants[i].word == word &&
+      if (!fp_constant_reserved(fp, i) &&
+          fp->info.constants[i].word == word &&
           (word >= 0 || fp->info.constants[i].immediate == immediate))
          break;
+   }
+   if (i == fp->info.num_constants) {
+      /* a new constant: skip the reserved slots */
+      while (i < ARRAY_SIZE(fp->info.constants) &&
+             fp_constant_reserved(fp, i)) {
+         fp->info.constants[i].word = -1;
+         fp->info.constants[i].immediate = 0.0f;
+         i++;
+      }
    }
    if (i >= ARRAY_SIZE(fp->info.constants)) {
       if (!fp->allocation_failed)
@@ -445,10 +464,10 @@ fp_constant(struct grate_fp_shader *fp, int word, float immediate)
       fp->register_pressure = false;
       return fp_alu_src_zero();
    }
-   if (i == fp->info.num_constants) {
+   if (i >= fp->info.num_constants) {
       fp->info.constants[i].word = word;
       fp->info.constants[i].immediate = immediate;
-      fp->info.num_constants++;
+      fp->info.num_constants = i + 1;
    }
    struct fp_alu_src_operand value = {.index = 32 + i};
    return value;
@@ -769,6 +788,102 @@ emit_load_scalar(struct grate_fp_shader *fp,
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
+/* dFdx and dFdy over the pixel quad. Every pixel writes the value to the
+ * exchange port r32; two packets later (the layout adds the empty one) the
+ * four values of its 2x2 quad can be read back, whichever pixel wrote them:
+ * r32 = top left, r40 = top right, r48 = bottom left, r56 = bottom right
+ * (measured with ramps of tc.x and tc.y, see docs/data/gpu/derivatives).
+ * The derivatives are coarse, one per quad: dFdx = r40 - r32 and, along the
+ * hardware's raster y (downwards), dFdy = r48 - r32. The state tracker
+ * multiplies the argument of DDY by the framebuffer's y-flip factor to get
+ * the GL direction. The slots are read through the A port in one packet
+ * (the C port returns the slot of a neighbouring quad). These registers
+ * share their index space with the constants, so fp_constant() leaves r32,
+ * r40, r48 and r56 out. */
+static void
+emit_derivative(struct grate_fp_shader *fp,
+                const struct tgsi_full_instruction *tgsi, bool vertical)
+{
+   const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
+   const struct tgsi_src_register *src = &tgsi->Src[0].Register;
+
+   for (unsigned c = 0; c < 4; c++) {
+      if (!(dst->WriteMask & (1 << c)))
+         continue;
+
+      struct fp_instr *write = CALLOC_STRUCT(fp_instr);
+      list_inithead(&write->link);
+      struct fp_mfu_instr *mfu = NULL;
+      if (src->File == TGSI_FILE_INPUT) {
+         mfu = CALLOC_STRUCT(fp_mfu_instr);
+         list_inithead(&mfu->link);
+         setup_interpolation(mfu);
+      }
+      struct fp_alu_instr_packet *store = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&store->link);
+      struct fp_alu_dst_operand port = {.index = 32,
+                                        .write_low_sub_reg = true,
+                                        .write_high_sub_reg = true};
+      store->slots[0] = fp_alu_sMOV(port, fp_tgsi_src(fp, src, c, mfu));
+      write->alu_sched.address = list_length(&fp->alu_instructions);
+      write->alu_sched.num_instructions = 1;
+      if (mfu) {
+         write->mfu_sched.num_instructions = 1;
+         write->mfu_sched.address = list_length(&fp->mfu_instructions);
+         list_addtail(&mfu->link, &fp->mfu_instructions);
+      }
+      list_addtail(&store->link, &fp->alu_instructions);
+      list_addtail(&write->link, &fp->fp_instructions);
+
+      /* Read the two slots through the A port into scratch scalars. The C
+       * port would return the slot of a neighbouring quad (measured). */
+      assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
+      struct tgsi_dst_register scratch = {0};
+      scratch.File = TGSI_FILE_TEMPORARY;
+      scratch.Index = fp->num_temporaries;
+      scratch.WriteMask = TGSI_WRITEMASK_XY;
+      struct fp_instr *read = CALLOC_STRUCT(fp_instr);
+      list_inithead(&read->link);
+      struct fp_alu_instr_packet *slots = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&slots->link);
+      struct fp_alu_src_operand slot_of[2] = {
+         {.index = vertical ? 48 : 40}, {.index = vertical ? 32 : 32}};
+      for (unsigned k = 0; k < 2; k++)
+         slots->slots[k] =
+            fp_alu_sMOV(fp_alu_dst(fp, &scratch, k, false), slot_of[k]);
+      read->alu_sched.address = list_length(&fp->alu_instructions);
+      read->alu_sched.num_instructions = 1;
+      list_addtail(&slots->link, &fp->alu_instructions);
+      list_addtail(&read->link, &fp->fp_instructions);
+
+      struct tgsi_src_register pair = {0};
+      pair.File = TGSI_FILE_TEMPORARY;
+      pair.Index = fp->num_temporaries;
+      pair.SwizzleX = TGSI_SWIZZLE_X;
+      pair.SwizzleY = TGSI_SWIZZLE_Y;
+      struct fp_instr *calc = CALLOC_STRUCT(fp_instr);
+      list_inithead(&calc->link);
+      struct fp_alu_instr_packet *diff = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&diff->link);
+      struct fp_alu_src_operand first = fp_tgsi_src(fp, &pair, 0, NULL);
+      struct fp_alu_src_operand second = fp_tgsi_src(fp, &pair, 1, NULL);
+      second.negate = true;
+      struct fp_alu_instr op = fp_alu_sMOV(
+         fp_alu_dst(fp, dst, c, tgsi->Instruction.Saturate), first);
+      op.src[2] = second;
+      diff->slots[0] = op;
+      calc->alu_sched.address = list_length(&fp->alu_instructions);
+      calc->alu_sched.num_instructions = 1;
+      list_addtail(&diff->link, &fp->alu_instructions);
+      list_addtail(&calc->link, &fp->fp_instructions);
+      /* the scratch scalars are free for the next component */
+      memset(fp->temp_src[fp->num_temporaries], -1,
+             sizeof(fp->temp_src[0]));
+      memset(fp->temp_dst[fp->num_temporaries], -1,
+             sizeof(fp->temp_dst[0]));
+   }
+}
+
 /* One SFU step. The SFU reads the row register `reg` (R0-R3 only) and
  * writes its result back into it, before the ALU of the same step runs, so
  * `alu` (if any) sees the result in `reg`. The multipliers are not used:
@@ -1066,6 +1181,10 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
    switch (inst->Instruction.Opcode) {
    case TGSI_OPCODE_TEX:
       emit_TEX(fp, inst);
+      break;
+   case TGSI_OPCODE_DDX:
+   case TGSI_OPCODE_DDY:
+      emit_derivative(fp, inst, inst->Instruction.Opcode == TGSI_OPCODE_DDY);
       break;
    case TGSI_OPCODE_FRC:
    case TGSI_OPCODE_FLR:
@@ -1843,6 +1962,7 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
    fp->num_temporaries = 0;
    fp->allocation_failed = false;
    fp->spilling = spilling;
+   fp->uses_derivatives = false;
    fp->avoid_rows = false;
    fp->register_pressure = false;
    fp->current_instruction = NULL;
@@ -1885,6 +2005,13 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                                        tgsi->FullToken.FullInstruction);
          break;
       }
+   }
+
+   util_dynarray_foreach (&instructions, struct tgsi_full_instruction,
+                          derivative) {
+      fp->uses_derivatives |=
+         derivative->Instruction.Opcode == TGSI_OPCODE_DDX ||
+         derivative->Instruction.Opcode == TGSI_OPCODE_DDY;
    }
 
    if (emit_direct_varying_product(
