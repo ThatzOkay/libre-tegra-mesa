@@ -12,6 +12,7 @@
 #include "tgsi/tgsi_transform.h"
 
 #include "grate_device.h"
+#include "grate_bo.h"
 #include "host1x01_hardware.h"
 #include "grate_common.h"
 #include "grate_context.h"
@@ -189,7 +190,7 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
    uint32_t blend_words[GRATE_FP_BLEND_MAX_PACKETS * 8];
    unsigned packets = grate_fp_blend_alu(key, blend_words);
 
-   if (!packets || fp_count + rows > 63 || alu_count + packets > 64 ||
+   if (!packets || fp_count + rows > 64 || alu_count + packets > 64 ||
        fp_count % rows)
       return false;
    struct util_dynarray result;
@@ -266,7 +267,8 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
       }
       BLEND_PUSH((command & 0xffff0000) | (count + extra));
       for (unsigned j = 0; j < count; j++)
-         BLEND_PUSH(bit == 64 ? 0 : values[j]);
+         BLEND_PUSH(
+            bit == 64 && (values[j] & 3) == TGR3D_DATA_OP_ST ? 0 : values[j]);
       for (unsigned j = 0; j < extra; j++) {
          if (bit == 16)
             BLEND_PUSH(blend_words[j]);
@@ -346,6 +348,148 @@ free_fragment_ir(struct grate_fp_shader *fp)
    }
 }
 
+static bool
+scalar_packet_masks(const struct fp_alu_instr_packet *packet, uint8_t *reads,
+                    uint8_t *writes, unsigned *active)
+{
+   memset(reads, 0, 72);
+   memset(writes, 0, 72);
+   *active = 0;
+   for (unsigned slot = 0; slot < 4; slot++) {
+      const struct fp_alu_instr *alu = &packet->slots[slot];
+      unsigned mask = alu->dst.write_low_sub_reg |
+                      ((unsigned)alu->dst.write_high_sub_reg << 1);
+      if (!mask)
+         continue;
+      unsigned reg = alu->dst.index;
+      if (!(reg < 16 || (reg >= 64 && reg < 72)))
+         return false;
+      writes[reg] |= mask;
+      for (unsigned s = 0; s < 4; s++) {
+         const struct fp_alu_src_operand *src = &alu->src[s];
+         reg = src->index;
+         if (reg < 16 || (reg >= 64 && reg < 72)) {
+            reads[reg] |= src->datatype == FP_DATATYPE_FIXED10
+                             ? 1u << src->sub_reg_select_high
+                             : 3;
+         } else if (reg < 31 || reg >= 64) {
+            /* In particular, R24-R27 forward packet results. */
+            return false;
+         }
+      }
+      (*active)++;
+   }
+   return *active != 0;
+}
+
+static bool
+plain_scalar_step(const struct fp_instr *instr)
+{
+   return instr->alu_sched.num_instructions == 1 &&
+          !instr->mfu_sched.num_instructions && !instr->tex &&
+          !instr->dw.enable && !instr->dw.spill && !instr->pseq &&
+          !instr->spill_load;
+}
+
+/* Scalarizing the spill retry exposes independent lanes as separate
+ * steps. Pack them back together when all slots can read the old register
+ * values: a later packet must not read or overwrite an earlier result. */
+static void
+coalesce_scalar_alu(struct grate_fp_shader *fp)
+{
+   if (list_is_empty(&fp->fp_instructions))
+      return;
+   unsigned num_packets = list_length(&fp->alu_instructions);
+   struct fp_alu_instr_packet **packets =
+      CALLOC(num_packets, sizeof(*packets));
+   if (!packets)
+      return;
+   unsigned index = 0;
+   list_for_each_entry (struct fp_alu_instr_packet, packet,
+                        &fp->alu_instructions, link)
+      packets[index++] = packet;
+
+   struct fp_instr *instr =
+      list_first_entry(&fp->fp_instructions, struct fp_instr, link);
+   while (instr->link.next != &fp->fp_instructions) {
+      struct fp_instr *next =
+         list_entry(instr->link.next, struct fp_instr, link);
+      uint8_t reads[72], writes[72], next_reads[72], next_writes[72];
+      unsigned active, next_active;
+      bool merge = plain_scalar_step(instr) && plain_scalar_step(next) &&
+                   instr->alu_sched.address < num_packets &&
+                   next->alu_sched.address < num_packets &&
+                   instr->alu_sched.address != next->alu_sched.address;
+      if (merge) {
+         merge = scalar_packet_masks(packets[instr->alu_sched.address], reads,
+                                     writes, &active) &&
+                 scalar_packet_masks(packets[next->alu_sched.address],
+                                     next_reads, next_writes, &next_active) &&
+                 active + next_active <= 4;
+      }
+      if (merge) {
+         for (unsigned reg = 0; reg < 72; reg++)
+            if (writes[reg] & (next_reads[reg] | next_writes[reg]))
+               merge = false;
+      }
+      if (!merge) {
+         instr = next;
+         continue;
+      }
+      struct fp_alu_instr_packet *dst = packets[instr->alu_sched.address];
+      const struct fp_alu_instr_packet *src =
+         packets[next->alu_sched.address];
+      unsigned empty = 0;
+      for (unsigned slot = 0; slot < 4; slot++) {
+         if (!src->slots[slot].dst.write_low_sub_reg &&
+             !src->slots[slot].dst.write_high_sub_reg)
+            continue;
+         while (dst->slots[empty].dst.write_low_sub_reg ||
+                dst->slots[empty].dst.write_high_sub_reg)
+            empty++;
+         dst->slots[empty++] = src->slots[slot];
+      }
+      list_del(&next->link);
+      FREE(next);
+   }
+   FREE(packets);
+}
+
+static bool
+step_writes_register(const struct fp_instr *instr,
+                     struct fp_alu_instr_packet **packets,
+                     unsigned num_packets, unsigned reg)
+{
+   for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
+      unsigned address = instr->alu_sched.address + p;
+      if (address >= num_packets)
+         return true;
+      for (unsigned slot = 0; slot < 4; slot++) {
+         const struct fp_alu_dst_operand *dst =
+            &packets[address]->slots[slot].dst;
+         if (dst->index == reg &&
+             (dst->write_low_sub_reg || dst->write_high_sub_reg))
+            return true;
+      }
+   }
+   return false;
+}
+
+static void
+append_row_step(struct list_head *steps, struct fp_instr *instr,
+                unsigned *count, unsigned rows, uint32_t *pending_pseq,
+                bool *pending_store)
+{
+   list_addtail(&instr->link, steps);
+   (*count)++;
+   if (*count % rows == 0) {
+      if (*pending_pseq)
+         instr->pseq = *pending_pseq;
+      *pending_pseq = 0;
+      *pending_store = false;
+   }
+}
+
 /**
  * Lay the steps out for a program with more than one register row.
  *
@@ -371,9 +515,20 @@ align_to_rows(struct grate_fp_shader *fp)
    if (rows <= 1 || list_is_empty(&fp->fp_instructions))
       return;
 
+   unsigned num_packets = list_length(&fp->alu_instructions);
+   struct fp_alu_instr_packet **old = CALLOC(num_packets + 1, sizeof(*old));
+   if (!old) {
+      fp->allocation_failed = true;
+      return;
+   }
+   unsigned num_old = 0;
+   list_for_each_entry (struct fp_alu_instr_packet, packet,
+                        &fp->alu_instructions, link)
+      old[num_old++] = packet;
+
    struct fp_dw_instr dw = {0};
    list_for_each_entry(struct fp_instr, instr, &fp->fp_instructions, link) {
-      if (instr->dw.enable) {
+      if (instr->dw.enable && !instr->dw.spill) {
          dw = instr->dw;
          memset(&instr->dw, 0, sizeof(instr->dw));
       }
@@ -382,35 +537,72 @@ align_to_rows(struct grate_fp_shader *fp)
    struct list_head steps;
    list_inithead(&steps);
    unsigned count = 0;
+   uint32_t pending_pseq = 0;
+   bool pending_store = false;
    list_for_each_entry_safe(struct fp_instr, instr, &fp->fp_instructions,
                             link) {
       bool row_unit = instr->mfu_sched.num_instructions ||
                       (instr->tex & (1 << 10));
+      bool memory = instr->dw.spill || instr->spill_load;
+      bool pending = pending_store || pending_pseq;
+      bool protected_write =
+         (pending_store && step_writes_register(instr, old, num_old, 0)) ||
+         (pending_pseq && step_writes_register(instr, old, num_old, 12));
 
       list_del(&instr->link);
-      while (row_unit && count % rows) {
+      while (count % rows && (memory || protected_write ||
+                              (pending && instr->pseq) || row_unit)) {
          struct fp_instr *spacer = CALLOC_STRUCT(fp_instr);
          list_inithead(&spacer->link);
-         list_addtail(&spacer->link, &steps);
-         count++;
+         append_row_step(&steps, spacer, &count, rows, &pending_pseq,
+                         &pending_store);
       }
-      list_addtail(&instr->link, &steps);
-      count++;
+      /* Store R0 at round end; a row-3 load supplies R12 to the row-0
+       * consumer. Other ALU work can fill the round while preserving
+       * those registers and leaving the other row units idle. */
+      if (instr->dw.spill)
+         pending_store = true;
+      if (instr->spill_load) {
+         pending_pseq = instr->pseq;
+         instr->pseq = 0;
+      }
+      append_row_step(&steps, instr, &count, rows, &pending_pseq,
+                      &pending_store);
    }
    while (count % rows) {
       struct fp_instr *spacer = CALLOC_STRUCT(fp_instr);
       list_inithead(&spacer->link);
-      list_addtail(&spacer->link, &steps);
-      count++;
+      append_row_step(&steps, spacer, &count, rows, &pending_pseq,
+                      &pending_store);
    }
    list_replace(&steps, &fp->fp_instructions);
+
+   /* An output store must not overwrite a spill store in the last round. */
+   if (dw.enable) {
+      unsigned index = 0;
+      bool last_spill_store = false;
+      list_for_each_entry (struct fp_instr, instr, &fp->fp_instructions,
+                           link) {
+         if (index == count - rows)
+            last_spill_store = instr->dw.spill;
+         index++;
+      }
+      if (last_spill_store) {
+         for (unsigned row = 0; row < rows; row++) {
+            struct fp_instr *spacer = CALLOC_STRUCT(fp_instr);
+            list_inithead(&spacer->link);
+            list_addtail(&spacer->link, &fp->fp_instructions);
+            count++;
+         }
+      }
+   }
 
    /* The output write fires at the end of the round of the step it is on and
     * reads R2/R3 of the row `step % rows`: the first step of the last round
     * sees all the ALU work and reads row 0. */
    unsigned index = 0;
    list_for_each_entry(struct fp_instr, instr, &fp->fp_instructions, link) {
-      if (index == count - rows)
+      if (dw.enable && index == count - rows)
          instr->dw = dw;
       index++;
    }
@@ -423,13 +615,6 @@ align_to_rows(struct grate_fp_shader *fp)
     *   latency): between two steps of the same round there is none, so a
     *   step whose successor in the round has ALU work ends with a packet
     *   that writes nothing (a step change between rounds is enough). */
-   struct fp_alu_instr_packet **old =
-      CALLOC(list_length(&fp->alu_instructions) + 1, sizeof(*old));
-   unsigned num_old = 0;
-   list_for_each_entry(struct fp_alu_instr_packet, packet,
-                       &fp->alu_instructions, link)
-      old[num_old++] = packet;
-
    struct list_head packets;
    list_inithead(&packets);
    unsigned address = 0, step = 0;
@@ -504,7 +689,15 @@ grate_compile_fs(struct grate_context *context,
    assert(ok == TGSI_PARSE_OK);
 
    struct grate_fp_shader fp;
-   grate_tgsi_to_fp(&fp, &parser, output);
+   grate_tgsi_to_fp(&fp, &parser, output, false);
+   if (fp.allocation_failed && fp.register_pressure) {
+      free_fragment_ir(&fp);
+      tgsi_parse_free(&parser);
+      ok = tgsi_parse_init(&parser, so->base.tokens);
+      if (ok != TGSI_PARSE_OK)
+         return false;
+      grate_tgsi_to_fp(&fp, &parser, output, true);
+   }
    tgsi_parse_free(&parser);
    if (fp.allocation_failed) {
       free_fragment_ir(&fp);
@@ -526,7 +719,45 @@ grate_compile_fs(struct grate_context *context,
    }
    fp.info.num_rows = max_reg / 4 + 1;
 
+   bool has_spills = false;
+   list_for_each_entry (struct fp_instr, instr, &fp.fp_instructions, link)
+      has_spills |= instr->dw.spill || instr->spill_load;
+   if (has_spills)
+      fp.info.num_rows = 4;
+
+   if (fp.spilling)
+      coalesce_scalar_alu(&fp);
    align_to_rows(&fp);
+
+   unsigned num_fp_instrs = list_length(&fp.fp_instructions);
+   unsigned num_mfu_instrs = list_length(&fp.mfu_instructions);
+   if (fp.allocation_failed || num_fp_instrs > 64 || num_mfu_instrs >= 64) {
+      if (!fp.allocation_failed)
+         fprintf(stderr,
+                 "GRATE FRAG: program exceeds one epoch "
+                 "(%u steps, %u spill slots)\n",
+                 num_fp_instrs, fp.info.num_spill_slots);
+      free_fragment_ir(&fp);
+      return false;
+   }
+
+   if (has_spills) {
+      fp.info.num_spill_slots = MAX2(fp.info.num_spill_slots, 1);
+      /* Four FP20 words occupy each P128 element. NVIDIA uses a row
+       * stride of 16 bytes times four lanes times MAX_QID + 1. */
+      unsigned stride = GRATE_FP_SPILL_STRIDE;
+      unsigned size = DIV_ROUND_UP(fp.info.num_spill_slots, 4) * stride;
+      if (size > context->spill_size) {
+         struct grate_bo *bo = grate_bo_alloc(context->drm, size, 0);
+         if (!bo) {
+            free_fragment_ir(&fp);
+            return false;
+         }
+         grate_bo_unref(context->spill_bo);
+         context->spill_bo = bo;
+         context->spill_size = size;
+      }
+   }
 
    struct util_dynarray buf;
    util_dynarray_init(&buf, NULL);
@@ -549,18 +780,15 @@ grate_compile_fs(struct grate_context *context,
         TGR3D_GLOBAL_PIX_ATTR_NUM_ROWS(fp.info.num_rows - 1));
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_CTL, 1));
    PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(0x12c) |
-        TGR3D_PSEQ_CTL_MIN_OUT(0xc8) |
+        TGR3D_PSEQ_CTL_MIN_OUT(has_spills ? 0 : 0xc8) |
         TGR3D_PSEQ_CTL_MERGE_SPAN_STARTS | TGR3D_PSEQ_CTL_MERGE_REGISTERS |
         TGR3D_PSEQ_CTL_REMOVE_KILLED_PIXELS |
-        TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS);
+        (has_spills ? 0 : TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS));
 
    PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_QUAD_ID, 0));
    PUSH(host1x_opcode_imm(REG_TGR3D_GLOBAL_INST_OFFSET, 0));
    PUSH(host1x_opcode_imm(REG_TGR3D_AT_INST_OFFSET, 0));
    PUSH(host1x_opcode_imm(REG_TGR3D_ALU_INST_OFFSET, 0));
-
-   int num_fp_instrs = list_length(&fp.fp_instructions);
-   assert(num_fp_instrs < 64);
 
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_COMMAND_EVEN(0), 1));
    // TODO: document/convert these values
@@ -582,14 +810,11 @@ grate_compile_fs(struct grate_context *context,
 
    PUSH(host1x_opcode_nonincr(REG_TGR3D_PSEQ_INST_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
-      PUSH(0x00000000);
+      PUSH(instr->pseq);
 
    PUSH(host1x_opcode_nonincr(REG_TGR3D_AT_REMAP_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
       PUSH(grate_fp_pack_sched(&instr->mfu_sched));
-
-   int num_mfu_instrs = list_length(&fp.mfu_instructions);
-   assert(num_mfu_instrs < 64); // TODO: not sure if this is really correct
 
    PUSH(host1x_opcode_nonincr(REG_TGR3D_AT_INST_DATA_LO, num_mfu_instrs * 2));
    list_for_each_entry(struct fp_mfu_instr, instr, &fp.mfu_instructions, link) {
