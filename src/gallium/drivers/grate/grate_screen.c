@@ -478,6 +478,7 @@ static const nir_shader_compiler_options grate_base_compiler_options = {
    .force_indirect_unrolling_sampler = true,
    .max_unroll_iterations = 32,
     */
+   .max_unroll_iterations = 32,
    .lower_fdiv = true,
    .no_integers = true,
 };

@@ -71,6 +71,7 @@ grate_resource_destroy(struct pipe_screen *pscreen,
    struct grate_resource *resource = grate_resource(presource);
 
    grate_bo_unref(resource->bo);
+   grate_bo_unref(resource->sampler_bo);
    FREE(resource);
 }
 
@@ -88,40 +89,28 @@ grate_resource_transfer_map(struct pipe_context *pcontext,
 
    if (usage & PIPE_MAP_DIRECTLY)
       return NULL;
+   if (level > presource->last_level)
+      return NULL;
 
    struct grate_transfer *gtrans = slab_zalloc(&context->transfer_pool);
    if (!gtrans)
       return NULL;
    ptrans = &gtrans->b;
 
-   if (level > 0) {
-      /* Only level 0 has memory (the sampler is programmed for the base
-       * level only). Give writes to the other levels, such as the ones of
-       * glGenerateMipmap(), scratch memory: they would land on level 0. */
-      unsigned stride =
-         align(box->width * util_format_get_blocksize(presource->format), 4);
-      gtrans->scratch = CALLOC(1, (size_t)stride * box->height * box->depth);
-      if (!gtrans->scratch) {
-         slab_free(&context->transfer_pool, gtrans);
-         return NULL;
-      }
-      ptrans->stride = stride;
-      ret = gtrans->scratch;
-   } else {
-      if (grate_bo_map(resource->bo, &ret)) {
-         slab_free(&context->transfer_pool, gtrans);
-         return NULL;
-      }
-      ptrans->stride = resource->pitch;
-      ret = (uint8_t *)ret + box->y * resource->pitch +
-            box->x * util_format_get_blocksize(presource->format);
+   if (grate_bo_map(resource->bo, &ret)) {
+      slab_free(&context->transfer_pool, gtrans);
+      return NULL;
    }
+   ptrans->stride = resource->level_pitch[level];
+   ptrans->layer_stride = ptrans->stride * resource->level_height[level];
+   ret = (uint8_t *)ret + resource->level_offset[level] +
+         box->z * ptrans->layer_stride + box->y * ptrans->stride +
+         box->x * util_format_get_blocksize(presource->format);
 
    pipe_resource_reference(&ptrans->resource, presource);
    ptrans->level = level;
    ptrans->usage = usage;
    ptrans->box = *box;
-   ptrans->layer_stride = ptrans->stride;
    *transfer = ptrans;
 
    return ret;
@@ -140,12 +129,7 @@ grate_resource_transfer_unmap(struct pipe_context *pcontext,
                               struct pipe_transfer *transfer)
 {
    struct grate_context *context = grate_context(pcontext);
-   struct grate_transfer *gtrans = (struct grate_transfer *)transfer;
-
-   if (gtrans->scratch)
-      FREE(gtrans->scratch);
-   else
-      grate_bo_unmap(grate_resource(transfer->resource)->bo);
+   grate_bo_unmap(grate_resource(transfer->resource)->bo);
 
    pipe_resource_reference(&transfer->resource, NULL);
    slab_free(&context->transfer_pool, transfer);
@@ -240,6 +224,14 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
    if (!resource)
       return NULL;
 
+   if (template->last_level >= PIPE_MAX_TEXTURE_LEVELS ||
+       (template->last_level &&
+        (template->target != PIPE_TEXTURE_2D || template->array_size > 1 ||
+         util_format_is_depth_or_stencil(template->format)))) {
+      FREE(resource);
+      return NULL;
+   }
+
    resource->b = *template;
 
    pipe_reference_init(&resource->b.reference, 1);
@@ -280,7 +272,7 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
       resource->format = format;
    }
 
-   /* Textures use either tight POT rows or 64-byte NPOT rows. Renderable
+   /* Textures use either 16-byte POT rows or 64-byte NPOT rows. Renderable
     * textures can be sampled later, so allocate a native NPOT-compatible
     * stride rather than the framebuffer-only 32-byte alignment.
     */
@@ -288,7 +280,45 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
        (template->bind & PIPE_BIND_SAMPLER_VIEW))
       resource->pitch = align(resource->pitch, 64);
 
+   if (template->target == PIPE_TEXTURE_2D &&
+       (template->bind & PIPE_BIND_SAMPLER_VIEW) &&
+       !(template->bind & PIPE_BIND_DEPTH_STENCIL) &&
+       util_is_power_of_two_or_zero(template->width0) &&
+       util_is_power_of_two_or_zero(template->height0))
+      resource->pitch = align(template->width0 *
+                                 util_format_get_blocksize(template->format),
+                              16);
+
    size = resource->pitch * height;
+   resource->level_pitch[0] = resource->pitch;
+   resource->level_height[0] = height;
+
+   if (template->last_level) {
+      unsigned cpp = util_format_get_blocksize(template->format);
+      bool pot = util_is_power_of_two_or_zero(template->width0) &&
+                 util_is_power_of_two_or_zero(template->height0);
+      unsigned alloc_width = util_next_power_of_two(template->width0);
+      unsigned alloc_height = util_next_power_of_two(template->height0);
+
+      /* NVIDIA's linear mip chains have 16-byte rows and level extents.
+       * NPOT level zero instead uses 64-byte rows, and later levels reserve
+       * power-of-two extents. T30 does not align the base extent to 1K.
+       */
+      resource->pitch = align(template->width0 * cpp, pot ? 16 : 64);
+      resource->level_pitch[0] = resource->pitch;
+      size = align(resource->pitch * height, 16);
+      for (unsigned level = 1; level <= template->last_level; level++) {
+         unsigned width = u_minify(template->width0, level);
+         unsigned h = u_minify(height, level);
+         resource->level_offset[level] = size;
+         resource->level_pitch[level] = align(width * cpp, 16);
+         resource->level_height[level] = h;
+         size += align(align(u_minify(alloc_width, level) * cpp, 16) *
+                          u_minify(alloc_height, level),
+                       16);
+      }
+      size = align(size, 1024);
+   }
 
    if (util_format_has_stencil(util_format_description(template->format)) &&
        grate_format_is_emulated_z24(template->format)) {
@@ -317,6 +347,10 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
    struct grate_resource *resource;
    int format;
 
+   /* A dma-buf handle describes one image and supplies no mip offsets. */
+   if (template->last_level)
+      return NULL;
+
    resource = CALLOC_STRUCT(grate_resource);
    if (!resource)
       return NULL;
@@ -341,6 +375,8 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
       goto fail;
 
    resource->pitch = handle->stride;
+   resource->level_pitch[0] = resource->pitch;
+   resource->level_height[0] = template->height0;
 
    format = grate_pixel_format(template->format);
    if (format < 0) {
@@ -379,10 +415,7 @@ grate_resource_copy_region(struct pipe_context *pcontext,
    struct grate_resource *src = grate_resource(psrc);
    void *dst_map, *src_map;
 
-   /* Only level 0 has memory, and the copy is done by the CPU on linear
-    * resources: this is what Mesa uses to carry the image over when it
-    * reallocates a texture to give it mipmap levels. */
-   if (dst_level > 0 || src_level > 0)
+   if (dst_level > pdst->last_level || src_level > psrc->last_level)
       return;
    if (dst->tiled || src->tiled ||
        util_format_get_blocksize(pdst->format) !=
@@ -395,8 +428,13 @@ grate_resource_copy_region(struct pipe_context *pcontext,
    if (grate_bo_map(src->bo, &src_map) || grate_bo_map(dst->bo, &dst_map))
       return;
 
-   util_copy_box(dst_map, pdst->format, dst->pitch, 0, dstx, dsty, dstz,
-                 box->width, box->height, box->depth, src_map, src->pitch, 0,
+   util_copy_box((uint8_t *)dst_map + dst->level_offset[dst_level],
+                 pdst->format, dst->level_pitch[dst_level],
+                 dst->level_pitch[dst_level] * dst->level_height[dst_level],
+                 dstx, dsty, dstz, box->width, box->height, box->depth,
+                 (uint8_t *)src_map + src->level_offset[src_level],
+                 src->level_pitch[src_level],
+                 src->level_pitch[src_level] * src->level_height[src_level],
                  box->x, box->y, box->z);
 
    grate_bo_unmap(src->bo);
@@ -462,13 +500,15 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
    GRATE_PUSHBUF_WORD(ptr, value);                 /* 0x046 - tilemode */
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x02b, 0xe149));
-   grate_stream_push_reloc(&gr2d->stream, &ptr, dst->bo, 0);      /* 0x02b - dstba */
+   grate_stream_push_reloc(&gr2d->stream, &ptr, dst->bo,
+                           dst->level_offset[info->dst.level]);
 
-   GRATE_PUSHBUF_WORD(ptr, dst->pitch);            /* 0x02e - dstst */
+   GRATE_PUSHBUF_WORD(ptr, dst->level_pitch[info->dst.level]);
 
-   grate_stream_push_reloc(&gr2d->stream, &ptr, src->bo, 0);      /* 0x031 - srcba */
+   grate_stream_push_reloc(&gr2d->stream, &ptr, src->bo,
+                           src->level_offset[info->src.level]);
 
-   GRATE_PUSHBUF_WORD(ptr, src->pitch);            /* 0x033 - srcst */
+   GRATE_PUSHBUF_WORD(ptr, src->level_pitch[info->src.level]);
 
    value = info->dst.box.height << 16 | info->dst.box.width;
    GRATE_PUSHBUF_WORD(ptr, value);                 /* 0x038 - dstsize */
@@ -599,8 +639,9 @@ grate_clear(struct pipe_context *pcontext, unsigned int buffers,
       int i;
       for (i = 0; i < fb->nr_cbufs; ++i) {
          struct pipe_surface *dst = &fb->cbufs[i];
-         fill(stream, &ptr, grate_resource(dst->texture), 0,
-              grate_resource(dst->texture)->pitch,
+         fill(stream, &ptr, grate_resource(dst->texture),
+              grate_resource(dst->texture)->level_offset[dst->level],
+              grate_resource(dst->texture)->level_pitch[dst->level],
               pack_color(dst->format, color->f),
               util_format_get_blocksize(dst->format), 0, 0, fb->width,
               fb->height);
@@ -641,8 +682,9 @@ grate_clear_render_target(struct pipe_context *pipe,
       return;
    }
 
-   fill(&context->gr2d->stream, &ptr, grate_resource(dst->texture), 0,
-        grate_resource(dst->texture)->pitch,
+   fill(&context->gr2d->stream, &ptr, grate_resource(dst->texture),
+        grate_resource(dst->texture)->level_offset[dst->level],
+        grate_resource(dst->texture)->level_pitch[dst->level],
         pack_color(dst->format, color->f),
         util_format_get_blocksize(dst->format), dstx, dsty, width, height);
 

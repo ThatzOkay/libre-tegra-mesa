@@ -39,6 +39,8 @@ struct grate_context {
    struct pipe_context base;
 
    struct grate_device *drm;
+   struct grate_bo *spill_bo;
+   unsigned spill_size;
    struct grate_channel *gr2d;
    struct grate_channel *gr3d;
 
@@ -67,6 +69,7 @@ struct grate_context {
 
    struct pipe_sampler_view *sampler_views[16];
    struct pipe_sampler_state *samplers[16];
+   bool warned_sampler;
 
    struct pipe_scissor_state scissor;
    uint32_t no_scissor[3];

@@ -5,6 +5,7 @@
 #include "util/u_upload_mgr.h"
 
 #include "grate_common.h"
+#include "grate_bo.h"
 #include "grate_device.h"
 #include "grate_context.h"
 #include "util/u_inlines.h"
@@ -78,6 +79,7 @@ grate_context_destroy(struct pipe_context *pcontext)
    for (unsigned i = 0; i < 16; i++)
       pipe_sampler_view_reference(&context->sampler_views[i], NULL);
 
+   grate_bo_unref(context->spill_bo);
    slab_destroy_child(&context->transfer_pool);
 
    grate_channel_delete(context->gr3d);
