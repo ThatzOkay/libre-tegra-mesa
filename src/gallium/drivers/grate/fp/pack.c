@@ -105,6 +105,13 @@ grate_fp_pack_alu(uint32_t *dst, struct fp_alu_instr *instr)
 uint32_t
 grate_fp_pack_dw(struct fp_dw_instr *instr)
 {
+   if (instr->spill) {
+      return 2u | ((unsigned)instr->index << 2) |
+             ((unsigned)instr->write_killed << 6) |
+             ((unsigned)instr->cache_persistent << 8) |
+             ((uint32_t)instr->spill_args << 10);
+   }
+
    union {
       struct __attribute__((packed)) {
          unsigned enable:1;

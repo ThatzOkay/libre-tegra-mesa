@@ -69,6 +69,11 @@ struct fp_dw_instr {
    int index;
    bool stencil_write;
    enum fp_dw_src_regs src_regs;
+   /* Raw arguments of a surface-4 FP20 spill store (DW op 2). */
+   bool spill;
+   uint16_t spill_args;
+   bool write_killed;
+   bool cache_persistent;
 };
 
 enum fp_sfu_op {
@@ -146,7 +151,10 @@ struct fp_sched {
 
 struct fp_instr {
    struct list_head link;
-   // TODO: PSEQ
+   uint32_t pseq;
+   /* The ALU consumes a spill load into R12 in this round. Place pseq on
+    * row 3 and keep this instruction, which reads R12, on row 0. */
+   bool spill_load;
    struct fp_sched mfu_sched;
    uint32_t tex;
    struct fp_sched alu_sched;

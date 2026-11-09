@@ -676,6 +676,18 @@ emit_render_targets(struct grate_context *context, uint32_t **ptrp)
       grate_stream_push_reloc(stream, ptrp, fb->rt_bos[i], fb->rt_offsets[i]);
    }
 
+   if (context->fshader->info.num_spill_slots) {
+      GRATE_PUSHBUF_WORD(
+         *ptrp, host1x_opcode_incr(
+                   REG_TGR3D_GLOBAL_SURFDESC(GRATE_FP_SPILL_SURFACE), 1));
+      GRATE_PUSHBUF_WORD(
+         *ptrp, TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(TGR3D_SURF_FORMAT_P128) |
+                   TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(GRATE_FP_SPILL_STRIDE));
+      GRATE_PUSHBUF_WORD(
+         *ptrp, host1x_opcode_incr(
+                   REG_TGR3D_GLOBAL_SURFADDR(GRATE_FP_SPILL_SURFACE), 1));
+      grate_stream_push_reloc(stream, ptrp, context->spill_bo, 0);
+   }
    uint32_t enable = fb->rt_mask;
    if (fb->base.zsbuf.texture && context->zsa &&
        (context->zsa->base.depth_enabled ||
