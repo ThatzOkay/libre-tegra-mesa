@@ -907,6 +907,60 @@ src_component(const struct tgsi_src_register *src, unsigned k)
    return swizzle[k];
 }
 
+/* NVIDIA uses SFU FRC on an FP20 row operand. FLR subtracts that
+ * fraction from the original value; converting to FX10 is not FRC. */
+static void
+emit_rounding(struct grate_fp_shader *fp,
+              const struct tgsi_full_instruction *tgsi)
+{
+   const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
+   const struct tgsi_src_register *src = &tgsi->Src[0].Register;
+   bool floor = tgsi->Instruction.Opcode == TGSI_OPCODE_FLR;
+
+   for (unsigned c = 0; c < 4; c++) {
+      if (!(dst->WriteMask & (1 << c)))
+         continue;
+      unsigned comp = src_component(src, c);
+      int row = -1;
+      for (unsigned r = 0; r < 4; r++) {
+         /* An interpolated original must survive until subtraction. */
+         if (!fp->occupied[r] &&
+             !(floor && src->File == TGSI_FILE_INPUT && r == comp)) {
+            row = r;
+            break;
+         }
+      }
+      if (row < 0) {
+         fp->allocation_failed = true;
+         fp->register_pressure = true;
+         return;
+      }
+
+      struct fp_alu_src_operand original = {0};
+      if (floor) {
+         if (src->File == TGSI_FILE_INPUT) {
+            original = fp_alu_src_row(comp);
+            original.negate = src->Negate;
+            original.absolute_value = src->Absolute;
+         } else {
+            original = fp_tgsi_src(fp, src, c, NULL);
+         }
+      }
+      emit_load_scalar(fp, src, comp, row, false);
+      struct fp_alu_instr_packet *store = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&store->link);
+      struct fp_alu_src_operand fraction = fp_alu_src_row(row);
+      store->slots[0] =
+         fp_alu_sMOV(fp_alu_dst(fp, dst, c, tgsi->Instruction.Saturate),
+                     floor ? original : fraction);
+      if (floor) {
+         fraction.negate = true;
+         store->slots[0].src[2] = fraction;
+      }
+      emit_sfu_step(fp, FP_SFU_OP_FRC, row, store);
+   }
+}
+
 /* DP2, DP3 and DP4: the sum of a.k * b.k as a multiply and fused
  * multiply-adds, which leave the running sum in channel W of the scratch
  * temporary. Every step reads component k of both operands in all channels,
@@ -998,6 +1052,10 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
    switch (inst->Instruction.Opcode) {
    case TGSI_OPCODE_TEX:
       emit_TEX(fp, inst);
+      break;
+   case TGSI_OPCODE_FRC:
+   case TGSI_OPCODE_FLR:
+      emit_rounding(fp, inst);
       break;
    case TGSI_OPCODE_RCP:
    case TGSI_OPCODE_RSQ:
@@ -1981,9 +2039,15 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                if (packed)
                   kind = 1;
             }
-            fp->avoid_rows = false;
+            fp->avoid_rows = inst->Instruction.Opcode == TGSI_OPCODE_FRC ||
+                             inst->Instruction.Opcode == TGSI_OPCODE_FLR;
             for (unsigned m = n + 1; m < count && !fp->avoid_rows; m++) {
                switch (code[m].Instruction.Opcode) {
+               case TGSI_OPCODE_FRC:
+               case TGSI_OPCODE_FLR:
+                  /* Leave row scratch available even for a dying source. */
+                  fp->avoid_rows = live_after[m][dst->Index] & (1 << c);
+                  break;
                case TGSI_OPCODE_RCP:
                case TGSI_OPCODE_RSQ:
                case TGSI_OPCODE_SQRT:
