@@ -55,6 +55,7 @@ grate_fp_pack_alu(uint32_t *dst, struct fp_alu_instr *instr)
       .condition_code = instr->condition,
       .dst_reg = instr->dst.index,
       .saturate_result = instr->dst.saturate,
+      .scale_result = instr->scale,
 
       .write_low_sub_reg = instr->dst.write_low_sub_reg,
       .write_high_sub_reg = instr->dst.write_high_sub_reg,

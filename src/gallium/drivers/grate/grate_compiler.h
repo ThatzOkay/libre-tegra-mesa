@@ -80,6 +80,9 @@ struct grate_fp_shader {
    uint8_t claimed[72];
    uint8_t reusable[72];
    bool spilling;
+   /* DDX/DDY use the quad exchange registers r32, r40, r48 and r56, which
+    * the constants must not occupy. */
+   bool uses_derivatives;
    bool register_pressure;
    const struct tgsi_full_instruction *current_instruction;
    const struct tgsi_full_instruction *code_end;
