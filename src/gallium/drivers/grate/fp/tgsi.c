@@ -437,7 +437,14 @@ fp_constant(struct grate_fp_shader *fp, int word, float immediate)
           (word >= 0 || fp->info.constants[i].immediate == immediate))
          break;
    }
-   assert(i < 32);
+   if (i >= ARRAY_SIZE(fp->info.constants)) {
+      if (!fp->allocation_failed)
+         fprintf(stderr, "GRATE FRAG: scalar constant bank exhausted\n");
+      fp->allocation_failed = true;
+      /* Spilling temporaries cannot make more constant registers. */
+      fp->register_pressure = false;
+      return fp_alu_src_zero();
+   }
    if (i == fp->info.num_constants) {
       fp->info.constants[i].word = word;
       fp->info.constants[i].immediate = immediate;
@@ -476,7 +483,14 @@ fp_tgsi_src(struct grate_fp_shader *fp, const struct tgsi_src_register *src,
       break;
    }
    case TGSI_FILE_CONSTANT:
-      assert(!src->Indirect);
+      if (src->Indirect) {
+         if (!fp->allocation_failed)
+            fprintf(stderr,
+                    "GRATE FRAG: indirect uniform indexing unsupported\n");
+         fp->allocation_failed = true;
+         fp->register_pressure = false;
+         return fp_alu_src_zero();
+      }
       value = fp_constant(fp, src->Index * 4 + comp, 0.0f);
       break;
    case TGSI_FILE_TEMPORARY:
