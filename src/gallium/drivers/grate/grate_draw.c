@@ -551,6 +551,9 @@ grate_draw_vbo(struct pipe_context *pcontext,
    if (!grate_draw_pivot(pcontext, info, draws, &pivot))
       return;
 
+   if (!grate_prepare_textures(context))
+      return;
+
    err = grate_stream_begin(stream, &ptr);
    if (err < 0) {
       grate_loge("grate_stream_begin() failed: %d\n", err);

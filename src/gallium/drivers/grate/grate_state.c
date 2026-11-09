@@ -12,6 +12,7 @@
 #include "util/u_framebuffer.h"
 
 #include "grate_compiler.h"
+#include "grate_bo.h"
 #include "grate_common.h"
 #include "grate_context.h"
 #include "grate_program.h"
@@ -64,14 +65,15 @@ grate_add_render_target(struct grate_context *context,
       rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->stencil_pitch);
    } else {
       rt_params = TGR3D_GLOBAL_SURFDESC_SURF_FORMAT(res->format);
-      rt_params |= TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->pitch);
+      rt_params |=
+         TGR3D_GLOBAL_SURFDESC_ARRAY_STRIDE(res->level_pitch[ref->level]);
    }
    rt_params |= TGR3D_GLOBAL_SURFDESC_STRUCTURE(res->tiled);
 
    context->framebuffer.rt_params[slot] = rt_params;
    context->framebuffer.rt_bos[slot] = res->bo;
    context->framebuffer.rt_offsets[slot] =
-      stencil_plane ? res->stencil_offset : 0;
+      stencil_plane ? res->stencil_offset : res->level_offset[ref->level];
    context->framebuffer.rt_mask |= 1u << slot;
    context->framebuffer.num_rts =
       MAX2(context->framebuffer.num_rts, slot + 1);
@@ -947,9 +949,63 @@ emit_program(struct grate_context *context, uint32_t **ptrp)
    grate_stream_push_words(stream, ptrp, linker_insts, ARRAY_SIZE(linker_insts), 0);
 }
 
-/* Base-level linear 2D textures. The texture engine derives row stride from
- * width; sampler-only resources therefore have tightly packed rows.
+/* Complete CPU copies before beginning a command stream: mapping waits for
+ * earlier GPU users, including users of the previous sampler copy.
  */
+bool
+grate_prepare_textures(struct grate_context *ctx)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(ctx->sampler_views); i++) {
+      struct pipe_sampler_view *view = ctx->sampler_views[i];
+      if (!view || !ctx->samplers[i])
+         continue;
+      if (view->target != PIPE_TEXTURE_2D || view->u.tex.first_level ||
+          grate_pixel_format(view->format) < 0) {
+         if (!ctx->warned_sampler) {
+            grate_loge("unsupported sampler view; skipping draw\n");
+            ctx->warned_sampler = true;
+         }
+         return false;
+      }
+
+      struct grate_resource *res = grate_resource(view->texture);
+      if (res->tiled)
+         return false;
+      if (res->b.last_level)
+         continue;
+      unsigned row_bytes =
+         res->b.width0 * util_format_get_blocksize(res->b.format);
+      bool pot = util_is_power_of_two_or_zero(res->b.width0) &&
+                 util_is_power_of_two_or_zero(res->b.height0);
+      unsigned pitch = align(row_bytes, pot ? 16 : 64);
+      if (res->pitch == pitch ||
+          (res->b.height0 == 1 && res->pitch >= row_bytes))
+         continue;
+      if (res->pitch < row_bytes)
+         return false;
+      if (!res->sampler_bo)
+         res->sampler_bo =
+            grate_bo_alloc(ctx->drm, pitch * res->b.height0, 0);
+      if (!res->sampler_bo)
+         return false;
+
+      void *src, *dst;
+      if (grate_bo_map(res->bo, &src))
+         return false;
+      if (grate_bo_map(res->sampler_bo, &dst)) {
+         grate_bo_unmap(res->bo);
+         return false;
+      }
+      for (unsigned y = 0; y < res->b.height0; y++)
+         memcpy((uint8_t *)dst + y * pitch,
+                (uint8_t *)src + y * res->pitch, row_bytes);
+      grate_bo_unmap(res->bo);
+      grate_bo_unmap(res->sampler_bo);
+   }
+   return true;
+}
+
+/* Linear 2D textures, using NVIDIA's level layout and 4-bit fractional LOD. */
 static void
 emit_textures(struct grate_context *ctx, uint32_t **ptrp)
 {
@@ -961,29 +1017,8 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
       if (!view || !sampler)
          continue;
       struct grate_resource *res = grate_resource(view->texture);
-      assert(view->target == PIPE_TEXTURE_2D && view->u.tex.first_level == 0);
-      /* Only the base level is programmed (BASE_LEVEL_ONLY below), so a
-       * mipmapped texture, or a mipmap filter, samples level 0. This is
-       * what the descriptor does anyway; it only gives up the smoothing
-       * of minified textures, instead of aborting the application. */
-      unsigned row_bytes =
-         res->b.width0 * util_format_get_blocksize(res->b.format);
-      /* POT layout is tightly packed. NPOT layout rounds rows to 64 bytes,
-       * even when the logical dimensions themselves are powers of two.
-       */
       bool pot_layout = util_is_power_of_two_or_zero(res->b.width0) &&
-                        util_is_power_of_two_or_zero(res->b.height0) &&
-                        (res->pitch == row_bytes || res->b.height0 == 1);
-      unsigned native_pitch = pot_layout ? row_bytes : align(row_bytes, 64);
-      bool native_layout = res->pitch == native_pitch ||
-                           (res->b.height0 == 1 && res->pitch >= row_bytes);
-      if (!native_layout)
-         fprintf(
-            stderr,
-            "GRATE unsupported sampler layout: %s %ux%u pitch=%u native=%u\n",
-            util_format_name(res->b.format), res->b.width0, res->b.height0,
-            res->pitch, native_pitch);
-      assert(native_layout);
+                        util_is_power_of_two_or_zero(res->b.height0);
       if (grate_debug & GRATE_DEBUG_TRACE)
          fprintf(stderr,
                  "GRATE sampler: %s view %s swizzle=%u,%u,%u,%u size=%ux%u "
@@ -1012,48 +1047,75 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
          break;
       }
       uint32_t lo = TGR3D_TEX_TEXDESC_LO_SURF_FORMAT(texture_format);
-      if (sampler->wrap_s == PIPE_TEX_WRAP_CLAMP_TO_EDGE)
+      /* Border and mirror-clamp modes degrade to clamp-to-edge. */
+      if (sampler->wrap_s != PIPE_TEX_WRAP_REPEAT &&
+          sampler->wrap_s != PIPE_TEX_WRAP_MIRROR_REPEAT)
          lo |= 2;
-      else
-         assert(sampler->wrap_s == PIPE_TEX_WRAP_REPEAT);
-      if (sampler->wrap_t == PIPE_TEX_WRAP_CLAMP_TO_EDGE)
+      if (sampler->wrap_s == PIPE_TEX_WRAP_MIRROR_REPEAT)
+         lo |= TGR3D_TEX_TEXDESC_LO_MIRROR_S(TGR3D_STATE_ENABLED);
+      if (sampler->wrap_t != PIPE_TEX_WRAP_REPEAT &&
+          sampler->wrap_t != PIPE_TEX_WRAP_MIRROR_REPEAT)
          lo |= 1;
-      else
-         assert(sampler->wrap_t == PIPE_TEX_WRAP_REPEAT);
+      if (sampler->wrap_t == PIPE_TEX_WRAP_MIRROR_REPEAT)
+         lo |= TGR3D_TEX_TEXDESC_LO_MIRROR_T(TGR3D_STATE_ENABLED);
       if (sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR)
          lo |= TGR3D_TEX_TEXDESC_LO_LERP_MIN;
       if (sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR)
          lo |= TGR3D_TEX_TEXDESC_LO_LERP_MAG;
-      uint32_t hi = 0x80; /* base level only */
+      bool mipmaps = sampler->min_mip_filter != PIPE_TEX_MIPFILTER_NONE;
+      if (mipmaps && sampler->min_mip_filter == PIPE_TEX_MIPFILTER_LINEAR)
+         lo |= TGR3D_TEX_TEXDESC_LO_LERP_MIP |
+               TGR3D_TEX_TEXDESC_LO_TRILINEAR_OPT(TGR3D_STATE_ENABLED);
+      unsigned last = MIN2(view->u.tex.last_level, res->b.last_level);
+      float min_lod = CLAMP(sampler->min_lod, 0.0f, 255.0f / 16);
+      float max_lod = CLAMP(MIN2(sampler->max_lod, (float)last),
+                            0.0f, 255.0f / 16);
+      unsigned lod_min = mipmaps ? (unsigned)(min_lod * 16) : 0;
+      unsigned lod_max = mipmaps ? (unsigned)(max_lod * 16) : 0;
+      uint32_t hi = 0;
       if (pot_layout) {
          hi |= TGR3D_TEX_TEXDESC_HI_LOG2_WIDTH(util_logbase2(res->b.width0));
          hi |=
             TGR3D_TEX_TEXDESC_HI_LOG2_HEIGHT(util_logbase2(res->b.height0));
+         hi |= TGR3D_TEX_TEXDESC_HI_LOD_MIN(lod_min) |
+               TGR3D_TEX_TEXDESC_HI_LOD_MAX(lod_max);
+         if (!mipmaps) {
+            hi |= TGR3D_TEX_TEXDESC_HI_LOD_MAX(1);
+            if (!res->b.last_level)
+               hi |= TGR3D_TEX_TEXDESC_HI_BASE_LEVEL_ONLY(
+                  TGR3D_STATE_ENABLED);
+         }
       } else {
-         hi |= 0x40 | TGR3D_TEX_TEXDESC_HI_WIDTH(res->b.width0) |
+         /* NVIDIA's normal NPOT path clamps outside [0,1], even for a
+          * repeat sampler. Keep its limitation rather than wrap at the
+          * wrong power-of-two boundary.
+          */
+         lo |= 3;
+         hi |= 0xc0 | TGR3D_TEX_TEXDESC_HI_WIDTH(res->b.width0) |
                TGR3D_TEX_TEXDESC_HI_HEIGHT(res->b.height0);
       }
       GRATE_PUSHBUF_WORD(ptr,
                          host1x_opcode_incr(REG_TGR3D_TEX_TEXADDR(i), 1));
-      grate_stream_push_reloc(stream, &ptr, res->bo, 0);
+      grate_stream_push_reloc(stream, &ptr,
+                              res->sampler_bo ? res->sampler_bo : res->bo, 0);
       GRATE_PUSHBUF_WORD(ptr,
                          host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_LO(i), 2));
       GRATE_PUSHBUF_WORD(ptr, lo);
       GRATE_PUSHBUF_WORD(ptr, hi);
       if (!pot_layout) {
-         /* A non-power-of-two descriptor keeps its level range in NPOT_AUX.
-          * Left zero (as grate_init_state() clears it), the sampler wraps
-          * coordinates at the next lower power of two even inside [0,1]: a
-          * 1366x753 texture sampled with REPEAT, which is what Catacomb
-          * composites its client buffers with, showed the left 1024 columns
-          * and top 512 rows again beyond x=1024 and y=512. With
-          * BASE_LEVEL_ONLY set the texture is addressed correctly across
-          * [0,1]; beyond 1.0 REPEAT then clamps to the edge, so REPEAT is
-          * exact only for coordinates in [0,1] on such textures. */
+         uint32_t aux = TGR3D_TEX_TEXDESC_NPOT_AUX_LOD_MIN(lod_min) |
+                        TGR3D_TEX_TEXDESC_NPOT_AUX_LOD_MAX(lod_max);
+         aux |= TGR3D_TEX_TEXDESC_NPOT_AUX_LOG2_WIDTH(
+            util_logbase2_ceil(res->b.width0));
+         aux |= TGR3D_TEX_TEXDESC_NPOT_AUX_LOG2_HEIGHT(
+            util_logbase2_ceil(res->b.height0));
+         if (!mipmaps)
+            aux |= TGR3D_TEX_TEXDESC_NPOT_AUX_BASE_LEVEL_ONLY(
+                      TGR3D_STATE_ENABLED) |
+                   TGR3D_TEX_TEXDESC_NPOT_AUX_LOD_MAX(1);
          GRATE_PUSHBUF_WORD(
             ptr, host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_NPOT_AUX(i), 1));
-         GRATE_PUSHBUF_WORD(ptr, TGR3D_TEX_TEXDESC_NPOT_AUX_BASE_LEVEL_ONLY(
-                                    TGR3D_STATE_ENABLED));
+         GRATE_PUSHBUF_WORD(ptr, aux);
       }
    }
    *ptrp = ptr;
