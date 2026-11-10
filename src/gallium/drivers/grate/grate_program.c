@@ -774,16 +774,12 @@ grate_compile_fs(struct grate_context *context,
     * (capacity - 1) >> 2, >> 3, / 12, >> 4 for 1 to 4 rows). A value in R4
     * or above is only kept per pixel when NUM_ROWS covers it; the
     * programs that used the globals 16-23 for it needed MAX_OUT 4. */
-   static const unsigned max_qid_for_rows[] = {0, (0x12c - 1) >> 2,
-                                               (0x12c - 1) >> 3,
-                                               (0x12c - 1) / 12,
-                                               (0x12c - 1) >> 4};
    assert(fp.info.num_rows >= 1 && fp.info.num_rows <= 4);
-   PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID(max_qid_for_rows[fp.info.num_rows]) |
+   PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID(grate_fp_max_qid(fp.info.num_rows)) |
         TGR3D_GLOBAL_PIX_ATTR_NUM_ROWS(fp.info.num_rows - 1));
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_CTL, 1));
    PUSH(0x22000000 | TGR3D_PSEQ_CTL_MAX_OUT(0x12c) |
-        TGR3D_PSEQ_CTL_MIN_OUT(has_spills ? 0 : 0xc8) |
+        TGR3D_PSEQ_CTL_MIN_OUT((has_spills || fp.info.epochs) ? 0 : 0xc8) |
         TGR3D_PSEQ_CTL_MERGE_SPAN_STARTS | TGR3D_PSEQ_CTL_MERGE_REGISTERS |
         TGR3D_PSEQ_CTL_REMOVE_KILLED_PIXELS |
         (has_spills ? 0 : TGR3D_PSEQ_CTL_ALLOW_QID_COLLISIONS));
@@ -793,6 +789,7 @@ grate_compile_fs(struct grate_context *context,
    PUSH(host1x_opcode_imm(REG_TGR3D_AT_INST_OFFSET, 0));
    PUSH(host1x_opcode_imm(REG_TGR3D_ALU_INST_OFFSET, 0));
 
+   size_t cmd_start = buf.size;
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_COMMAND_EVEN(0), 1));
    // TODO: document/convert these values
    PUSH(0x20006000 | num_fp_instrs);
@@ -857,6 +854,11 @@ grate_compile_fs(struct grate_context *context,
    PUSH(host1x_opcode_nonincr(REG_TGR3D_DW_INST_DATA, num_fp_instrs));
    list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
       PUSH(grate_fp_pack_dw(&instr->dw));
+
+   /* A program of more than one epoch is loaded by the sequencer's DMA,
+    * from the buffers of grate_fp_epochs: keep the common state only. */
+   if (fp.info.epochs)
+      buf.size = cmd_start;
 
    uint32_t tram_setup = 0;
    tram_setup |= TGR3D_GLOBAL_TRI_ATTR_NUM_TRIS(64 / fp.info.max_tram_row);
@@ -962,6 +964,12 @@ grate_delete_fs_state(struct pipe_context *pcontext, void *so)
    struct grate_fragment_shader_state *shader = so;
    grate_trace();
    FREE(shader->blob.commands);
+   if (shader->info.epochs) {
+      grate_bo_unref(shader->info.epochs->program_bo);
+      grate_bo_unref(shader->info.epochs->constant_bo);
+      FREE(shader->info.epochs->program);
+      FREE(shader->info.epochs);
+   }
    while (shader->dual_variants) {
       struct grate_fragment_shader_state *variant = shader->dual_variants;
 

@@ -1958,6 +1958,7 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
    fp->info.num_spill_slots = 0;
    fp->info.color_input = -1;
    fp->info.max_tram_row = 1;
+   fp->info.epochs = NULL;
    fp->num_immediates = 0;
    fp->num_temporaries = 0;
    fp->allocation_failed = false;
