@@ -25,6 +25,9 @@ struct tgsi_full_instruction;
 
 /* Logical uniforms are compacted into the scalar FP20 constant bank. */
 #define GRATE_FP_MAX_CONSTANTS 32
+/* Constants a program may use before it is split into epochs of at most
+ * GRATE_FP_MAX_CONSTANTS each. */
+#define GRATE_FP_MAX_LOGICAL_CONSTANTS 192
 #define GRATE_FP_UNIFORM_COMPONENTS 256
 
 struct grate_vp_shader {
@@ -85,7 +88,7 @@ struct grate_fp_info {
    struct {
       int word; /* -1 for an immediate */
       float immediate;
-   } constants[GRATE_FP_MAX_CONSTANTS];
+   } constants[GRATE_FP_MAX_LOGICAL_CONSTANTS];
    unsigned num_constants;
    /* Register rows (groups of four registers R4k..R4k+3) the program needs,
     * 1 to 4: GLOBAL_PIX_ATTR.NUM_ROWS + 1. Set by grate_tgsi_to_fp(). */
