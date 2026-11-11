@@ -2,7 +2,9 @@
 #include "grate_compiler.h"
 #include "fpir.h"
 
+#include "tgsi/tgsi_info.h"
 #include "tgsi/tgsi_parse.h"
+#include "tgsi/tgsi_strings.h"
 #include "tgsi/tgsi_util.h"
 #include "util/u_dynarray.h"
 
@@ -675,7 +677,15 @@ emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    const struct tgsi_src_register *coord = &tgsi->Src[0].Register;
    const struct tgsi_src_register *sampler = &tgsi->Src[1].Register;
    const struct tgsi_dst_register *dst = &tgsi->Dst[0].Register;
-   assert(tgsi->Texture.Texture == TGSI_TEXTURE_2D);
+   if (tgsi->Texture.Texture != TGSI_TEXTURE_2D) {
+      /* Refuse the shader like an unimplemented opcode, do not abort. */
+      fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: TEX on %s (only 2D)\n",
+              tgsi->Texture.Texture < TGSI_TEXTURE_COUNT
+                 ? tgsi_texture_names[tgsi->Texture.Texture]
+                 : "an unknown target");
+      fp->allocation_failed = true;
+      return;
+   }
    assert((coord->File == TGSI_FILE_INPUT && !coord->Negate &&
            !coord->Absolute) ||
           coord->File == TGSI_FILE_TEMPORARY ||
@@ -1334,8 +1344,9 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
        * The message stays, naming the opcode to implement next; it is
        * printed even after an earlier failure, since a missing opcode says
        * more than a register shortage does. */
-      fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x\n",
-              inst->Instruction.Opcode);
+      fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x %s\n",
+              inst->Instruction.Opcode,
+              tgsi_get_opcode_name(inst->Instruction.Opcode));
       fp->allocation_failed = true;
       break;
    }
