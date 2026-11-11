@@ -673,6 +673,394 @@ align_to_rows(struct grate_fp_shader *fp)
    list_replace(&packets, &fp->alu_instructions);
 }
 
+/*
+ * Writes the register writes that load a program into the sequencer, the
+ * ALU, the MFU and the data writer: its steps and the instructions they
+ * use, as the lists of one epoch.
+ */
+static void
+emit_fp_blocks(struct util_dynarray *buf, enum drm_tegra_soc_id soc_id,
+               struct list_head *steps, struct list_head *mfus,
+               struct list_head *alus)
+{
+#define EPUSH(x) util_dynarray_append_typed(buf, uint32_t, (x))
+   unsigned num_steps = list_length(steps);
+   unsigned num_mfus = list_length(mfus);
+   unsigned num_alus = list_length(alus);
+
+   if (soc_id == DRM_TEGRA_SOC_T114) {
+      // TODO: document/convert these values
+      /* XXX: maybe not needed */
+      EPUSH(host1x_opcode_incr(0x547, 0x0002));
+      EPUSH(0xc0000000);
+      EPUSH(0x00000000);
+   }
+
+   EPUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_PSEQ_INST_DATA, num_steps));
+   list_for_each_entry(struct fp_instr, instr, steps, link)
+      EPUSH(instr->pseq);
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_AT_REMAP_DATA, num_steps));
+   list_for_each_entry(struct fp_instr, instr, steps, link)
+      EPUSH(grate_fp_pack_sched(&instr->mfu_sched));
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_AT_INST_DATA_LO, num_mfus * 2));
+   list_for_each_entry(struct fp_mfu_instr, instr, mfus, link) {
+      uint32_t words[2];
+      grate_fp_pack_mfu(words, instr);
+      EPUSH(words[0]);
+      EPUSH(words[1]);
+   }
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_TEX_INST_DATA, num_steps));
+   list_for_each_entry(struct fp_instr, instr, steps, link)
+      EPUSH(instr->tex);
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_REMAP_DATA, num_steps));
+   list_for_each_entry(struct fp_instr, instr, steps, link) {
+      if (soc_id == DRM_TEGRA_SOC_T114)
+         EPUSH(grate_fp_pack_alu_sched_t114(&instr->alu_sched));
+      else
+         EPUSH(grate_fp_pack_sched(&instr->alu_sched));
+   }
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_INST_DATA, num_alus * 4 * 2));
+   list_for_each_entry(struct fp_alu_instr_packet, instr, alus, link) {
+      for (int i = 0; i < 4; ++i) {
+         uint32_t words[2];
+         grate_fp_pack_alu(words, instr->slots + i);
+         EPUSH(words[0]);
+         EPUSH(words[1]);
+      }
+   }
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_P2CX_DATA, num_steps));
+   list_for_each_entry(struct fp_instr, instr, steps, link)
+      EPUSH(0x00000000);
+
+   EPUSH(host1x_opcode_nonincr(REG_TGR3D_DW_INST_DATA, num_steps));
+   list_for_each_entry(struct fp_instr, instr, steps, link)
+      EPUSH(grate_fp_pack_dw(&instr->dw));
+#undef EPUSH
+}
+
+/*
+ * A fragment program that reads more than GRATE_FP_MAX_CONSTANTS distinct
+ * constants does not fit the bank. Cut it into epochs at the borders of
+ * its rounds (rows steps each), like NVIDIA's compiler: every epoch is a
+ * program of its own, loaded at instruction 0, with the constants it reads
+ * in bank slots from 0, and the registers of the pixels are kept between
+ * the epochs. The result holds the blocks and the constants of every epoch,
+ * see grate_fp_epochs. The steps and instructions of fp are consumed.
+ */
+#define GRATE_FP_LOGICAL_WORDS (GRATE_FP_MAX_LOGICAL_CONSTANTS / 32)
+#define GRATE_FP_MAX_EPOCH_STEPS 64
+/* the addresses of the ALU and MFU instructions of a step are six bits */
+#define GRATE_FP_MAX_EPOCH_PACKETS 61
+#define GRATE_FP_MAX_EPOCH_MFUS 61
+
+static void
+epoch_note_constants(const struct fp_alu_instr_packet *packet, uint32_t *bits)
+{
+   for (unsigned slot = 0; slot < 4; slot++) {
+      for (unsigned i = 0; i < 4; i++) {
+         unsigned index = packet->slots[slot].src[i].index;
+         if (index >= 32 && index - 32 < GRATE_FP_MAX_LOGICAL_CONSTANTS)
+            bits[(index - 32) / 32] |= 1u << ((index - 32) % 32);
+      }
+   }
+}
+
+static unsigned
+epoch_count_bits(const uint32_t *bits)
+{
+   unsigned count = 0;
+   for (unsigned i = 0; i < GRATE_FP_LOGICAL_WORDS; i++)
+      count += util_bitcount(bits[i]);
+   return count;
+}
+
+static void
+free_epoch_lists(struct list_head *steps, struct list_head *mfus,
+                 struct list_head *alus)
+{
+   list_for_each_entry_safe(struct fp_instr, step, steps, link)
+      FREE(step);
+   list_for_each_entry_safe(struct fp_mfu_instr, mfu, mfus, link)
+      FREE(mfu);
+   list_for_each_entry_safe(struct fp_alu_instr_packet, packet, alus, link)
+      FREE(packet);
+}
+
+static bool
+split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
+                  bool has_spills, struct grate_fp_epochs **result)
+{
+   const unsigned rows = MAX2(fp->info.num_rows, 1);
+   const unsigned num_steps = list_length(&fp->fp_instructions);
+   const unsigned num_packets = list_length(&fp->alu_instructions);
+   const unsigned num_mfus = list_length(&fp->mfu_instructions);
+   const unsigned num_rounds = DIV_ROUND_UP(num_steps, rows);
+   struct fp_instr **steps = CALLOC(num_steps + 1, sizeof(*steps));
+   struct fp_alu_instr_packet **packets =
+      CALLOC(num_packets + 1, sizeof(*packets));
+   struct fp_mfu_instr **mfus = CALLOC(num_mfus + 1, sizeof(*mfus));
+   uint32_t(*round_bits)[GRATE_FP_LOGICAL_WORDS] =
+      CALLOC(num_rounds + 1, sizeof(*round_bits));
+   unsigned *round_packets = CALLOC(num_rounds + 1, sizeof(unsigned));
+   unsigned *round_mfus = CALLOC(num_rounds + 1, sizeof(unsigned));
+   struct grate_fp_epochs *epochs = CALLOC_STRUCT(grate_fp_epochs);
+   unsigned begin[GRATE_FP_MAX_EPOCHS + 1]; /* first round of each epoch */
+   struct util_dynarray program;
+   const char *why = NULL;
+   unsigned count = 0;
+
+   util_dynarray_init(&program, NULL);
+   if (!steps || !packets || !mfus || !round_bits || !round_packets ||
+       !round_mfus || !epochs) {
+      why = "out of memory";
+      goto fail;
+   }
+   if (fp->uses_derivatives || has_spills) {
+      why = fp->uses_derivatives ? "derivatives need constant slots 0, 8, 16, 24"
+                                 : "register spills";
+      goto fail;
+   }
+
+   unsigned n = 0;
+   list_for_each_entry(struct fp_instr, instr, &fp->fp_instructions, link)
+      steps[n++] = instr;
+   n = 0;
+   list_for_each_entry(struct fp_alu_instr_packet, packet,
+                       &fp->alu_instructions, link)
+      packets[n++] = packet;
+   n = 0;
+   list_for_each_entry(struct fp_mfu_instr, mfu, &fp->mfu_instructions, link)
+      mfus[n++] = mfu;
+
+   /* Every step reads its own packets and MFU instructions, in order. */
+   unsigned next_packet = 0, next_mfu = 0;
+   for (unsigned i = 0; i < num_steps; i++) {
+      const struct fp_sched *alu = &steps[i]->alu_sched;
+      const struct fp_sched *mfu = &steps[i]->mfu_sched;
+
+      if (alu->num_instructions) {
+         if (alu->address < next_packet ||
+             alu->address + alu->num_instructions > num_packets) {
+            why = "steps share ALU instructions";
+            goto fail;
+         }
+         next_packet = alu->address + alu->num_instructions;
+         round_packets[i / rows] += alu->num_instructions;
+         for (int j = 0; j < alu->num_instructions; j++)
+            epoch_note_constants(packets[alu->address + j],
+                                 round_bits[i / rows]);
+      }
+      if (mfu->num_instructions) {
+         if (mfu->address < next_mfu ||
+             mfu->address + mfu->num_instructions > num_mfus) {
+            why = "steps share MFU instructions";
+            goto fail;
+         }
+         next_mfu = mfu->address + mfu->num_instructions;
+         round_mfus[i / rows] += mfu->num_instructions;
+      }
+   }
+
+   /* Fill an epoch with rounds while their constants fit the bank. */
+   uint32_t bits[GRATE_FP_LOGICAL_WORDS] = {0};
+   unsigned epoch_steps = 0, epoch_packets = 0, epoch_mfus = 0;
+   begin[0] = 0;
+   for (unsigned r = 0; r < num_rounds; r++) {
+      uint32_t merged[GRATE_FP_LOGICAL_WORDS];
+      unsigned round_steps = MIN2(rows, num_steps - r * rows);
+
+      if (epoch_count_bits(round_bits[r]) > GRATE_FP_MAX_CONSTANTS ||
+          round_steps > GRATE_FP_MAX_EPOCH_STEPS ||
+          round_packets[r] > GRATE_FP_MAX_EPOCH_PACKETS ||
+          round_mfus[r] > GRATE_FP_MAX_EPOCH_MFUS) {
+         why = "one round does not fit an epoch";
+         goto fail;
+      }
+      for (unsigned i = 0; i < GRATE_FP_LOGICAL_WORDS; i++)
+         merged[i] = bits[i] | round_bits[r][i];
+      if (epoch_steps &&
+          (epoch_count_bits(merged) > GRATE_FP_MAX_CONSTANTS ||
+           epoch_steps + round_steps > GRATE_FP_MAX_EPOCH_STEPS ||
+           epoch_packets + round_packets[r] > GRATE_FP_MAX_EPOCH_PACKETS ||
+           epoch_mfus + round_mfus[r] > GRATE_FP_MAX_EPOCH_MFUS)) {
+         if (++count == GRATE_FP_MAX_EPOCHS) {
+            why = "more than five epochs";
+            goto fail;
+         }
+         begin[count] = r;
+         epoch_steps = epoch_packets = epoch_mfus = 0;
+         memcpy(merged, round_bits[r], sizeof(merged));
+      }
+      memcpy(bits, merged, sizeof(bits));
+      epoch_steps += round_steps;
+      epoch_packets += round_packets[r];
+      epoch_mfus += round_mfus[r];
+   }
+   begin[++count] = num_rounds;
+   epochs->count = count;
+   if (getenv("GRATE_EPOCH_DEBUG")) {
+      fprintf(stderr, "GRATE epochs: %u steps, %u packets, %u mfu, %u rows, "
+              "%u constants -> %u epochs\n", num_steps, num_packets, num_mfus,
+              rows, fp->info.num_constants, count);
+      for (unsigned e = 0; e < count; e++)
+         fprintf(stderr, "  epoch %u: rounds %u..%u\n", e, begin[e],
+                 begin[e + 1]);
+   }
+
+   for (unsigned e = 0; e < count; e++) {
+      struct grate_fp_epoch *epoch = &epochs->epoch[e];
+      const unsigned first = begin[e] * rows;
+      const unsigned last = MIN2(begin[e + 1] * rows, num_steps);
+      unsigned packet_first = ~0u, packet_end = 0;
+      unsigned mfu_first = ~0u, mfu_end = 0;
+      struct list_head epoch_steps_list, epoch_mfus, epoch_alus;
+      int slot_of[GRATE_FP_MAX_LOGICAL_CONSTANTS];
+
+      for (unsigned i = first; i < last; i++) {
+         const struct fp_sched *alu = &steps[i]->alu_sched;
+         const struct fp_sched *mfu = &steps[i]->mfu_sched;
+
+         if (alu->num_instructions) {
+            packet_first = MIN2(packet_first, alu->address);
+            packet_end = MAX2(packet_end,
+                              alu->address + alu->num_instructions);
+         }
+         if (mfu->num_instructions) {
+            mfu_first = MIN2(mfu_first, mfu->address);
+            mfu_end = MAX2(mfu_end, mfu->address + mfu->num_instructions);
+         }
+      }
+      if (packet_first == ~0u)
+         packet_first = packet_end = 0;
+      if (mfu_first == ~0u)
+         mfu_first = mfu_end = 0;
+
+      list_inithead(&epoch_steps_list);
+      list_inithead(&epoch_mfus);
+      list_inithead(&epoch_alus);
+      for (unsigned i = first; i < last; i++) {
+         struct fp_instr *step = steps[i];
+
+         step->alu_sched.address = step->alu_sched.num_instructions
+                                      ? step->alu_sched.address - packet_first
+                                      : 0;
+         step->mfu_sched.address = step->mfu_sched.num_instructions
+                                      ? step->mfu_sched.address - mfu_first
+                                      : 0;
+         list_del(&step->link);
+         list_addtail(&step->link, &epoch_steps_list);
+      }
+      for (unsigned i = packet_first; i < packet_end; i++) {
+         list_del(&packets[i]->link);
+         list_addtail(&packets[i]->link, &epoch_alus);
+      }
+      for (unsigned i = mfu_first; i < mfu_end; i++) {
+         list_del(&mfus[i]->link);
+         list_addtail(&mfus[i]->link, &epoch_mfus);
+      }
+
+      /* The constants of this epoch take the bank slots from 0. */
+      memset(slot_of, -1, sizeof(slot_of));
+      list_for_each_entry(struct fp_alu_instr_packet, packet, &epoch_alus,
+                          link) {
+         for (unsigned slot = 0; slot < 4; slot++) {
+            for (unsigned i = 0; i < 4; i++) {
+               struct fp_alu_src_operand *src = &packet->slots[slot].src[i];
+               unsigned id = src->index - 32;
+
+               if (src->index < 32 || id >= GRATE_FP_MAX_LOGICAL_CONSTANTS)
+                  continue;
+               if (slot_of[id] < 0) {
+                  if (epoch->num_constants == GRATE_FP_MAX_CONSTANTS) {
+                     why = "an epoch reads more constants than the bank holds";
+                     free_epoch_lists(&epoch_steps_list, &epoch_mfus,
+                                      &epoch_alus);
+                     goto fail;
+                  }
+                  slot_of[id] = epoch->num_constants;
+                  epoch->constants[epoch->num_constants].word =
+                     fp->info.constants[id].word;
+                  epoch->constants[epoch->num_constants].immediate =
+                     fp->info.constants[id].immediate;
+                  epoch->num_constants++;
+               }
+               src->index = 32 + slot_of[id];
+            }
+         }
+      }
+
+      /* The block: the offsets of the instruction memories are reset like in
+       * NVIDIA's blocks, then the program. Blocks start on 16 bytes. */
+      struct util_dynarray body;
+      util_dynarray_init(&body, NULL);
+      util_dynarray_append_typed(&body, uint32_t,
+                                 host1x_opcode_incr(
+                                    REG_TGR3D_GLOBAL_INST_OFFSET, 1));
+      util_dynarray_append_typed(&body, uint32_t, 0);
+      util_dynarray_append_typed(&body, uint32_t,
+                                 host1x_opcode_incr(REG_TGR3D_AT_INST_OFFSET,
+                                                    1));
+      util_dynarray_append_typed(&body, uint32_t, 0);
+      util_dynarray_append_typed(&body, uint32_t,
+                                 host1x_opcode_incr(REG_TGR3D_ALU_INST_OFFSET,
+                                                    1));
+      util_dynarray_append_typed(&body, uint32_t, 0);
+      emit_fp_blocks(&body, soc_id, &epoch_steps_list, &epoch_mfus,
+                     &epoch_alus);
+
+      while (program.size % 16)
+         util_dynarray_append_typed(&program, uint32_t, 0);
+      epoch->prog_offset = program.size;
+      epoch->prog_words = body.size / sizeof(uint32_t);
+      epoch->steps = last - first;
+      epoch->const_bank = 0;
+      util_dynarray_append_array(&program, uint32_t,
+                                 (uint32_t *)body.data, epoch->prog_words);
+      util_dynarray_fini(&body);
+      free_epoch_lists(&epoch_steps_list, &epoch_mfus, &epoch_alus);
+   }
+
+   epochs->program = MALLOC(program.size);
+   if (!epochs->program) {
+      why = "out of memory";
+      goto fail;
+   }
+   memcpy(epochs->program, program.data, program.size);
+   epochs->program_bytes = program.size;
+   fp->info.num_constants = 0;
+   *result = epochs;
+   epochs = NULL;
+   util_dynarray_fini(&program);
+   FREE(steps);
+   FREE(packets);
+   FREE(mfus);
+   FREE(round_bits);
+   FREE(round_packets);
+   FREE(round_mfus);
+   return true;
+
+fail:
+   if (why)
+      fprintf(stderr, "GRATE FRAG: scalar constant bank exhausted (%s; %u steps, %u packets, %u mfu, %u rows, %u constants)\n", why, num_steps, num_packets, num_mfus, rows, fp->info.num_constants);
+   util_dynarray_fini(&program);
+   FREE(steps);
+   FREE(packets);
+   FREE(mfus);
+   FREE(round_bits);
+   FREE(round_packets);
+   FREE(round_mfus);
+   FREE(epochs);
+   return false;
+}
+
 /**
  * Compiles the program of so->base.tokens, storing the output the mode asks
  * for, into so->blob and so->info.
@@ -734,7 +1122,16 @@ grate_compile_fs(struct grate_context *context,
 
    unsigned num_fp_instrs = list_length(&fp.fp_instructions);
    unsigned num_mfu_instrs = list_length(&fp.mfu_instructions);
-   if (fp.allocation_failed || num_fp_instrs > 64 || num_mfu_instrs >= 64) {
+   unsigned num_alu_instrs = list_length(&fp.alu_instructions);
+   if (!fp.allocation_failed && fp.info.num_constants > GRATE_FP_MAX_CONSTANTS &&
+       !split_into_epochs(&fp, soc_id, has_spills, &fp.info.epochs)) {
+      free_fragment_ir(&fp);
+      return false;
+   }
+   if (fp.info.epochs) {
+      /* every epoch was checked against the limits of one */
+   } else if (fp.allocation_failed || num_fp_instrs > 64 ||
+              num_mfu_instrs >= 64) {
       if (!fp.allocation_failed)
          fprintf(stderr,
                  "GRATE FRAG: program exceeds one epoch "
@@ -798,62 +1195,8 @@ grate_compile_fs(struct grate_context *context,
    // TODO: document/convert these values
    PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(num_fp_instrs));
 
-   if (soc_id == DRM_TEGRA_SOC_T114) {
-      // TODO: document/convert these values
-      /* XXX: maybe not needed */
-      PUSH(host1x_opcode_incr(0x547, 0x0002));
-      PUSH(0xc0000000);
-      PUSH(0x00000000);
-   }
-
-   PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
-
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_PSEQ_INST_DATA, num_fp_instrs));
-   list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
-      PUSH(instr->pseq);
-
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_AT_REMAP_DATA, num_fp_instrs));
-   list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
-      PUSH(grate_fp_pack_sched(&instr->mfu_sched));
-
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_AT_INST_DATA_LO, num_mfu_instrs * 2));
-   list_for_each_entry(struct fp_mfu_instr, instr, &fp.mfu_instructions, link) {
-      uint32_t words[2];
-      grate_fp_pack_mfu(words, instr);
-      PUSH(words[0]);
-      PUSH(words[1]);
-   }
-
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_TEX_INST_DATA, num_fp_instrs));
-   list_for_each_entry (struct fp_instr, instr, &fp.fp_instructions, link)
-      PUSH(instr->tex);
-
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_REMAP_DATA, num_fp_instrs));
-   list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link) {
-      if (soc_id == DRM_TEGRA_SOC_T114)
-         PUSH(grate_fp_pack_alu_sched_t114(&instr->alu_sched));
-      else
-         PUSH(grate_fp_pack_sched(&instr->alu_sched));
-   }
-
-   int num_alu_instrs = list_length(&fp.alu_instructions);
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_INST_DATA, num_alu_instrs * 4 * 2));
-   list_for_each_entry(struct fp_alu_instr_packet, instr, &fp.alu_instructions, link) {
-      for (int i = 0; i < 4; ++i) {
-         uint32_t words[2];
-         grate_fp_pack_alu(words, instr->slots + i);
-         PUSH(words[0]);
-         PUSH(words[1]);
-      }
-   }
-
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_ALU_P2CX_DATA, num_fp_instrs));
-   list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
-      PUSH(0x00000000);
-
-   PUSH(host1x_opcode_nonincr(REG_TGR3D_DW_INST_DATA, num_fp_instrs));
-   list_for_each_entry(struct fp_instr, instr, &fp.fp_instructions, link)
-      PUSH(grate_fp_pack_dw(&instr->dw));
+   emit_fp_blocks(&buf, soc_id, &fp.fp_instructions, &fp.mfu_instructions,
+                   &fp.alu_instructions);
 
    /* A program of more than one epoch is loaded by the sequencer's DMA,
     * from the buffers of grate_fp_epochs: keep the common state only. */
