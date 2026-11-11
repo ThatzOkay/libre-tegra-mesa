@@ -80,6 +80,7 @@ grate_context_destroy(struct pipe_context *pcontext)
       pipe_sampler_view_reference(&context->sampler_views[i], NULL);
 
    grate_bo_unref(context->spill_bo);
+   grate_bo_unref(context->pixel_spill_bo);
    slab_destroy_child(&context->transfer_pool);
 
    grate_channel_delete(context->gr3d);

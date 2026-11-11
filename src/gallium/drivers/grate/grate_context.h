@@ -41,6 +41,9 @@ struct grate_context {
    struct grate_device *drm;
    struct grate_bo *spill_bo;
    unsigned spill_size;
+   /* the registers of the pixels in flight between the epochs of a
+    * fragment program, see emit_epochs() */
+   struct grate_bo *pixel_spill_bo;
    struct grate_channel *gr2d;
    struct grate_channel *gr3d;
 
