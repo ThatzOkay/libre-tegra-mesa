@@ -38,6 +38,40 @@ struct grate_vp_shader {
    bool failed; /* the program cannot be compiled: refuse the shader */
 };
 
+struct grate_bo;
+
+/* A fragment program of more than one epoch, in NVIDIA's scheme: every
+ * epoch is a block of register writes (the program of up to 64 steps, the
+ * resets of the instruction offsets and the like) that the sequencer loads
+ * by DMA from a program buffer, plus a packet of fragment constants that it
+ * loads by DMA from a constant buffer, and the epochs run one after the
+ * other with their accumulators kept between them. The program buffer holds
+ * the blocks; the constant buffer is rewritten for every draw from the
+ * uniforms. */
+#define GRATE_FP_MAX_EPOCHS 5
+
+struct grate_fp_epoch {
+   unsigned prog_offset; /* byte offset of the block in the program buffer */
+   unsigned prog_words;  /* length of the block in words */
+   unsigned steps;       /* instructions of this epoch */
+   unsigned const_bank;  /* first bank slot of the constant packet */
+   unsigned num_constants;
+   struct {
+      int word; /* -1 for an immediate */
+      float immediate;
+   } constants[GRATE_FP_MAX_CONSTANTS];
+};
+
+struct grate_fp_epochs {
+   unsigned count;
+   struct grate_fp_epoch epoch[GRATE_FP_MAX_EPOCHS];
+   uint32_t *program; /* the blocks, uploaded on first use */
+   unsigned program_bytes;
+   struct grate_bo *program_bo;
+   struct grate_bo *constant_bo;
+   unsigned constant_bytes;
+};
+
 struct grate_fp_info {
    struct {
       uint32_t src;
@@ -57,7 +91,21 @@ struct grate_fp_info {
     * 1 to 4: GLOBAL_PIX_ATTR.NUM_ROWS + 1. Set by grate_tgsi_to_fp(). */
    unsigned num_rows;
    unsigned num_spill_slots;
+   /* Not NULL for a program of more than one epoch, which owns it. */
+   struct grate_fp_epochs *epochs;
 };
+
+/* NUM_QID - 1 of the register file for a program of 1 to 4 register rows,
+ * the numbers of NVIDIA's driver for a capacity of 0x12c. */
+static inline unsigned
+grate_fp_max_qid(unsigned rows)
+{
+   static const unsigned max_qid_for_rows[] = {0, (0x12c - 1) >> 2,
+                                               (0x12c - 1) >> 3,
+                                               (0x12c - 1) / 12,
+                                               (0x12c - 1) >> 4};
+   return max_qid_for_rows[rows];
+}
 
 #define GRATE_FP_MAX_IMMEDIATES 32
 #define GRATE_FP_MAX_TEMPS      64
