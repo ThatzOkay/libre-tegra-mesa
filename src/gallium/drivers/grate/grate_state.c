@@ -1138,7 +1138,8 @@ grate_prepare_textures(struct grate_context *ctx)
       }
       for (unsigned y = 0; y < res->b.height0; y++)
          memcpy((uint8_t *)dst + y * pitch,
-                (uint8_t *)src + y * res->pitch, row_bytes);
+                (uint8_t *)src + res->level_offset[0] + y * res->pitch,
+                row_bytes);
       grate_bo_unmap(res->bo);
       grate_bo_unmap(res->sampler_bo);
    }
@@ -1237,7 +1238,8 @@ emit_textures(struct grate_context *ctx, uint32_t **ptrp)
       GRATE_PUSHBUF_WORD(ptr,
                          host1x_opcode_incr(REG_TGR3D_TEX_TEXADDR(i), 1));
       grate_stream_push_reloc(stream, &ptr,
-                              res->sampler_bo ? res->sampler_bo : res->bo, 0);
+                              res->sampler_bo ? res->sampler_bo : res->bo,
+                              res->sampler_bo ? 0 : res->level_offset[0]);
       GRATE_PUSHBUF_WORD(ptr,
                          host1x_opcode_incr(REG_TGR3D_TEX_TEXDESC_LO(i), 2));
       GRATE_PUSHBUF_WORD(ptr, lo);
