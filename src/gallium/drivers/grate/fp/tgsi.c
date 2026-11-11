@@ -631,9 +631,10 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
          op.src[2] = fp_tgsi_src(fp, third, i, mfu);
          break;
       case TGSI_OPCODE_MIN:
+      case TGSI_OPCODE_MAX:
          /* like ADD, the second value is the third source: with it in the
           * second one the op returned min(a * b, 0) (measured) */
-         op.op = FP_ALU_OP_MIN;
+         op.op = opcode == TGSI_OPCODE_MIN ? FP_ALU_OP_MIN : FP_ALU_OP_MAX;
          op.src[1] = fp_alu_src_one();
          op.src[2] = b;
          break;
@@ -1218,6 +1219,7 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
    case TGSI_OPCODE_SGE:
    case TGSI_OPCODE_SEQ:
    case TGSI_OPCODE_MIN:
+   case TGSI_OPCODE_MAX:
    case TGSI_OPCODE_MUL: {
       const struct tgsi_src_register *a = &inst->Src[0].Register;
       const struct tgsi_src_register *b = &inst->Src[1].Register;
@@ -1848,6 +1850,7 @@ scalarize_for_spilling(struct util_dynarray *instructions)
       case TGSI_OPCODE_ADD:
       case TGSI_OPCODE_MUL:
       case TGSI_OPCODE_MIN:
+      case TGSI_OPCODE_MAX:
       case TGSI_OPCODE_SLT:
       case TGSI_OPCODE_SGE:
       case TGSI_OPCODE_SEQ:
