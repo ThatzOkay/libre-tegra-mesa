@@ -717,6 +717,9 @@ grate_compile_fs(struct grate_context *context,
             max_reg = MAX2(max_reg, dst->index);
       }
    }
+   /* The quad exchange needs three register rows, as in NVIDIA's code. */
+   if (fp.uses_derivatives)
+      max_reg = MAX2(max_reg, 11);
    fp.info.num_rows = max_reg / 4 + 1;
 
    bool has_spills = false;

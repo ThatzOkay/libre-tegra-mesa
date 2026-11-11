@@ -247,9 +247,16 @@ grate_init_state(struct grate_context *context, uint32_t **ptrp)
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_PSEQ_TIMEOUT, 0));
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_PSEQ_PC, 0));
 
-   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(REG_TGR3D_PSEQ_COMMAND_EVEN(0), 32));
-   for (int i = 0; i < 32; i++)
+   /*
+    * Clear the sequencer commands. Only the even slots are written: the
+    * kernel treats every word written to an odd slot as the relocation of
+    * a DMA address.
+    */
+   for (int i = 0; i < 16; i++) {
+      GRATE_PUSHBUF_WORD(ptr, host1x_opcode_incr(
+                                REG_TGR3D_PSEQ_COMMAND_EVEN(i), 1));
       GRATE_PUSHBUF_WORD(ptr, 0);
+   }
 
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_PSEQ_INST_OFFSET, 0));
    GRATE_PUSHBUF_WORD(ptr, host1x_opcode_imm(REG_TGR3D_PSEQ_DBG_X, 0));
