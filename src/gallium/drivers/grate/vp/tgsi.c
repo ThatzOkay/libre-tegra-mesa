@@ -163,6 +163,7 @@ GEN_V_BINOP(SLT)
 GEN_V_BINOP(MAX)
 GEN_V_BINOP(MIN)
 GEN_V_BINOP(SNE)
+GEN_V_BINOP(SEQ)
 
 static struct vp_vec_instr
 emit_vMAD(struct vp_dst_operand dst, struct vp_src_operand src0,
@@ -326,6 +327,36 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
                    tgsi_src_to_vp(vp, &inst->Src[0].Register),
                    tgsi_src_to_vp(vp, &inst->Src[1].Register)),
          emit_sNOP());
+
+   case TGSI_OPCODE_SEQ:
+      return emit_packed(
+         emit_vSEQ(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                   tgsi_src_to_vp(vp, &inst->Src[0].Register),
+                   tgsi_src_to_vp(vp, &inst->Src[1].Register)),
+         emit_sNOP());
+
+   case TGSI_OPCODE_SQRT: {
+      /* The scalar unit has no square root. NVIDIA's compiler computes
+       * sqrt(x) = RCP(RSQ(x)), which keeps sqrt(0) = RCP(inf) = 0, where
+       * x * RSQ(x) would give 0 * inf = NaN. */
+      static const enum vp_swz xxxx[4] = {VP_SWZ_X, VP_SWZ_X, VP_SWZ_X,
+                                          VP_SWZ_X};
+      if (vp->num_temps >= 62) {
+         fprintf(stderr, "GRATE VERTEX: out of temporaries for SQRT\n");
+         vp->failed = true;
+         return 0;
+      }
+      unsigned t = vp->num_temps++;
+      struct vp_instr *rsq = emit_packed(
+         emit_vNOP(), emit_sRSQ(dst_temp(t, 0xf, false),
+                                tgsi_src_to_vp(vp, &inst->Src[0].Register)));
+      legalize_fetches(vp, rsq, &vp->instructions);
+      list_addtail(&rsq->link, &vp->instructions);
+      return emit_packed(
+         emit_vNOP(),
+         emit_sRCP(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                   src_temp(t, xxxx, false, false)));
+   }
 
    case TGSI_OPCODE_DP2: {
       /* The vector unit has no two-component dot product. t = a * b, then
