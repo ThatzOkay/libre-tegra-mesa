@@ -1535,6 +1535,8 @@ grate_compile_fs(struct grate_context *context,
     * (capacity - 1) >> 2, >> 3, / 12, >> 4 for 1 to 4 rows). A value in R4
     * or above is only kept per pixel when NUM_ROWS covers it; the
     * programs that used the globals 16-23 for it needed MAX_OUT 4. */
+   if (getenv("GRATE_NUMROWS")) /* EXPERIMENT hook, see docs/grate-alu-latency.md */
+      fp.info.num_rows = atoi(getenv("GRATE_NUMROWS"));
    assert(fp.info.num_rows >= 1 && fp.info.num_rows <= 4);
    PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID(grate_fp_max_qid(fp.info.num_rows)) |
         TGR3D_GLOBAL_PIX_ATTR_NUM_ROWS(fp.info.num_rows - 1));
@@ -1553,14 +1555,29 @@ grate_compile_fs(struct grate_context *context,
    size_t cmd_start = buf.size;
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_COMMAND_EVEN(0), 1));
    // TODO: document/convert these values
+   if (getenv("GRATE_REPLAY_N")) /* EXPERIMENT hook */
+      num_fp_instrs = atoi(getenv("GRATE_REPLAY_N"));
    PUSH(0x20006000 | num_fp_instrs);
 
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_DWR_IF_STATE, 1));
    // TODO: document/convert these values
    PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(num_fp_instrs));
 
+   size_t replay_start = buf.size;
    emit_fp_blocks(&buf, soc_id, &fp.fp_instructions, &fp.mfu_instructions,
                    &fp.alu_instructions);
+
+   if (getenv("GRATE_REPLAY")) { /* EXPERIMENT hook: a raw stream replaces our program */
+      FILE *rf = fopen(getenv("GRATE_REPLAY"), "rb");
+      if (rf) {
+         uint32_t rw[1 << 14];
+         size_t n = fread(rw, 4, 1 << 14, rf);
+         fclose(rf);
+         buf.size = replay_start;
+         for (size_t i = 0; i < n; i++)
+            PUSH(rw[i]);
+      }
+   }
 
    /* A program of more than one epoch is loaded by the sequencer's DMA,
     * from the buffers of grate_fp_epochs: keep the common state only. */

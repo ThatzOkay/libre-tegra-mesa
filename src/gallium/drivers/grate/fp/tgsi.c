@@ -1605,6 +1605,8 @@ emit_tgsi_input(struct grate_fp_shader *fp, const struct tgsi_full_declaration *
    for (int i = 0; i < 4; ++i)
       dst |= LINK_DST(i, i, LINK_DST_FP20);
 
+   if (getenv("GRATE_INDST") && fp->info.num_inputs == 0) /* EXPERIMENT hook */
+      dst = strtoul(getenv("GRATE_INDST"), NULL, 16);
    fp->info.inputs[fp->info.num_inputs].src = src;
    fp->info.inputs[fp->info.num_inputs].dst = dst;
 
