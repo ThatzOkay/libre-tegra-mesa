@@ -410,6 +410,12 @@ grate_screen_is_format_supported(struct pipe_screen *pscreen,
         format == PIPE_FORMAT_R8G8B8X8_UNORM))
       return false;
 
+   /* R8 maps to the L8 surface format for sampling only (see grate_pixel_format). */
+   if (format == PIPE_FORMAT_R8_UNORM &&
+       (usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL |
+                 PIPE_BIND_SCANOUT)))
+      return false;
+
    if (usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL)) {
       if (grate_pixel_format(format) < 0)
          return false;
