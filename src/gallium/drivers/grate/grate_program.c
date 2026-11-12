@@ -1482,6 +1482,26 @@ grate_compile_fs(struct grate_context *context,
    unsigned num_alu_instrs = list_length(&fp.alu_instructions);
    if (getenv("GRATE_PACKING_DEBUG"))
       fprintf(stderr, "GRATE SCHED DRY: emitted after align_to_rows: %u ALU packets in %u steps (%u rows)\n", num_alu_instrs, num_fp_instrs, fp.info.num_rows);
+   if (getenv("GRATE_PACKING_DEBUG")) {
+      /* one letter per step: M interpolation/SFU, T fetch, D output write, S spill, digit = ALU packets, . = empty */
+      char line[256];
+      unsigned n = 0;
+      list_for_each_entry (struct fp_instr, instr, &fp.fp_instructions, link) {
+         if (n + 8 >= sizeof(line))
+            break;
+         if (instr->mfu_sched.num_instructions)
+            line[n++] = 'M';
+         if (instr->tex & (1 << 10))
+            line[n++] = 'T';
+         if (instr->dw.enable)
+            line[n++] = instr->dw.spill ? 'S' : 'D';
+         line[n++] = instr->alu_sched.num_instructions ?
+                        '0' + instr->alu_sched.num_instructions : '.';
+         line[n++] = ' ';
+      }
+      line[n] = 0;
+      fprintf(stderr, "GRATE SCHED DRY: steps (%u rows): %s\n", fp.info.num_rows, line);
+   }
    /* The ALU and MFU instruction addresses of a step are six bits: a
     * program with more instructions than that also needs epochs. */
    if (!fp.allocation_failed &&
