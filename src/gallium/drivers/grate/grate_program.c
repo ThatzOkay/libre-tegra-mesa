@@ -1492,6 +1492,20 @@ fail:
    return false;
 }
 
+/* The NVIDIA-style layout (fp/layout2.c) is on unless GRATE_LAYOUT_V1 is set
+ * (or GRATE_LAYOUT_V2=0). It only replaces the old layout when its own
+ * symbolic check agrees. */
+static bool
+layout_v2_enabled(void)
+{
+   const char *off = getenv("GRATE_LAYOUT_V1");
+   const char *v2 = getenv("GRATE_LAYOUT_V2");
+
+   if (off && *off && strcmp(off, "0"))
+      return false;
+   return !(v2 && !strcmp(v2, "0"));
+}
+
 /**
  * Compiles the program of so->base.tokens, storing the output the mode asks
  * for, into so->blob and so->info.
@@ -1565,7 +1579,7 @@ grate_compile_fs(struct grate_context *context,
                  sig_why ? sig_why : "?");
    }
    bool laid_out = false;
-   if (getenv("GRATE_LAYOUT_V2") && !fp.allocation_failed &&
+   if (layout_v2_enabled() && !fp.allocation_failed &&
        fp.info.num_constants <= GRATE_FP_MAX_CONSTANTS) {
       if (!have_seq)
          have_seq = grate_fp_layout_signature(&fp, true, &sig_seq, &sig_why);
@@ -1617,7 +1631,7 @@ grate_compile_fs(struct grate_context *context,
    }
    if (getenv("GRATE_PACKING_DEBUG") && atoi(getenv("GRATE_PACKING_DEBUG")) >= 2)
       debug_dump_steps(&fp, "after align_to_rows");
-   if (have_seq) {
+   if (have_seq && getenv("GRATE_PACKING_DEBUG")) {
       if (!grate_fp_layout_signature(&fp, false, &sig_hw, &sig_why))
          fprintf(stderr, "GRATE LAYOUT CHECK: emitted layout not modelled (%s)\n",
                  sig_why ? sig_why : "?");
