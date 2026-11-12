@@ -54,6 +54,7 @@ struct l2_def {
    int fixed_reg, fixed_half; /* a pinned comparison register (R64..R71), -1 when none */
    int readers[16];
    unsigned num_readers;
+   bool reg_free;           /* every use is a forward: the slot writes R31 */
 };
 
 struct l2_op {
@@ -1002,6 +1003,31 @@ l2_allocate(struct l2 *s)
    unsigned nocc[48] = {0};
    unsigned regs = s->rows * 4;
 
+   /* a value that is only read through forwards needs no register */
+   {
+      unsigned uses[L2_MAX_DEFS] = {0}, fwds[L2_MAX_DEFS] = {0};
+      for (unsigned i = 0; i < s->num_ops; i++) {
+         const struct l2_op *op = &s->ops[i];
+         unsigned n = op->kind == L2_ALU ? L2_SRCS : op->num_in;
+         for (unsigned k = 0; k < n; k++) {
+            int d = op->kind == L2_ALU ? op->src_def[k] : op->in[k];
+            if (d < 0)
+               continue;
+            uses[d]++;
+            if (op->kind == L2_ALU && k < 3 && op->fwd[k] >= 0)
+               fwds[d]++;
+         }
+      }
+      for (unsigned d = 0; d < s->num_defs; d++) {
+         struct l2_def *def = &s->defs[d];
+         def->reg_free = def->width == 2 && def->tie_k < 0 &&
+                         def->fixed_reg < 0 && uses[d] > 0 &&
+                         uses[d] == fwds[d] &&
+                         s->ops[def->writer].kind == L2_ALU &&
+                         s->ops[def->writer].alu.condition == FP_CONDITION_ALWAYS;
+      }
+   }
+
    /* final positions of everything */
    int64_t total = 0;
    for (unsigned t = 0; t < s->steps; t++)
@@ -1072,7 +1098,8 @@ l2_allocate(struct l2 *s)
    for (unsigned n = 0; n < s->num_defs; n++) {
       int pick = -1;
       for (unsigned d = 0; d < s->num_defs; d++) {
-         if (done[d] || s->defs[d].tie_k >= 0 || s->defs[d].fixed_reg >= 0)
+         if (done[d] || s->defs[d].tie_k >= 0 || s->defs[d].fixed_reg >= 0 ||
+             s->defs[d].reg_free)
             continue;
          if (pick < 0 || s->defs[d].land < s->defs[pick].land)
             pick = d;
@@ -1203,7 +1230,7 @@ l2_rebuild(struct l2 *s, struct grate_fp_shader *fp, struct list_head *old_steps
             }
             if (op->dst_def >= 0) {
                const struct l2_def *d = &s->defs[op->dst_def];
-               a->dst.index = d->reg;
+               a->dst.index = d->reg_free ? 31 : d->reg;
                a->dst.write_low_sub_reg = d->width == 2 || d->half == 0;
                a->dst.write_high_sub_reg = d->width == 2 || d->half == 1;
             }
@@ -1299,19 +1326,19 @@ grate_fp_layout_nvidia(struct grate_fp_shader *fp, uint64_t seq_signature,
          memset(s, 0, sizeof(*s));
          s->rows = rows;
          s->window = windows[w];
-         s->verbose = verbose && w == ARRAY_SIZE(windows) - 1;
+         s->verbose = verbose && getenv("GRATE_LAYOUT_VERBOSE");
          if (!l2_extract(s, fp)) {
             if (verbose)
                fprintf(stderr, "GRATE LAYOUT2: cannot extract the program\n");
             return false;
          }
          if (!l2_schedule(s)) {
-            if (verbose && w == ARRAY_SIZE(windows) - 1)
-               fprintf(stderr, "GRATE LAYOUT2: rows %u: no schedule\n", rows);
+            if (verbose)
+               fprintf(stderr, "GRATE LAYOUT2: rows %u window %u: no schedule\n", rows, windows[w]);
             continue;
          }
          if (!l2_allocate(s)) {
-            if (verbose && w == ARRAY_SIZE(windows) - 1)
+            if (verbose)
                fprintf(stderr, "GRATE LAYOUT2: rows %u window %u: no registers\n",
                        rows, windows[w]);
             continue;
