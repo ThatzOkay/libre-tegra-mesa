@@ -29,6 +29,7 @@ files_libgrate = files(
   'fp/blend.h',
   'fp/fpir.h',
   'fp/layout.c',
+  'fp/layout2.c',
   'fp/layout.h',
   'fp/pack.c',
   'fp/tgsi.c',

@@ -1564,7 +1564,57 @@ grate_compile_fs(struct grate_context *context,
          fprintf(stderr, "GRATE LAYOUT CHECK: not modelled (%s)\n",
                  sig_why ? sig_why : "?");
    }
-   align_to_rows(&fp);
+   bool laid_out = false;
+   if (getenv("GRATE_LAYOUT_V2") && !fp.allocation_failed &&
+       fp.info.num_constants <= GRATE_FP_MAX_CONSTANTS) {
+      if (!have_seq)
+         have_seq = grate_fp_layout_signature(&fp, true, &sig_seq, &sig_why);
+      if (have_seq) {
+         /* the old layout, for comparison: keep a copy of the program as the
+          * emitter wrote it, lay it out the old way, and give the new layout
+          * the original */
+         struct list_head pre_steps, pre_alus, pre_mfus;
+         unsigned pre_rows = fp.info.num_rows;
+         if (grate_fp_ir_clone(&fp, &pre_steps, &pre_alus, &pre_mfus)) {
+            align_to_rows(&fp);
+            unsigned old_steps = list_length(&fp.fp_instructions);
+            unsigned old_packets = list_length(&fp.alu_instructions);
+            unsigned old_rows = fp.info.num_rows;
+            struct list_head old_s, old_a, old_m;
+            list_replace(&fp.fp_instructions, &old_s);
+            list_replace(&fp.alu_instructions, &old_a);
+            list_replace(&fp.mfu_instructions, &old_m);
+            list_replace(&pre_steps, &fp.fp_instructions);
+            list_replace(&pre_alus, &fp.alu_instructions);
+            list_replace(&pre_mfus, &fp.mfu_instructions);
+            fp.info.num_rows = pre_rows;
+            laid_out = grate_fp_layout_nvidia(&fp, sig_seq,
+                                              getenv("GRATE_PACKING_DEBUG") != NULL,
+                                              old_steps, old_packets);
+            if (laid_out) {
+               grate_fp_ir_free(&old_s, &old_a, &old_m);
+            } else {
+               grate_fp_ir_free(&fp.fp_instructions, &fp.alu_instructions,
+                                &fp.mfu_instructions);
+               list_replace(&old_s, &fp.fp_instructions);
+               list_replace(&old_a, &fp.alu_instructions);
+               list_replace(&old_m, &fp.mfu_instructions);
+               fp.info.num_rows = old_rows;
+               laid_out = true; /* the old layout is in place already */
+            }
+         }
+      }
+   }
+   if (!laid_out)
+      align_to_rows(&fp);
+   else {
+      /* the new layout may have removed every spill */
+      has_spills = false;
+      list_for_each_entry (struct fp_instr, instr, &fp.fp_instructions, link)
+         has_spills |= instr->dw.spill || instr->spill_load;
+      if (!has_spills)
+         fp.info.num_spill_slots = 0;
+   }
    if (getenv("GRATE_PACKING_DEBUG") && atoi(getenv("GRATE_PACKING_DEBUG")) >= 2)
       debug_dump_steps(&fp, "after align_to_rows");
    if (have_seq) {
@@ -1696,6 +1746,18 @@ grate_compile_fs(struct grate_context *context,
          buf.size = replay_start;
          for (size_t i = 0; i < n; i++)
             PUSH(rw[i]);
+      }
+   }
+
+   if (getenv("GRATE_DUMP_FS")) { /* EXPERIMENT hook: the program words, with a header like a compiled .bin */
+      FILE *df = fopen(getenv("GRATE_DUMP_FS"), "wb");
+      if (df) {
+         uint32_t hdr[2] = {fp.info.num_rows, num_fp_instrs};
+         fwrite("AR20-BIN", 1, 8, df);
+         fwrite(hdr, 4, 2, df);
+         fwrite((uint32_t *)buf.data + replay_start / 4, 1,
+                buf.size - replay_start, df);
+         fclose(df);
       }
    }
 
