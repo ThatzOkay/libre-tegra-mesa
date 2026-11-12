@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "util/list.h"
+
 #include "grate_compiler.h"
 
 /**
@@ -26,5 +28,23 @@
 bool grate_fp_layout_signature(const struct grate_fp_shader *fp,
                                bool sequential, uint64_t *signature,
                                const char **why);
+
+/**
+ * A layout like NVIDIA's (fp/layout2.c): unit operations on any step, registers
+ * allocated by row, several slot operations per packet. Replaces the step and
+ * packet lists of fp when the symbolic evaluator says the result does what the
+ * original (whose sequential signature is seq_signature) did; returns false and
+ * leaves fp unchanged otherwise.
+ */
+bool grate_fp_layout_nvidia(struct grate_fp_shader *fp, uint64_t seq_signature,
+                            bool verbose, unsigned old_steps,
+                            unsigned old_packets);
+
+/* Copies of the step, packet and MFU lists of fp, and freeing lists. */
+bool grate_fp_ir_clone(const struct grate_fp_shader *fp,
+                       struct list_head *steps, struct list_head *alus,
+                       struct list_head *mfus);
+void grate_fp_ir_free(struct list_head *steps, struct list_head *alus,
+                      struct list_head *mfus);
 
 #endif

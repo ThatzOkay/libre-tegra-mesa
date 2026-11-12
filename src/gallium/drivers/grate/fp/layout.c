@@ -34,6 +34,8 @@ struct lo_write {
    int64_t land;       /* position from which it is visible in its round */
    int round;
    unsigned seq;
+   bool unit;          /* written by a unit operation */
+   unsigned step;
 };
 
 struct lo_eval {
@@ -71,6 +73,18 @@ struct lo_val {
 };
 
 /* The value a read at position q of round round sees in loc. */
+static int lo_unit_read_step = -1;     /* >= 0 while a unit operation reads */
+
+/* The result of every slot of the packet before: R24-R27 read it (a read in
+ * the next packet of the same round only, with the format the slot wrote). */
+static struct {
+   bool valid;
+   int64_t g;
+   int round;
+   uint64_t v[4];
+   unsigned mask[4];
+} lo_fwd;
+
 static struct lo_val
 lo_read(const struct lo_eval *e, int loc, int64_t q, int round, bool all_in_round)
 {
@@ -85,6 +99,12 @@ lo_read(const struct lo_eval *e, int loc, int64_t q, int round, bool all_in_roun
       bool earlier = w->round < round;
       bool visible = earlier || (all_in_round ? w->round == round
                                               : w->land <= q);
+      /* a unit reads its operands at the start of its round: ALU results
+       * of its own round are not seen, only the writes of units on the
+       * same step (docs/grate-alu-latency.md, experiments d1-d4) */
+      if (!earlier && lo_unit_read_step >= 0 && !all_in_round)
+         visible = w->unit && w->step == (unsigned)lo_unit_read_step &&
+                   w->land <= q;
       if (!visible)
          continue;
       int64_t key = earlier ? w->issue - (1ll << 40) : w->land;
@@ -119,6 +139,9 @@ lo_read_fp20(const struct lo_eval *e, unsigned reg, int64_t q, int round,
    return mixn(5, a);
 }
 
+static bool lo_write_unit;
+static unsigned lo_write_step;
+
 static void
 lo_write(struct lo_eval *e, int loc, uint64_t v, unsigned width,
          int64_t issue, int64_t land, int round)
@@ -134,26 +157,67 @@ lo_write(struct lo_eval *e, int loc, uint64_t v, unsigned width,
    w->issue = issue;
    w->land = land;
    w->round = round;
+   w->unit = lo_write_unit;
+   w->step = lo_write_step;
    w->seq = e->num_writes++;
+}
+
+/* R0-R15 are the register rows, R64-R71 the comparison results. */
+static bool
+lo_reg_ok(unsigned reg)
+{
+   return reg < 16 || (reg >= 64 && reg < 72);
+}
+
+/* A plain copy (A * 1 + 0, nothing else) returns its operand unchanged, so a
+ * value that goes through a copy or through a spill and a reload is still the
+ * same value. */
+static bool
+lo_is_copy(const struct fp_alu_instr *a)
+{
+   const struct fp_alu_src_operand *s = a->src;
+   return a->op == FP_ALU_OP_MAD && a->scale == FP_SCALE_NONE &&
+          !a->dst.saturate && a->condition == FP_CONDITION_ALWAYS &&
+          !s[0].negate && !s[0].absolute_value && !s[0].minus_one &&
+          !s[0].scale_by_two && s[1].index == 31 && s[1].sub_reg_select_high &&
+          !s[1].negate && !s[1].absolute_value && !s[1].minus_one &&
+          !s[1].scale_by_two && s[2].index == 31 && !s[2].sub_reg_select_high &&
+          !s[2].negate && !s[2].absolute_value && !s[2].minus_one &&
+          !s[2].scale_by_two;
+}
+
+static uint64_t
+lo_leaf(const struct lo_eval *e, const struct fp_alu_src_operand *s, int64_t q,
+        int round)
+{
+   uint64_t leaf;
+   unsigned reg = s->index;
+
+   if (lo_reg_ok(reg)) {
+      leaf = s->datatype == FP_DATATYPE_FIXED10
+                ? lo_read_half(e, reg, s->sub_reg_select_high, q, round, false)
+                : lo_read_fp20(e, reg, q, round, false);
+   } else if (reg >= 24 && reg <= 27) {
+      unsigned k = reg - 24;
+      unsigned want = s->datatype == FP_DATATYPE_FIXED10
+                         ? 1u << s->sub_reg_select_high : 3u;
+      if (lo_fwd.valid && lo_fwd.g == q - 1 && lo_fwd.round == round &&
+          lo_fwd.mask[k] == want)
+         leaf = lo_fwd.v[k];
+      else
+         leaf = mix(0xbadf0, k);      /* reads zero or garbage on hardware */
+   } else {
+      uint64_t a[] = {0x57a7, reg, s->datatype, s->sub_reg_select_high};
+      leaf = mixn(4, a);
+   }
+   return leaf;
 }
 
 static uint64_t
 lo_src(const struct lo_eval *e, const struct fp_alu_src_operand *s, int64_t q,
        int round)
 {
-   uint64_t leaf;
-   unsigned reg = s->index;
-
-   if (reg < 16) {
-      leaf = s->datatype == FP_DATATYPE_FIXED10
-                ? lo_read_half(e, reg, s->sub_reg_select_high, q, round, false)
-                : lo_read_fp20(e, reg, q, round, false);
-   } else if (reg >= 24 && reg <= 27) {
-      leaf = 0; /* forwards: handled by the caller */
-   } else {
-      uint64_t a[] = {0x57a7, reg, s->datatype, s->sub_reg_select_high};
-      leaf = mixn(4, a);
-   }
+   uint64_t leaf = lo_leaf(e, s, q, round);
    uint64_t a[] = {leaf, s->negate, s->absolute_value, s->scale_by_two,
                    s->minus_one, s->datatype, s->sub_reg_select_high};
    return mixn(7, a);
@@ -166,12 +230,15 @@ lo_supported_packet(struct lo_eval *e, const struct fp_alu_instr_packet *p)
       const struct fp_alu_instr *a = &p->slots[sl];
       if (!a->dst.write_low_sub_reg && !a->dst.write_high_sub_reg)
          continue;
-      if (a->dst.index >= 16 && a->dst.index != 31) {
+      if (!lo_reg_ok(a->dst.index) && a->dst.index != 31) {
+         if (getenv("GRATE_PACKING_DEBUG"))
+            fprintf(stderr, "GRATE LAYOUT CHECK: slot %u writes r%u cond %d\n",
+                    sl, a->dst.index, a->condition);
          e->why = "ALU destination above R15";
          return false;
       }
       for (unsigned k = 0; k < 3; k++)
-         if (a->src[k].index >= 24 && a->src[k].index <= 27) {
+         if (e->sequential && a->src[k].index >= 24 && a->src[k].index <= 27) {
             e->why = "forward source";
             return false;
          }
@@ -190,6 +257,7 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
    e->num_writes = 0;
    e->why = NULL;
    *why = NULL;
+   lo_fwd.valid = false;
 
    unsigned num_packets = list_length(&fp->alu_instructions);
    unsigned num_mfus = list_length(&fp->mfu_instructions);
@@ -222,6 +290,11 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
       unsigned step;
    } dw[4];
    unsigned num_dw = 0, done_dw = 0;
+   struct {
+      unsigned key;
+      uint64_t value;
+   } mem[256];
+   unsigned num_mem = 0;
 
    list_for_each_entry (struct fp_instr, instr, &fp->fp_instructions, link) {
       unsigned rows = e->rows;
@@ -230,9 +303,28 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
       unsigned base = row * 4;
       int64_t gfirst = g;
 
-      if (instr->pseq || instr->spill_load || instr->dw.spill) {
+      if ((instr->pseq && !instr->spill_load) ||
+          ((instr->spill_load || instr->dw.spill) && !sequential)) {
          e->why = "spill or sequencer command";
          break;
+      }
+      if (sequential && instr->spill_load) {
+         /* the load puts the stored value into R12 before the ALU runs */
+         unsigned key = (instr->pseq & 0xffff) >> 6;
+         bool found = false;
+         for (unsigned k = 0; k < num_mem && !found; k++)
+            if (mem[k].key == key) {
+               lo_write_unit = true;
+               lo_write_step = step;
+               lo_write(e, 24, mem[k].value, 2, gfirst, gfirst, round);
+               lo_write(e, 25, mem[k].value, 2, gfirst, gfirst, round);
+               lo_write_unit = false;
+               found = true;
+            }
+         if (!found) {
+            e->why = "reload of a slot never stored";
+            break;
+         }
       }
 
       if (instr->mfu_sched.num_instructions) {
@@ -246,7 +338,11 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
          if (e->why)
             break;
          if (m->sfu.op != FP_SFU_OP_NOP && m->sfu.reg < 4) {
+            lo_unit_read_step = sequential ? -1 : (int)step;
             uint64_t v = lo_read_fp20(e, base + m->sfu.reg, gfirst, round, false);
+            lo_unit_read_step = -1;
+            lo_write_unit = true;
+            lo_write_step = step;
             uint64_t a[] = {0x5f0, m->sfu.op, v};
             uint64_t r = mixn(3, a);
             lo_write(e, (base + m->sfu.reg) * 2, r, 2, gfirst, gfirst, round);
@@ -263,6 +359,8 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
                e->why = "FX10 interpolation";
                break;
             }
+            lo_write_unit = true;
+            lo_write_step = step;
             uint64_t a[] = {0x1a7e, m->var[k].tram_row, k};
             uint64_t r = mixn(3, a);
             if (getenv("GRATE_LAYOUT_TRACE"))
@@ -280,8 +378,12 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
             e->why = "fetch with the R2R3R0 coordinate source";
             break;
          }
+         lo_unit_read_step = sequential ? -1 : (int)step;
          uint64_t x = lo_read_fp20(e, base + 0, gfirst, round, false);
          uint64_t y = lo_read_fp20(e, base + 1, gfirst, round, false);
+         lo_unit_read_step = -1;
+         lo_write_unit = true;
+         lo_write_step = step;
          if (getenv("GRATE_LAYOUT_TRACE"))
             fprintf(stderr, "  %s step %u TEX row %u coords %08x %08x\n",
                     sequential ? "SEQ" : "HW ", step, row, (unsigned)x, (unsigned)y);
@@ -292,6 +394,7 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
          }
       }
 
+      lo_write_unit = false;
       for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
          unsigned address = instr->alu_sched.address + p;
          if (address >= num_packets) {
@@ -308,6 +411,8 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
             unsigned width;
          } res[4];
          unsigned nres = 0;
+         uint64_t fv[4] = {0};
+         unsigned fm[4] = {0};
          for (unsigned sl = 0; sl < 4; sl++) {
             const struct fp_alu_instr *a = &packet->slots[sl];
             if (!a->dst.write_low_sub_reg && !a->dst.write_high_sub_reg)
@@ -321,19 +426,25 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
             h[n++] = a->dst.write_low_sub_reg | (a->dst.write_high_sub_reg << 1);
             for (unsigned k = 0; k < 3; k++)
                h[n++] = lo_src(e, &a->src[k], g, round);
-            if (a->condition != FP_CONDITION_ALWAYS && a->dst.index < 16) {
+            if (a->condition != FP_CONDITION_ALWAYS && lo_reg_ok(a->dst.index)) {
                if (a->dst.write_low_sub_reg)
                   h[n++] = lo_read_half(e, a->dst.index, 0, g, round, false);
                if (a->dst.write_high_sub_reg)
                   h[n++] = lo_read_half(e, a->dst.index, 1, g, round, false);
             }
             uint64_t v = mixn(n, h);
+            if (lo_is_copy(a) && (lo_reg_ok(a->src[0].index) ||
+                                  (a->src[0].index >= 24 && a->src[0].index <= 27)))
+               v = lo_leaf(e, &a->src[0], g, round);
             if (getenv("GRATE_LAYOUT_TRACE"))
                fprintf(stderr, "  %s step %u g %lld slot %u -> r%u%s%s = %08x  (A %08x B %08x C %08x)\n",
                        sequential ? "SEQ" : "HW ", step, (long long)g, sl,
                        a->dst.index, a->dst.write_low_sub_reg ? "l" : "",
                        a->dst.write_high_sub_reg ? "h" : "", (unsigned)v,
                        (unsigned)h[5], (unsigned)h[6], (unsigned)h[7]);
+            fv[sl] = v;
+            fm[sl] = (a->dst.write_low_sub_reg ? 1 : 0) |
+                     (a->dst.write_high_sub_reg ? 2 : 0);
             if (a->dst.index == 31)
                continue;
             res[nres].n = 0;
@@ -349,12 +460,34 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
             for (unsigned k = 0; k < res[r].n; k++)
                lo_write(e, res[r].loc[k], res[r].v, res[r].width, g,
                         sequential ? g + 1 : g + 2, round);
+         /* the next packet can read these results as R24-R27 */
+         lo_fwd.valid = !sequential;
+         lo_fwd.g = g;
+         lo_fwd.round = round;
+         for (unsigned sl = 0; sl < 4; sl++) {
+            lo_fwd.v[sl] = fv[sl];
+            lo_fwd.mask[sl] = fm[sl];
+         }
          g++;
       }
       if (e->why)
          break;
 
-      if (instr->dw.enable) {
+      if (sequential && instr->dw.enable && instr->dw.spill) {
+         if (num_mem >= 256) {
+            e->why = "too many spill slots";
+            break;
+         }
+         unsigned key = instr->dw.spill_args >> 4;
+         uint64_t value = lo_read_fp20(e, 0, g, 0, true);
+         unsigned k;
+         for (k = 0; k < num_mem && mem[k].key != key; k++)
+            ;
+         mem[k].key = key;
+         mem[k].value = value;
+         if (k == num_mem)
+            num_mem++;
+      } else if (instr->dw.enable) {
          if (num_dw >= 4) {
             e->why = "too many output writes";
             break;
