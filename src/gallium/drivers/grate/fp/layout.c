@@ -18,6 +18,7 @@
 
 #include "util/list.h"
 #include "util/macros.h"
+#include "util/simple_mtx.h"
 #include "util/u_math.h"
 
 #include "fp/fpir.h"
@@ -332,9 +333,26 @@ lo_units(struct lo_eval *e, const struct fp_instr *instr,
    return true;
 }
 
+/* The evaluation state is static: one evaluation at a time. */
+static simple_mtx_t lo_mutex = SIMPLE_MTX_INITIALIZER;
+
+static bool
+lo_signature(const struct grate_fp_shader *fp, bool sequential,
+             uint64_t *signature, const char **why);
+
 bool
 grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
                           uint64_t *signature, const char **why)
+{
+   simple_mtx_lock(&lo_mutex);
+   bool ok = lo_signature(fp, sequential, signature, why);
+   simple_mtx_unlock(&lo_mutex);
+   return ok;
+}
+
+static bool
+lo_signature(const struct grate_fp_shader *fp, bool sequential,
+             uint64_t *signature, const char **why)
 {
    static struct lo_eval e_storage;
    struct lo_eval *e = &e_storage;

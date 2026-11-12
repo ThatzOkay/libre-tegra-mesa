@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "util/list.h"
+#include "util/simple_mtx.h"
 #include "util/macros.h"
 #include "util/u_memory.h"
 
@@ -1571,9 +1572,26 @@ fail:
    return false;
 }
 
+/* The scheduler state is static: one layout at a time. */
+static simple_mtx_t l2_mutex = SIMPLE_MTX_INITIALIZER;
+
+static bool
+l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
+          unsigned old_steps, unsigned old_packets);
+
 bool
 grate_fp_layout_nvidia(struct grate_fp_shader *fp, uint64_t seq_signature,
                        bool verbose, unsigned old_steps, unsigned old_packets)
+{
+   simple_mtx_lock(&l2_mutex);
+   bool ok = l2_layout(fp, seq_signature, verbose, old_steps, old_packets);
+   simple_mtx_unlock(&l2_mutex);
+   return ok;
+}
+
+static bool
+l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
+          unsigned old_steps, unsigned old_packets)
 {
    static struct l2 storage;
    struct l2 *s = &storage;
