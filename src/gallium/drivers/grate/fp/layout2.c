@@ -844,6 +844,42 @@ class_row_conflict(struct l2 *s, int cls, unsigned row)
    return false;
 }
 
+/* A unit operation writes its row registers at the start of its round, before
+ * any ALU packet of the round: the previous value of such a register must have
+ * no read at or after that moment (rs is the position of the first packet of
+ * the round), and no other value tied to it may be waiting. */
+static bool
+unit_loc_conflict(struct l2 *s, const struct l2_op *op, unsigned row,
+                  int64_t rs)
+{
+   int cls = cls_find(s, op->cls);
+
+   for (unsigned a = 0; a < s->num_defs; a++) {
+      const struct l2_def *d = &s->defs[a];
+      if (d->tie_k < 0 || cls_find(s, d->cls) != cls || s->ops[d->writer].dead)
+         continue;
+      /* only what this unit writes */
+      bool writes = false;
+      for (unsigned k = 0; k < op->num_out; k++)
+         writes |= op->out[k] == (int)a;
+      if (!writes)
+         continue;
+      for (unsigned b = 0; b < s->num_defs; b++) {
+         const struct l2_def *e = &s->defs[b];
+         if (b == a || e->tie_k != d->tie_k || s->ops[e->writer].dead)
+            continue;
+         int ecls = cls_find(s, e->cls);
+         if (ecls == cls || s->cls_row[ecls] != (int)row)
+            continue;
+         if (!(d->tie_half < 0 || e->tie_half < 0 || d->tie_half == e->tie_half))
+            continue;
+         if (!e->written || e->uses_left > 0 || e->last_read >= rs)
+            return true;
+      }
+   }
+   return false;
+}
+
 /* Place a unit operation (MFU or fetch) on step. */
 static bool
 place_unit(struct l2 *s, struct l2_op *op, unsigned step, int64_t gfirst)
@@ -856,6 +892,8 @@ place_unit(struct l2 *s, struct l2_op *op, unsigned step, int64_t gfirst)
          return false;
       s->cls_row[cls] = step % s->rows;
    }
+   if (unit_loc_conflict(s, op, step % s->rows, gfirst))
+      return false;
    place_reads(s, op, gfirst, op->orig);
    for (unsigned k = 0; k < op->num_out; k++) {
       struct l2_def *d = &s->defs[op->out[k]];
@@ -996,7 +1034,8 @@ l2_schedule(struct l2 *s)
             if (best < 0 || op->height > s->ops[best].height)
                best = i;
          }
-         if (best >= 0 && place_unit(s, &s->ops[best], t, gfirst)) {
+         if (best >= 0 &&
+             place_unit(s, &s->ops[best], t, s->step_first[t - t % s->rows])) {
             if (kind == L2_MFU)
                s->step_mfu[t] = best;
             else
@@ -1236,9 +1275,18 @@ l2_allocate(struct l2 *s)
    for (unsigned d = 0; d < s->num_defs; d++) {
       struct l2_def *def = &s->defs[d];
       const struct l2_op *w = &s->ops[def->writer];
-      def->issue = w->kind == L2_ALU ? s->step_first[w->step] + w->packet
-                                     : s->step_first[w->step];
-      def->land = w->kind == L2_ALU ? def->issue + 2 : def->issue;
+      /* a unit acts at the start of its round */
+      def->issue = w->kind == L2_ALU
+                      ? s->step_first[w->step] + w->packet
+                      : s->step_first[w->step - w->step % s->rows];
+      /* a round boundary completes the pending writes of the round before it
+       * (experiment dxa), so a result lands at the end of its round at the
+       * latest */
+      int64_t round_end = (unsigned)((w->step / s->rows + 1) * s->rows) < s->steps
+                             ? s->step_first[(w->step / s->rows + 1) * s->rows]
+                             : total;
+      def->land = w->kind == L2_ALU ? MIN2(def->issue + 2, round_end)
+                                    : def->issue;
       /* a round boundary lets a later round see it before it lands */
       def->start = w->kind == L2_ALU ? def->issue + 1 : def->issue;
       def->last_read = def->land;
@@ -1246,8 +1294,9 @@ l2_allocate(struct l2 *s)
    }
    for (unsigned i = 0; i < s->num_ops; i++) {
       const struct l2_op *op = &s->ops[i];
-      int64_t g = op->kind == L2_ALU ? s->step_first[op->step] + op->packet
-                                     : s->step_first[op->step];
+      int64_t g = op->kind == L2_ALU
+                     ? s->step_first[op->step] + op->packet
+                     : s->step_first[op->step - op->step % s->rows];
       unsigned n = op->kind == L2_ALU ? L2_SRCS : op->num_in;
       for (unsigned k = 0; k < n; k++) {
          int d = op->kind == L2_ALU ? op->src_def[k] : op->in[k];
@@ -1275,8 +1324,12 @@ l2_allocate(struct l2 *s)
             return false;
       } else {
          int row = s->cls_row[cls_find(s, def->cls)];
-         if (row < 0 || !def->written)
+         if (row < 0 || !def->written) {
+            if (s->verbose)
+               fprintf(stderr, "GRATE LAYOUT2: tied value def%d (writer op %d kind %d) has row %d written %d\n",
+                       d, def->writer, s->ops[def->writer].kind, row, def->written);
             return false;
+         }
          reg = row * 4 + def->tie_k;
          half = def->tie_half < 0 ? 0 : def->tie_half;
       }
@@ -1285,8 +1338,16 @@ l2_allocate(struct l2 *s)
             continue;
          unsigned loc = reg < 16 ? reg * 2 + h : 32 + (reg - 64) * 2 + h;
          if (!occ_fits(s, occ[loc], nocc[loc], d, def->start, def->last_read)) {
-            if (s->verbose)
-               fprintf(stderr, "GRATE LAYOUT2: tied value def%d cannot have r%u\n", d, reg);
+            if (s->verbose) {
+               fprintf(stderr, "GRATE LAYOUT2: tied value def%d (writer op %d kind %d, interp key %d, [%lld..%lld]) cannot have r%u; there:",
+                       d, def->writer, s->ops[def->writer].kind, def->interp_key,
+                       (long long)def->start, (long long)def->last_read, reg);
+               for (unsigned i = 0; i < nocc[loc]; i++)
+                  fprintf(stderr, " def%d(writer op %d kind %d key %d [%lld..%lld])", occ[loc][i].def,
+                          s->defs[occ[loc][i].def].writer, s->ops[s->defs[occ[loc][i].def].writer].kind,
+                          s->defs[occ[loc][i].def].interp_key, (long long)occ[loc][i].land, (long long)occ[loc][i].end);
+               fprintf(stderr, "\n");
+            }
             return false;
          }
          occ[loc][nocc[loc]++] = (struct l2_occ){def->start, def->last_read, (int)d};
