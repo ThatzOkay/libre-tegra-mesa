@@ -55,7 +55,7 @@ mix(uint64_t a, uint64_t b)
    x ^= x >> 27;
    x *= 0x94d049bb133111ebull;
    x ^= x >> 31;
-   return x;
+   return x & ~(1ull << 63);     /* the top bit marks a value stored in an FX10 half */
 }
 
 static uint64_t
@@ -152,7 +152,7 @@ lo_write(struct lo_eval *e, int loc, uint64_t v, unsigned width,
    }
    struct lo_write *w = &e->writes[e->num_writes];
    w->loc = loc;
-   w->value = v;
+   w->value = width == 1 ? (v | (1ull << 63)) : v;
    w->width = width;
    w->issue = issue;
    w->land = land;
@@ -423,7 +423,7 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
             h[n++] = a->scale;
             h[n++] = a->dst.saturate;
             h[n++] = a->condition;
-            h[n++] = a->dst.write_low_sub_reg | (a->dst.write_high_sub_reg << 1);
+            h[n++] = 0;       /* the destination format is not part of the value */
             for (unsigned k = 0; k < 3; k++)
                h[n++] = lo_src(e, &a->src[k], g, round);
             if (a->condition != FP_CONDITION_ALWAYS && lo_reg_ok(a->dst.index)) {
@@ -442,7 +442,7 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
                        a->dst.index, a->dst.write_low_sub_reg ? "l" : "",
                        a->dst.write_high_sub_reg ? "h" : "", (unsigned)v,
                        (unsigned)h[5], (unsigned)h[6], (unsigned)h[7]);
-            fv[sl] = v;
+            fv[sl] = (a->dst.write_low_sub_reg && a->dst.write_high_sub_reg) ? v : (v | (1ull << 63));
             fm[sl] = (a->dst.write_low_sub_reg ? 1 : 0) |
                      (a->dst.write_high_sub_reg ? 2 : 0);
             if (a->dst.index == 31)

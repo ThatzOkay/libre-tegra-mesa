@@ -55,6 +55,7 @@ struct l2_def {
    int readers[16];
    unsigned num_readers;
    bool reg_free;           /* every use is a forward: the slot writes R31 */
+   bool dead;               /* folded away */
 };
 
 struct l2_op {
@@ -76,6 +77,7 @@ struct l2_op {
    int orig;
    int height;
    bool placed;
+   bool dead;            /* folded away */
    int step, packet, slot;
 };
 
@@ -96,10 +98,14 @@ struct l2 {
    int packet_op[L2_MAX_STEPS][3][4];
    int64_t total_packets;
    bool verbose;
+   unsigned folded;      /* copies removed */
+   bool prop;            /* also propagate copies that cannot be folded */
    /* an operation may only be scheduled when fewer than this many operations
     * that came before it in the program are still waiting */
    unsigned window;
 };
+
+static unsigned l2_fold_copies(struct l2 *s);
 
 static int
 cls_find(struct l2 *s, int a)
@@ -526,7 +532,123 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
    free(mf);
    if (ok && !have_dw)
       ok = false;
+   if (ok && !getenv("GRATE_LAYOUT_NOFOLD"))
+      s->folded = l2_fold_copies(s);
    return ok;
+}
+
+/* ---- folding copies ---- */
+
+static bool
+alu_is_plain_copy(const struct fp_alu_instr *a)
+{
+   const struct fp_alu_src_operand *s = a->src;
+   return a->op == FP_ALU_OP_MAD && a->scale == FP_SCALE_NONE &&
+          !a->dst.saturate && a->condition == FP_CONDITION_ALWAYS &&
+          !s[0].negate && !s[0].absolute_value && !s[0].minus_one &&
+          !s[0].scale_by_two && s[1].index == 31 && s[1].sub_reg_select_high &&
+          !s[1].negate && !s[1].absolute_value && !s[1].minus_one &&
+          !s[1].scale_by_two && s[2].index == 31 && !s[2].sub_reg_select_high &&
+          !s[2].negate && !s[2].absolute_value && !s[2].minus_one &&
+          !s[2].scale_by_two;
+}
+
+/* A copy whose source value has no other use is not needed: the slot that
+ * computes the source writes the copy's destination instead. The conversion
+ * between FP20 and an FX10 half happens in the write either way. Returns the
+ * number of copies removed. */
+static unsigned
+l2_fold_copies(struct l2 *s)
+{
+   unsigned removed = 0;
+   unsigned uses[L2_MAX_DEFS] = {0};
+
+   for (unsigned i = 0; i < s->num_ops; i++) {
+      const struct l2_op *op = &s->ops[i];
+      unsigned n = op->kind == L2_ALU ? L2_SRCS : op->num_in;
+      for (unsigned k = 0; k < n; k++) {
+         int d = op->kind == L2_ALU ? op->src_def[k] : op->in[k];
+         if (d >= 0)
+            uses[d]++;
+      }
+   }
+   for (unsigned c = 0; c < s->num_ops; c++) {
+      struct l2_op *cp = &s->ops[c];
+      if (cp->kind != L2_ALU || cp->dead || cp->dst_def < 0 ||
+          !alu_is_plain_copy(&cp->alu) || cp->src_def[0] < 0 ||
+          cp->src_def[1] >= 0 || cp->src_def[2] >= 0 || cp->src_def[3] >= 0)
+         continue;
+      struct l2_def *x = &s->defs[cp->src_def[0]];
+      struct l2_def *y = &s->defs[cp->dst_def];
+      /* a copy between values of the same width: the readers of the copy
+       * read its source instead (copy propagation) */
+      if (uses[cp->src_def[0]] != 1 && s->prop &&
+          !x->dead && x->tie_k < 0 && x->fixed_reg < 0 && y->tie_k < 0 &&
+          y->fixed_reg < 0 && y->width == x->width &&
+          (x->width == 2 ? cp->alu.src[0].datatype == FP_DATATYPE_FP20
+                         : cp->alu.src[0].datatype == FP_DATATYPE_FIXED10)) {
+         bool only_alu = true;
+         for (unsigned i = 0; i < s->num_ops && only_alu; i++) {
+            const struct l2_op *op = &s->ops[i];
+            if (op->dead)
+               continue;
+            if (op->kind == L2_ALU) {
+               if (op->src_def[3] == cp->dst_def)
+                  only_alu = false;
+            } else {
+               for (unsigned k = 0; k < op->num_in; k++)
+                  if (op->in[k] == cp->dst_def)
+                     only_alu = false;
+            }
+         }
+         if (only_alu) {
+            const int xd = cp->src_def[0], yd = cp->dst_def;
+            for (unsigned i = 0; i < s->num_ops; i++) {
+               struct l2_op *op = &s->ops[i];
+               if (op->kind != L2_ALU || op->dead)
+                  continue;
+               for (unsigned k = 0; k < 3; k++)
+                  if (op->src_def[k] == yd) {
+                     op->src_def[k] = xd;
+                     uses[xd]++;
+                  }
+            }
+            uses[xd]--;
+            y->dead = true;
+            cp->dead = true;
+            cp->placed = true;
+            cp->dst_def = -1;
+            cp->src_def[0] = -1;
+            removed++;
+            continue;
+         }
+      }
+      if (uses[cp->src_def[0]] != 1 || x->tie_k >= 0 || x->fixed_reg >= 0 ||
+          y->fixed_reg >= 0 || y->width > x->width || x->dead)
+         continue;
+      struct l2_op *p = &s->ops[x->writer];
+      if (p->kind != L2_ALU || p->dead || p->dst_def != cp->src_def[0] ||
+          p->alu.condition != FP_CONDITION_ALWAYS)
+         continue;
+      /* the copy must read the value in its own format */
+      const struct fp_alu_src_operand *src = &cp->alu.src[0];
+      if (x->width == 2 ? src->datatype != FP_DATATYPE_FP20
+                        : src->datatype != FP_DATATYPE_FIXED10)
+         continue;
+      /* the producer must come first in the program, so that no other
+       * ordering (pinned registers) is disturbed */
+      if (x->writer > (int)c)
+         continue;
+      p->dst_def = cp->dst_def;
+      y->writer = x->writer;
+      x->dead = true;
+      cp->dead = true;
+      cp->placed = true;
+      cp->dst_def = -1;
+      cp->src_def[0] = -1;
+      removed++;
+   }
+   return removed;
 }
 
 /* ---- scheduling ---- */
@@ -753,7 +875,7 @@ l2_schedule(struct l2 *s)
    }
    for (unsigned i = 0; i < s->num_ops; i++) {
       struct l2_op *op = &s->ops[i];
-      op->placed = false;
+      op->placed = op->dead;
       op->fwd[0] = op->fwd[1] = op->fwd[2] = -1;
       unsigned n = op->kind == L2_ALU ? L2_SRCS : op->num_in;
       for (unsigned k = 0; k < n; k++) {
@@ -772,7 +894,7 @@ l2_schedule(struct l2 *s)
 
    unsigned remaining = 0;
    for (unsigned i = 0; i < s->num_ops; i++)
-      remaining += s->ops[i].kind != L2_DW;
+      remaining += s->ops[i].kind != L2_DW && !s->ops[i].dead;
    unsigned idle = 0;
    unsigned last_busy_step = 0;
 
@@ -1020,7 +1142,7 @@ l2_allocate(struct l2 *s)
       }
       for (unsigned d = 0; d < s->num_defs; d++) {
          struct l2_def *def = &s->defs[d];
-         def->reg_free = def->width == 2 && def->tie_k < 0 &&
+         def->reg_free = !def->dead && def->width == 2 && def->tie_k < 0 &&
                          def->fixed_reg < 0 && uses[d] > 0 &&
                          uses[d] == fwds[d] &&
                          s->ops[def->writer].kind == L2_ALU &&
@@ -1099,7 +1221,7 @@ l2_allocate(struct l2 *s)
       int pick = -1;
       for (unsigned d = 0; d < s->num_defs; d++) {
          if (done[d] || s->defs[d].tie_k >= 0 || s->defs[d].fixed_reg >= 0 ||
-             s->defs[d].reg_free)
+             s->defs[d].reg_free || s->defs[d].dead)
             continue;
          if (pick < 0 || s->defs[d].land < s->defs[pick].land)
             pick = d;
@@ -1318,14 +1440,16 @@ grate_fp_layout_nvidia(struct grate_fp_shader *fp, uint64_t seq_signature,
    static const unsigned windows[] = {3, 5, 8, 12, 20, 40, 1000};
    struct cand {
       unsigned rows, window, steps, packets;
-   } cands[4 * ARRAY_SIZE(windows)];
+      bool prop;
+   } cands[8 * ARRAY_SIZE(windows)];
    unsigned num_cands = 0;
 
    for (unsigned rows = 1; rows <= 4; rows++) {
-      for (unsigned w = 0; w < ARRAY_SIZE(windows); w++) {
+      for (unsigned w = 0; w < 2 * ARRAY_SIZE(windows); w++) {
          memset(s, 0, sizeof(*s));
          s->rows = rows;
-         s->window = windows[w];
+         s->window = windows[w % ARRAY_SIZE(windows)];
+         s->prop = w >= ARRAY_SIZE(windows);
          s->verbose = verbose && getenv("GRATE_LAYOUT_VERBOSE");
          if (!l2_extract(s, fp)) {
             if (verbose)
@@ -1343,8 +1467,10 @@ grate_fp_layout_nvidia(struct grate_fp_shader *fp, uint64_t seq_signature,
                        rows, windows[w]);
             continue;
          }
-         cands[num_cands++] = (struct cand){rows, windows[w], s->steps,
-                                            (unsigned)s->total_packets};
+         cands[num_cands++] = (struct cand){rows, windows[w % ARRAY_SIZE(windows)],
+                                            s->steps,
+                                            (unsigned)s->total_packets,
+                                            s->prop};
       }
    }
    /* best first: fewest steps, then packets, then rows */
@@ -1381,6 +1507,7 @@ grate_fp_layout_nvidia(struct grate_fp_shader *fp, uint64_t seq_signature,
       memset(s, 0, sizeof(*s));
       s->rows = cands[c].rows;
       s->window = cands[c].window;
+      s->prop = cands[c].prop;
       if (!l2_extract(s, fp) || !l2_schedule(s) || !l2_allocate(s))
          continue;
 
@@ -1397,8 +1524,8 @@ grate_fp_layout_nvidia(struct grate_fp_shader *fp, uint64_t seq_signature,
          ok = grate_fp_layout_signature(fp, false, &sig, &why) &&
               sig == seq_signature;
       if (verbose)
-         fprintf(stderr, "GRATE LAYOUT2: rows %u window %u, %u steps, %u packets: %s\n",
-                 cands[c].rows, cands[c].window, cands[c].steps,
+         fprintf(stderr, "GRATE LAYOUT2: rows %u window %u%s, %u steps, %u packets: %s\n",
+                 cands[c].rows, cands[c].window, cands[c].prop ? " +prop" : "", cands[c].steps,
                  cands[c].packets, ok ? "validated" : "REJECTED by the evaluator");
       if (ok) {
          free_lists(&old_steps, &old_alus, &old_mfus);
