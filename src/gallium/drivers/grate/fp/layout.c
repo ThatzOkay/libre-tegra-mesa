@@ -246,6 +246,92 @@ lo_supported_packet(struct lo_eval *e, const struct fp_alu_instr_packet *p)
    return true;
 }
 
+/* The unit operations of one step (interpolation, SFU, fetch) read and write
+ * the registers of the row step % rows. In hardware they act at the start of
+ * the round of the step, before all the ALU packets of that round, also those
+ * of the steps before it (docs/grate-alu-latency.md, experiments ix and dx):
+ * q is the position of the first packet of the round. */
+static bool
+lo_units(struct lo_eval *e, const struct fp_instr *instr,
+         const struct fp_mfu_instr **mf, bool sequential, unsigned step,
+         int64_t gfirst)
+{
+   unsigned rows = e->rows;
+   unsigned row = sequential ? 0 : step % rows;
+   int round = sequential ? 0 : step / rows;
+   unsigned base = row * 4;
+
+   if (instr->mfu_sched.num_instructions) {
+      const struct fp_mfu_instr *m = mf[instr->mfu_sched.address];
+      for (unsigned k = 0; k < 2; k++)
+         if (m->mul[k].dst != 0 &&
+             m->mul[k].dst != FP_MFU_MUL_DST_BARYCENTRIC_WEIGHT) {
+            e->why = "MFU multiplier writes a row register";
+            return false;
+         }
+      if (e->why)
+         return false;
+      if (m->sfu.op != FP_SFU_OP_NOP && m->sfu.reg < 4) {
+         lo_unit_read_step = sequential ? -1 : (int)step;
+         uint64_t v = lo_read_fp20(e, base + m->sfu.reg, gfirst, round, false);
+         lo_unit_read_step = -1;
+         lo_write_unit = true;
+         lo_write_step = step;
+         uint64_t a[] = {0x5f0, m->sfu.op, v};
+         uint64_t r = mixn(3, a);
+         lo_write(e, (base + m->sfu.reg) * 2, r, 2, gfirst, gfirst, round);
+         lo_write(e, (base + m->sfu.reg) * 2 + 1, r, 2, gfirst, gfirst,
+                  round);
+      } else if (m->sfu.op != FP_SFU_OP_NOP && m->sfu.reg > 4) {
+         e->why = "SFU register above 4";
+         return false;
+      }
+      for (unsigned k = 0; k < 4; k++) {
+         if (m->var[k].op == FP_VAR_OP_NOP)
+            continue;
+         if (m->var[k].op != FP_VAR_OP_FP20) {
+            e->why = "FX10 interpolation";
+            return false;
+         }
+         lo_write_unit = true;
+         lo_write_step = step;
+         uint64_t a[] = {0x1a7e, m->var[k].tram_row, k};
+         uint64_t r = mixn(3, a);
+         if (getenv("GRATE_LAYOUT_TRACE"))
+            fprintf(stderr, "  %s step %u interp var%u row %u = %08x\n",
+                    sequential ? "SEQ" : "HW ", step, k, row, (unsigned)r);
+         lo_write(e, (base + k) * 2, r, 2, gfirst, gfirst, round);
+         lo_write(e, (base + k) * 2 + 1, r, 2, gfirst, gfirst, round);
+      }
+      if (e->why)
+         return false;
+   }
+
+   if (instr->tex & (1 << 10)) {
+      if (instr->tex & 0x10) {
+         e->why = "fetch with the R2R3R0 coordinate source";
+         return false;
+      }
+      lo_unit_read_step = sequential ? -1 : (int)step;
+      uint64_t x = lo_read_fp20(e, base + 0, gfirst, round, false);
+      uint64_t y = lo_read_fp20(e, base + 1, gfirst, round, false);
+      lo_unit_read_step = -1;
+      lo_write_unit = true;
+      lo_write_step = step;
+      if (getenv("GRATE_LAYOUT_TRACE"))
+         fprintf(stderr, "  %s step %u TEX row %u coords %08x %08x\n",
+                 sequential ? "SEQ" : "HW ", step, row, (unsigned)x, (unsigned)y);
+      for (unsigned c = 0; c < 4; c++) {
+         uint64_t a[] = {0x7e5, instr->tex & 0x3ff, x, y, c};
+         lo_write(e, (base + 2 + c / 2) * 2 + c % 2, mixn(5, a), 1, gfirst,
+                  gfirst, round);
+      }
+   }
+
+   lo_write_unit = false;
+   return true;
+}
+
 bool
 grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
                           uint64_t *signature, const char **why)
@@ -327,71 +413,23 @@ grate_fp_layout_signature(const struct grate_fp_shader *fp, bool sequential,
          }
       }
 
-      if (instr->mfu_sched.num_instructions) {
-         const struct fp_mfu_instr *m = mf[instr->mfu_sched.address];
-         for (unsigned k = 0; k < 2; k++)
-            if (m->mul[k].dst != 0 &&
-                m->mul[k].dst != FP_MFU_MUL_DST_BARYCENTRIC_WEIGHT) {
-               e->why = "MFU multiplier writes a row register";
+      if (sequential) {
+         if (!lo_units(e, instr, mf, true, step, gfirst))
+            break;
+      } else if (step % rows == 0) {
+         /* every unit operation of the round acts before its ALU packets */
+         const struct list_head *it = &instr->link;
+         bool ok_units = true;
+         for (unsigned k = 0; k < rows && it != &fp->fp_instructions;
+              k++, it = it->next) {
+            const struct fp_instr *ins = list_entry(it, struct fp_instr, link);
+            if (!lo_units(e, ins, mf, false, step + k, gfirst)) {
+               ok_units = false;
                break;
             }
-         if (e->why)
-            break;
-         if (m->sfu.op != FP_SFU_OP_NOP && m->sfu.reg < 4) {
-            lo_unit_read_step = sequential ? -1 : (int)step;
-            uint64_t v = lo_read_fp20(e, base + m->sfu.reg, gfirst, round, false);
-            lo_unit_read_step = -1;
-            lo_write_unit = true;
-            lo_write_step = step;
-            uint64_t a[] = {0x5f0, m->sfu.op, v};
-            uint64_t r = mixn(3, a);
-            lo_write(e, (base + m->sfu.reg) * 2, r, 2, gfirst, gfirst, round);
-            lo_write(e, (base + m->sfu.reg) * 2 + 1, r, 2, gfirst, gfirst,
-                     round);
-         } else if (m->sfu.op != FP_SFU_OP_NOP && m->sfu.reg > 4) {
-            e->why = "SFU register above 4";
-            break;
          }
-         for (unsigned k = 0; k < 4; k++) {
-            if (m->var[k].op == FP_VAR_OP_NOP)
-               continue;
-            if (m->var[k].op != FP_VAR_OP_FP20) {
-               e->why = "FX10 interpolation";
-               break;
-            }
-            lo_write_unit = true;
-            lo_write_step = step;
-            uint64_t a[] = {0x1a7e, m->var[k].tram_row, k};
-            uint64_t r = mixn(3, a);
-            if (getenv("GRATE_LAYOUT_TRACE"))
-               fprintf(stderr, "  %s step %u interp var%u row %u = %08x\n",
-                       sequential ? "SEQ" : "HW ", step, k, row, (unsigned)r);
-            lo_write(e, (base + k) * 2, r, 2, gfirst, gfirst, round);
-            lo_write(e, (base + k) * 2 + 1, r, 2, gfirst, gfirst, round);
-         }
-         if (e->why)
+         if (!ok_units)
             break;
-      }
-
-      if (instr->tex & (1 << 10)) {
-         if (instr->tex & 0x10) {
-            e->why = "fetch with the R2R3R0 coordinate source";
-            break;
-         }
-         lo_unit_read_step = sequential ? -1 : (int)step;
-         uint64_t x = lo_read_fp20(e, base + 0, gfirst, round, false);
-         uint64_t y = lo_read_fp20(e, base + 1, gfirst, round, false);
-         lo_unit_read_step = -1;
-         lo_write_unit = true;
-         lo_write_step = step;
-         if (getenv("GRATE_LAYOUT_TRACE"))
-            fprintf(stderr, "  %s step %u TEX row %u coords %08x %08x\n",
-                    sequential ? "SEQ" : "HW ", step, row, (unsigned)x, (unsigned)y);
-         for (unsigned c = 0; c < 4; c++) {
-            uint64_t a[] = {0x7e5, instr->tex & 0x3ff, x, y, c};
-            lo_write(e, (base + 2 + c / 2) * 2 + c % 2, mixn(5, a), 1, gfirst,
-                     gfirst, round);
-         }
       }
 
       lo_write_unit = false;
