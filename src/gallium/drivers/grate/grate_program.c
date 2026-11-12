@@ -190,9 +190,25 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
    uint32_t blend_words[GRATE_FP_BLEND_MAX_PACKETS * 8];
    unsigned packets = grate_fp_blend_alu(key, blend_words);
 
-   if (!packets || fp_count + rows > 64 || alu_count + packets > 64 ||
-       fp_count % rows)
+   if (!packets) {
+      grate_loge("blend: no ALU packets for key 0x%08x\n", key);
       return false;
+   }
+   if (fp_count + rows > 64) {
+      grate_loge("blend: %u sequencer steps + %u rows > 64\n", fp_count,
+                 rows);
+      return false;
+   }
+   if (alu_count + packets > 64) {
+      grate_loge("blend: %u ALU packets + %u blend packets > 64\n", alu_count,
+                 packets);
+      return false;
+   }
+   if (fp_count % rows) {
+      grate_loge("blend: %u steps is not a whole number of %u rows\n",
+                 fp_count, rows);
+      return false;
+   }
    struct util_dynarray result;
    util_dynarray_init(&result, NULL);
 #define BLEND_PUSH(value)                                                    \
@@ -291,18 +307,79 @@ fail:
 }
 
 /**
+ * The blend variant of a program of more than one epoch. NVIDIA puts the
+ * blend stage in the last epoch (as its last step, with the destination
+ * read) and leaves the others alone, so the last block is rewritten like
+ * the whole program of one epoch is and the variant gets a copy of the
+ * epochs with that block replaced. The common state stays the same.
+ */
+static bool
+create_blend_epochs(const struct grate_fragment_shader_state *shader,
+                    uint32_t key, struct grate_blend_variant *variant)
+{
+   const struct grate_fp_epochs *epochs = shader->info.epochs;
+   const struct grate_fp_epoch *last = &epochs->epoch[epochs->count - 1];
+   struct grate_shader_blob block = {
+      .commands =
+         (uint32_t *)((uint8_t *)epochs->program + last->prog_offset),
+      .num_commands = last->prog_words,
+   };
+   struct grate_shader_blob blended;
+   uint32_t words[GRATE_FP_BLEND_MAX_PACKETS * 8];
+   const unsigned blend_packets = grate_fp_blend_alu(key, words);
+
+   if (!create_blend_blob(&block, last->steps, last->packets,
+                          shader->info.num_rows, key, &blended))
+      return false;
+
+   struct grate_fp_epochs *copy = MALLOC_STRUCT(grate_fp_epochs);
+   if (!copy) {
+      FREE(blended.commands);
+      return false;
+   }
+   *copy = *epochs;
+   copy->program_bo = NULL;
+   copy->constant_bo = NULL;
+   copy->program_bytes =
+      last->prog_offset + blended.num_commands * sizeof(uint32_t);
+   copy->program = MALLOC(copy->program_bytes);
+   uint32_t *common = MALLOC(shader->blob.num_commands * sizeof(uint32_t));
+   if (!copy->program || !common) {
+      FREE(copy->program);
+      FREE(common);
+      FREE(copy);
+      FREE(blended.commands);
+      return false;
+   }
+   memcpy(copy->program, epochs->program, last->prog_offset);
+   memcpy((uint8_t *)copy->program + last->prog_offset, blended.commands,
+          blended.num_commands * sizeof(uint32_t));
+   FREE(blended.commands);
+   copy->epoch[epochs->count - 1].prog_words = blended.num_commands;
+   copy->epoch[epochs->count - 1].steps += shader->info.num_rows;
+   copy->epoch[epochs->count - 1].packets += blend_packets;
+
+   memcpy(common, shader->blob.commands,
+          shader->blob.num_commands * sizeof(uint32_t));
+   variant->blob.commands = common;
+   variant->blob.num_commands = shader->blob.num_commands;
+   variant->epochs = copy;
+   return true;
+}
+
+/**
  * The fragment program with the blend stage for key, built on first use.
  * Returns NULL if it cannot be built.
  */
-const struct grate_shader_blob *
-grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,
-                          uint32_t key)
+const struct grate_blend_variant *
+grate_fragment_blend_variant(struct grate_fragment_shader_state *shader,
+                             uint32_t key)
 {
    struct grate_blend_variant *variant;
 
    for (variant = shader->variants; variant; variant = variant->next) {
       if (variant->key == key)
-         return &variant->blob;
+         return variant;
    }
 
    variant = CALLOC_STRUCT(grate_blend_variant);
@@ -310,9 +387,15 @@ grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,
       return NULL;
 
    variant->key = key;
-   if (!create_blend_blob(&shader->blob, shader->num_fp_instrs,
-                          shader->num_alu_instrs, shader->info.num_rows, key,
-                          &variant->blob)) {
+   bool ok;
+   if (shader->info.epochs) {
+      ok = create_blend_epochs(shader, key, variant);
+   } else {
+      ok = create_blend_blob(&shader->blob, shader->num_fp_instrs,
+                             shader->num_alu_instrs, shader->info.num_rows,
+                             key, &variant->blob);
+   }
+   if (!ok) {
       grate_loge("cannot build the blend variant for key 0x%08x "
                  "(fragment program too long for the blend stage?)\n",
                  key);
@@ -322,7 +405,7 @@ grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,
 
    variant->next = shader->variants;
    shader->variants = variant;
-   return &variant->blob;
+   return variant;
 }
 
 static void
@@ -453,6 +536,51 @@ coalesce_scalar_alu(struct grate_fp_shader *fp)
       FREE(next);
    }
    FREE(packets);
+}
+
+/*
+ * Read-only diagnostic (GRATE_PACKING_DEBUG): what do the slot operations
+ * of this program consist of, and how few ALU packets could they fit in?
+ * NVIDIA's bump-height shader has 51 slot operations in 13 packets (51 of
+ * 52 slots used); each packet holds at most four, so ceil(operations / 4)
+ * is a floor for any schedule of these operations. Operations whose result
+ * only goes to the discard register R31, and plain copies, are counted
+ * apart because they are the first candidates to remove or fold away.
+ */
+static void
+debug_packing_bound(const struct grate_fp_shader *fp)
+{
+   unsigned packets = 0, ops = 0, discard = 0, copies = 0, mads = 0;
+   unsigned hist[5] = {0};
+
+   list_for_each_entry (struct fp_alu_instr_packet, packet,
+                        &fp->alu_instructions, link) {
+      unsigned used = 0;
+
+      packets++;
+      for (unsigned slot = 0; slot < 4; slot++) {
+         const struct fp_alu_instr *alu = &packet->slots[slot];
+
+         if (!alu->dst.write_low_sub_reg && !alu->dst.write_high_sub_reg)
+            continue;
+         used++;
+         ops++;
+         if (alu->dst.index == 31)
+            discard++;
+         else if (alu->src[1].index == 31 && alu->src[2].index == 31 &&
+                  alu->src[3].index == 31)
+            copies++;
+         else
+            mads++;
+      }
+      hist[used]++;
+   }
+   fprintf(stderr,
+           "GRATE PACK: %u packets, %u slot ops (%u to R31 only, %u plain "
+           "copies, %u other); packets with 1/2/3/4 ops: %u/%u/%u/%u; "
+           "floor %u packets\n",
+           packets, ops, discard, copies, mads, hist[1], hist[2], hist[3],
+           hist[4], DIV_ROUND_UP(ops, 4));
 }
 
 static bool
@@ -757,8 +885,11 @@ emit_fp_blocks(struct util_dynarray *buf, enum drm_tegra_soc_id soc_id,
  */
 #define GRATE_FP_LOGICAL_WORDS (GRATE_FP_MAX_LOGICAL_CONSTANTS / 32)
 #define GRATE_FP_MAX_EPOCH_STEPS 64
-/* the addresses of the ALU and MFU instructions of a step are six bits */
-#define GRATE_FP_MAX_EPOCH_PACKETS 61
+/* the addresses of the ALU and MFU instructions of a step are six bits.
+ * NVIDIA's compiler fills an epoch with exactly 64 ALU packets (addresses
+ * 0-63, 512 words of ALU_INST_DATA) before it starts the next one; the MFU
+ * limit is not measured (57 seen), 61 is kept. */
+#define GRATE_FP_MAX_EPOCH_PACKETS 64
 #define GRATE_FP_MAX_EPOCH_MFUS 61
 
 static void
@@ -1021,6 +1152,7 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
       epoch->prog_offset = program.size;
       epoch->prog_words = body.size / sizeof(uint32_t);
       epoch->steps = last - first;
+      epoch->packets = packet_end - packet_first;
       epoch->const_bank = 0;
       util_dynarray_append_array(&program, uint32_t,
                                  (uint32_t *)body.data, epoch->prog_words);
@@ -1116,6 +1248,8 @@ grate_compile_fs(struct grate_context *context,
    if (has_spills)
       fp.info.num_rows = 4;
 
+   if (getenv("GRATE_PACKING_DEBUG"))
+      debug_packing_bound(&fp);
    if (fp.spilling)
       coalesce_scalar_alu(&fp);
    align_to_rows(&fp);
@@ -1123,7 +1257,12 @@ grate_compile_fs(struct grate_context *context,
    unsigned num_fp_instrs = list_length(&fp.fp_instructions);
    unsigned num_mfu_instrs = list_length(&fp.mfu_instructions);
    unsigned num_alu_instrs = list_length(&fp.alu_instructions);
-   if (!fp.allocation_failed && fp.info.num_constants > GRATE_FP_MAX_CONSTANTS &&
+   /* The ALU and MFU instruction addresses of a step are six bits: a
+    * program with more instructions than that also needs epochs. */
+   if (!fp.allocation_failed &&
+       (fp.info.num_constants > GRATE_FP_MAX_CONSTANTS ||
+        num_alu_instrs > GRATE_FP_MAX_EPOCH_PACKETS ||
+        num_mfu_instrs > GRATE_FP_MAX_EPOCH_MFUS) &&
        !split_into_epochs(&fp, soc_id, has_spills, &fp.info.epochs)) {
       free_fragment_ir(&fp);
       return false;
@@ -1324,6 +1463,12 @@ grate_delete_fs_state(struct pipe_context *pcontext, void *so)
 
       shader->variants = variant->next;
       FREE(variant->blob.commands);
+      if (variant->epochs) {
+         grate_bo_unref(variant->epochs->program_bo);
+         grate_bo_unref(variant->epochs->constant_bo);
+         FREE(variant->epochs->program);
+         FREE(variant->epochs);
+      }
       FREE(variant);
    }
    FREE(shader);
