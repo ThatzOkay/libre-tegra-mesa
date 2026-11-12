@@ -113,6 +113,9 @@ grate_fp_max_qid(unsigned rows)
 
 #define GRATE_FP_MAX_IMMEDIATES 32
 #define GRATE_FP_MAX_TEMPS      64
+/* Temporaries that live within one TGSI instruction (staging of varyings and
+ * scratch sums) come after the declared ones. */
+#define GRATE_FP_STAGE_TEMPS    3
 #define GRATE_FP_MAX_SPILLS     256
 /* P128 elements, four pixels per quad, and 19 quad IDs at four rows. */
 #define GRATE_FP_SPILL_SURFACE 4
@@ -123,11 +126,11 @@ struct grate_fp_shader {
    /* Encoded scalar locations: register[6:0], FX10 bit 8, high half bit 9;
     * -1 is absent and -2-slot names an FP20 scalar in the spill surface.
     * The extra virtual temporary is reserved for interpolation staging. */
-   int temp_src[GRATE_FP_MAX_TEMPS + 1][4];
-   int temp_dst[GRATE_FP_MAX_TEMPS + 1][4];
+   int temp_src[GRATE_FP_MAX_TEMPS + GRATE_FP_STAGE_TEMPS][4];
+   int temp_dst[GRATE_FP_MAX_TEMPS + GRATE_FP_STAGE_TEMPS][4];
    /* A clean backing slot remains valid after a reload until this
     * virtual component is overwritten or dies. */
-   int spill_slot[GRATE_FP_MAX_TEMPS + 1][4];
+   int spill_slot[GRATE_FP_MAX_TEMPS + GRATE_FP_STAGE_TEMPS][4];
    uint8_t occupied[72];
    uint8_t claimed[72];
    uint8_t reusable[72];

@@ -424,11 +424,12 @@ fp_alu_dst(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
       ret.write_high_sub_reg = (o % 2) != 0;
    } else {
       assert(dst->File == TGSI_FILE_TEMPORARY &&
-             dst->Index <= GRATE_FP_MAX_TEMPS);
+             dst->Index < GRATE_FP_MAX_TEMPS + GRATE_FP_STAGE_TEMPS);
       if (fp->temp_dst[dst->Index][subreg] < 0) {
          /* Internal interpolation staging lives only within this instruction.
           */
-         assert(dst->Index == fp->num_temporaries);
+         assert(dst->Index >= fp->num_temporaries &&
+                dst->Index < fp->num_temporaries + GRATE_FP_STAGE_TEMPS);
          fp->temp_dst[dst->Index][subreg] = allocate_scalar(fp, false);
          fp->temp_src[dst->Index][subreg] = fp->temp_dst[dst->Index][subreg];
       }
@@ -529,7 +530,7 @@ fp_tgsi_src(struct grate_fp_shader *fp, const struct tgsi_src_register *src,
       value = fp_constant(fp, src->Index * 4 + comp, 0.0f);
       break;
    case TGSI_FILE_TEMPORARY:
-      assert(src->Index <= GRATE_FP_MAX_TEMPS);
+      assert(src->Index < GRATE_FP_MAX_TEMPS + GRATE_FP_STAGE_TEMPS);
       int reg = fp->temp_src[src->Index][comp];
       assert(reg >= 0 || fp->allocation_failed);
       value = fp_alu_src_row(0);
@@ -1355,27 +1356,29 @@ emit_DP(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
                        src[1].File == TGSI_FILE_INPUT};
    bool same_input = is_input[0] && is_input[1] &&
                      !memcmp(&src[0], &src[1], sizeof(src[0]));
-   if ((is_input[0] || is_input[1]) &&
-       (n == 4 || (is_input[0] && is_input[1] && !same_input))) {
-      if (!fp->allocation_failed)
-         fprintf(stderr, "GRATE FRAG: DP4 of a varying, or DP of two "
-                         "different varyings, is not supported\n");
-      fp->allocation_failed = true;
-      return;
-   }
-
    assert(fp->num_temporaries < GRATE_FP_MAX_TEMPS);
    /* the scratch must not take the register of an operand that a later step
     * still reads, even if this instruction reads it for the last time */
    memset(fp->reusable, 0, sizeof(fp->reusable));
+   /* each varying operand is copied into a temporary of its own (an
+    * interpolation overwrites the rows), and the running sum goes into
+    * another one */
+   unsigned next_temp = fp->num_temporaries;
    struct tgsi_dst_register stage = {0};
    stage.File = TGSI_FILE_TEMPORARY;
-   stage.Index = fp->num_temporaries;
-   stage.WriteMask = TGSI_WRITEMASK_XYZ;
+   stage.WriteMask = n == 2 ? TGSI_WRITEMASK_XY
+                     : n == 3 ? TGSI_WRITEMASK_XYZ : TGSI_WRITEMASK_XYZW;
    for (unsigned s = 0; s < 2; s++) {
       if (!is_input[s] || (s == 1 && same_input))
          continue;
+      stage.Index = next_temp++;
+      /* the first of two staged operands is alive while the second one is
+       * interpolated, which overwrites R0-R3 */
+      bool avoid_rows = fp->avoid_rows;
+      if (s == 0 && is_input[1] && !same_input)
+         fp->avoid_rows = true;
       emit_vALU(fp, &stage, false, &src[s], NULL, NULL, TGSI_OPCODE_MOV);
+      fp->avoid_rows = avoid_rows;
       src[s].File = TGSI_FILE_TEMPORARY;
       src[s].Index = stage.Index;
       src[s].Negate = src[s].Absolute = 0;
@@ -1387,11 +1390,13 @@ emit_DP(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    if (same_input)
       src[1] = src[0];
 
-   struct tgsi_dst_register sum = stage;
+   struct tgsi_dst_register sum = {0};
+   sum.File = TGSI_FILE_TEMPORARY;
+   sum.Index = next_temp;
    sum.WriteMask = TGSI_WRITEMASK_W;
    struct tgsi_src_register sum_src = {0};
    sum_src.File = TGSI_FILE_TEMPORARY;
-   sum_src.Index = stage.Index;
+   sum_src.Index = sum.Index;
    sum_src.SwizzleX = sum_src.SwizzleY = sum_src.SwizzleZ =
       sum_src.SwizzleW = TGSI_SWIZZLE_W;
 
@@ -2551,7 +2556,9 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
       memset(fp->claimed, 0, sizeof(fp->claimed));
       memset(fp->reusable, 0, sizeof(fp->reusable));
       memcpy(fp->temp_dst, fp->temp_src, sizeof(fp->temp_dst));
-      memset(fp->temp_dst[fp->num_temporaries], -1, sizeof(fp->temp_dst[0]));
+      for (unsigned st = 0; st < GRATE_FP_STAGE_TEMPS; st++)
+         memset(fp->temp_dst[fp->num_temporaries + st], -1,
+                sizeof(fp->temp_dst[0]));
       if (fp->spilling) {
          memset(fp->pinned, 0, sizeof(fp->pinned));
          /* Pin every resident source before loading any spilled source.
@@ -2783,7 +2790,9 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
             }
          }
       }
-      memset(fp->temp_src[fp->num_temporaries], -1, sizeof(fp->temp_src[0]));
+      for (unsigned st = 0; st < GRATE_FP_STAGE_TEMPS; st++)
+         memset(fp->temp_src[fp->num_temporaries + st], -1,
+                sizeof(fp->temp_src[0]));
    }
    fp->current_instruction = NULL;
    fp->code_end = NULL;

@@ -56,6 +56,7 @@ struct l2_def {
    unsigned num_readers;
    bool reg_free;           /* every use is a forward: the slot writes R31 */
    bool dead;               /* folded away */
+   int interp_key;          /* tram row << 3 | variable, for an interpolated value, else -1 */
 };
 
 struct l2_op {
@@ -106,6 +107,7 @@ struct l2 {
 };
 
 static unsigned l2_fold_copies(struct l2 *s);
+static unsigned l2_cse_interp(struct l2 *s);
 
 static int
 cls_find(struct l2 *s, int a)
@@ -139,6 +141,7 @@ new_def(struct l2 *s, unsigned width, int writer)
    d->writer = writer;
    d->reg = d->half = -1;
    d->fixed_reg = d->fixed_half = -1;
+   d->interp_key = -1;
    return s->num_defs++;
 }
 
@@ -327,6 +330,7 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
                   ok = false;
                   break;
                }
+               s->defs[d].interp_key = (m->var[k].tram_row << 3) | k;
                op->out[op->num_out++] = d;
                cur.def[k * 2] = cur.def[k * 2 + 1] = d;
             }
@@ -532,9 +536,79 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
    free(mf);
    if (ok && !have_dw)
       ok = false;
+   if (ok && !getenv("GRATE_LAYOUT_NOCSE"))
+      l2_cse_interp(s);
    if (ok && !getenv("GRATE_LAYOUT_NOFOLD"))
       s->folded = l2_fold_copies(s);
    return ok;
+}
+
+/* The same varying component interpolated twice is the same value: later
+ * readers read the first one, as NVIDIA's compiler does (one interpolation of
+ * all four channels into R0-R3, then plain register reads). A variable
+ * interpolated by an operation that then has nothing left to do goes away. */
+static unsigned
+l2_cse_interp(struct l2 *s)
+{
+   int first[256];
+   unsigned removed = 0;
+
+   memset(first, 0xff, sizeof(first));
+   for (unsigned d = 0; d < s->num_defs; d++) {
+      struct l2_def *y = &s->defs[d];
+      if (y->interp_key < 0 || y->interp_key >= 256 || y->dead)
+         continue;
+      if (first[y->interp_key] < 0) {
+         first[y->interp_key] = d;
+         continue;
+      }
+      int xd = first[y->interp_key];
+      bool used = false;
+      for (unsigned i = 0; i < s->num_ops; i++) {
+         struct l2_op *op = &s->ops[i];
+         if (op->dead)
+            continue;
+         if (op->kind == L2_ALU) {
+            for (unsigned k = 0; k < L2_SRCS; k++)
+               if (op->src_def[k] == (int)d) {
+                  op->src_def[k] = xd;
+                  used = true;
+               }
+         } else {
+            for (unsigned k = 0; k < op->num_in; k++)
+               if (op->in[k] == (int)d) {
+                  op->in[k] = xd;
+                  used = true;
+                  /* the unit now reads the first value: it sits on that
+                   * value's row */
+                  tie(s, xd, i, y->tie_k, y->tie_half);
+               }
+         }
+      }
+      (void)used;
+      removed++;
+   }
+   /* an interpolation none of whose variables is the first one is not needed */
+   for (unsigned i = 0; i < s->num_ops; i++) {
+      struct l2_op *op = &s->ops[i];
+      if (op->kind != L2_MFU || op->num_out == 0 || op->dead)
+         continue;
+      bool needed = false;
+      for (unsigned k = 0; k < op->num_out; k++) {
+         const struct l2_def *d = &s->defs[op->out[k]];
+         needed |= first[d->interp_key >= 0 && d->interp_key < 256 ? d->interp_key : 0] == op->out[k];
+      }
+      /* an SFU result is not an interpolation: keep operations with none */
+      bool all_interp = true;
+      for (unsigned k = 0; k < op->num_out; k++)
+         all_interp &= s->defs[op->out[k]].interp_key >= 0;
+      if (all_interp && !needed) {
+         op->dead = true;
+         op->placed = true;
+         removed++;
+      }
+   }
+   return removed;
 }
 
 /* ---- folding copies ---- */
@@ -682,6 +756,11 @@ fwd_slot(const struct l2 *s, const struct l2_op *op, unsigned k, int64_t g,
    if (op->kind != L2_ALU || k >= 3 || op->src_def[k] < 0)
       return -1;
    const struct l2_def *d = &s->defs[op->src_def[k]];
+   if (getenv("GRATE_LAYOUT_NOFWD"))
+      return -1;
+   if (getenv("GRATE_LAYOUT_FWD_SAME_STEP") &&
+       s->defs[op->src_def[k]].step != (int)step)
+      return -1;
    if (!d->written || s->ops[d->writer].kind != L2_ALU)
       return -1;
    const struct l2_op *p = &s->ops[d->writer];
@@ -744,11 +823,11 @@ class_row_conflict(struct l2 *s, int cls, unsigned row)
 {
    for (unsigned a = 0; a < s->num_defs; a++) {
       const struct l2_def *d = &s->defs[a];
-      if (d->tie_k < 0 || cls_find(s, d->cls) != cls)
+      if (d->tie_k < 0 || cls_find(s, d->cls) != cls || s->ops[d->writer].dead)
          continue;
       for (unsigned b = 0; b < s->num_defs; b++) {
          const struct l2_def *e = &s->defs[b];
-         if (b == a || e->tie_k != d->tie_k)
+         if (b == a || e->tie_k != d->tie_k || s->ops[e->writer].dead)
             continue;
          int ecls = cls_find(s, e->cls);
          if (ecls == cls || s->cls_row[ecls] != (int)row)
@@ -1186,7 +1265,7 @@ l2_allocate(struct l2 *s)
    /* tied and pinned values first, they have no choice */
    for (unsigned d = 0; d < s->num_defs; d++) {
       struct l2_def *def = &s->defs[d];
-      if (def->tie_k < 0 && def->fixed_reg < 0)
+      if ((def->tie_k < 0 && def->fixed_reg < 0) || s->ops[def->writer].dead)
          continue;
       unsigned reg, half;
       if (def->fixed_reg >= 0) {
