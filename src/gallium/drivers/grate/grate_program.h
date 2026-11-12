@@ -26,6 +26,9 @@ struct grate_blend_variant {
    struct grate_blend_variant *next;
    uint32_t key; /* see grate_fp_blend_key() */
    struct grate_shader_blob blob;
+   /* For a program of more than one epoch: its epochs with the blend stage
+    * in the last one, like NVIDIA's. NULL for a program of one epoch. */
+   struct grate_fp_epochs *epochs;
 };
 
 struct grate_fragment_shader_state {
@@ -50,9 +53,9 @@ grate_fragment_dual_variant(struct grate_context *context,
                             struct grate_fragment_shader_state *shader,
                             const struct grate_fp_output *output);
 
-const struct grate_shader_blob *
-grate_fragment_blend_blob(struct grate_fragment_shader_state *shader,
-                          uint32_t key);
+const struct grate_blend_variant *
+grate_fragment_blend_variant(struct grate_fragment_shader_state *shader,
+                             uint32_t key);
 
 void
 grate_context_program_init(struct pipe_context *pcontext);
