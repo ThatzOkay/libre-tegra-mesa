@@ -318,8 +318,9 @@ allocate_scalar(struct grate_fp_shader *fp, unsigned kind)
  * is still wanted. Returns -1 when there is none.
  */
 static int
-allocate_coordinate_row(struct grate_fp_shader *fp, const uint8_t *clobber,
-                        const uint8_t *clobber_after,
+allocate_coordinate_row(struct grate_fp_shader *fp,
+                        const struct tgsi_full_instruction *code,
+                        const uint8_t *clobber, const uint8_t *clobber_after,
                         uint8_t (*live_after)[GRATE_FP_MAX_TEMPS],
                         unsigned count, unsigned n, unsigned temp,
                         unsigned comp, bool fx10, bool is_tex)
@@ -358,8 +359,20 @@ allocate_coordinate_row(struct grate_fp_shader *fp, const uint8_t *clobber,
             for (unsigned j = n + 1;
                  j < count && (live_after[j][temp] & (1 << comp)); j++) {
                safe &= !(clobber[j] & (1 << reg));
-               if (live_after[j + 1][temp] & (1 << comp))
+               /* an instruction that writes the channel ends the value:
+                * what is live after it is the new value */
+               bool redefined = false;
+               for (unsigned d = 0; d < code[j].Instruction.NumDstRegs; d++) {
+                  const struct tgsi_dst_register *out =
+                     &code[j].Dst[d].Register;
+                  redefined |= out->File == TGSI_FILE_TEMPORARY &&
+                               out->Index == temp &&
+                               (out->WriteMask & (1 << comp));
+               }
+               if (!redefined && (live_after[j + 1][temp] & (1 << comp)))
                   safe &= !(clobber_after[j] & (1 << reg));
+               if (redefined)
+                  break;
             }
             if (!safe)
                continue;
@@ -377,16 +390,17 @@ allocate_coordinate_row(struct grate_fp_shader *fp, const uint8_t *clobber,
  * instruction n: if the value outlives a fetch or an interpolation, a row
  * that survives it when there is one, else any register of the pool. */
 static int
-across_fetch(struct grate_fp_shader *fp, const uint8_t *clobber,
+across_fetch(struct grate_fp_shader *fp,
+             const struct tgsi_full_instruction *code, const uint8_t *clobber,
              const uint8_t *clobber_after,
              uint8_t (*live_after)[GRATE_FP_MAX_TEMPS], unsigned count,
              unsigned n, unsigned temp, unsigned comp, unsigned kind,
              bool is_tex, bool crosses)
 {
    if (crosses && kind != 2 && !fp->avoid_rows) {
-      int loc = allocate_coordinate_row(fp, clobber, clobber_after,
-                                        live_after, count, n, temp, comp,
-                                        kind == 1, is_tex);
+      int loc =
+         allocate_coordinate_row(fp, code, clobber, clobber_after, live_after,
+                                 count, n, temp, comp, kind == 1, is_tex);
       if (loc >= 0)
          return loc;
    }
@@ -672,6 +686,79 @@ emit_vALU(struct grate_fp_shader *fp, const struct tgsi_dst_register *dst,
  * 0.5 * v + 0.5 remap in Tabula's wallpaper shader) is copied there first.
  * TEX returns packed fx10 channels in row registers 2/3.
  */
+/* The texture unit reads the coordinate from R0/R1. A coordinate that the
+ * ALU computed is normally copied there by a step of its own. When the step
+ * just before this fetch computed a channel into a register of its own that
+ * nothing reads after the fetch, let that step write R0/R1 directly, like
+ * NVIDIA's compiler, and report it in direct[]: no copy is needed then.
+ * Only the cases that are safe by construction are taken: the producer is
+ * the previous step, has one ALU packet and no fetch, store or sequencer
+ * work, and exactly one of its slots writes the whole FP20 register. */
+static void
+retarget_coord_producer(struct grate_fp_shader *fp,
+                        const struct tgsi_src_register *coord, bool *direct)
+{
+   if (fp->spilling || !fp->current_instruction || !fp->code_end ||
+       coord->File != TGSI_FILE_TEMPORARY || coord->Negate ||
+       coord->Absolute || list_is_empty(&fp->fp_instructions) ||
+       list_is_empty(&fp->alu_instructions))
+      return;
+
+   struct fp_instr *prev =
+      list_last_entry(&fp->fp_instructions, struct fp_instr, link);
+   struct fp_alu_instr_packet *packet = list_last_entry(
+      &fp->alu_instructions, struct fp_alu_instr_packet, link);
+   if (prev->alu_sched.num_instructions != 1 ||
+       prev->alu_sched.address + 1 != list_length(&fp->alu_instructions) ||
+       prev->tex || prev->pseq || prev->spill_load || prev->dw.enable ||
+       prev->dw.spill)
+      return;
+
+   const unsigned swizzle[2] = {coord->SwizzleX, coord->SwizzleY};
+   const unsigned unread = fp->code_end - (fp->current_instruction + 1);
+   int target_slot[2] = {-1, -1};
+   int source[2] = {-1, -1};
+
+   for (unsigned i = 0; i < 2; i++) {
+      int loc = fp->temp_src[coord->Index][swizzle[i]];
+      if (loc < 0 || (loc & TEMP_FX10) || (loc & 0x7f) >= 16)
+         return;
+      if (next_scalar_use(fp, coord->Index, swizzle[i]) != unread)
+         return;
+      source[i] = loc & 0x7f;
+   }
+   if (source[0] == source[1])
+      return;
+
+   for (unsigned i = 0; i < 2; i++) {
+      unsigned writers = 0;
+      for (unsigned slot = 0; slot < 4; slot++) {
+         const struct fp_alu_dst_operand *dst = &packet->slots[slot].dst;
+         if (!dst->write_low_sub_reg && !dst->write_high_sub_reg)
+            continue;
+         if (dst->index == (unsigned)source[i]) {
+            writers++;
+            if (dst->write_low_sub_reg && dst->write_high_sub_reg)
+               target_slot[i] = slot;
+         }
+         /* the row register must not be written by another slot */
+         if (dst->index == i && (int)i != source[i])
+            writers += 2;
+      }
+      if (writers != 1 || target_slot[i] < 0)
+         target_slot[i] = -1;
+   }
+   /* both rows are decided before one is changed: either channel may be
+    * kept for the copy, but a slot that is moved must not collide with the
+    * other channel's source register */
+   for (unsigned i = 0; i < 2; i++) {
+      if (target_slot[i] < 0 || source[1 - i] == (int)i)
+         continue;
+      packet->slots[target_slot[i]].dst.index = i;
+      direct[i] = true;
+   }
+}
+
 static void
 emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
 {
@@ -696,23 +783,36 @@ emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    assert(sampler->File == TGSI_FILE_SAMPLER && sampler->Index < 16);
 
    struct fp_instr *interp = CALLOC_STRUCT(fp_instr);
+   bool coord_direct[2] = {false, false};
    list_inithead(&interp->link);
    if (coord->File != TGSI_FILE_INPUT) {
+      retarget_coord_producer(fp, coord, coord_direct);
+      if (coord_direct[0] && coord_direct[1]) {
+         /* the producer wrote both coordinates into the row itself */
+         FREE(interp);
+         interp = NULL;
+      }
+   }
+   if (interp && coord->File != TGSI_FILE_INPUT) {
       struct fp_alu_instr_packet *stage = CALLOC_STRUCT(fp_alu_instr_packet);
       list_inithead(&stage->link);
+      unsigned slot = 0;
       for (unsigned i = 0; i < 2; i++) {
+         if (coord_direct[i])
+            continue;
          struct fp_alu_dst_operand row = {
             .index = i,
             .write_low_sub_reg = true,
             .write_high_sub_reg = true,
          };
-         stage->slots[i] = fp_alu_sMOV(row, fp_tgsi_src(fp, coord, i, NULL));
+         stage->slots[slot++] =
+            fp_alu_sMOV(row, fp_tgsi_src(fp, coord, i, NULL));
       }
       interp->alu_sched.address = list_length(&fp->alu_instructions);
       interp->alu_sched.num_instructions = 1;
       list_addtail(&stage->link, &fp->alu_instructions);
       list_addtail(&interp->link, &fp->fp_instructions);
-   } else {
+   } else if (interp) {
       struct fp_mfu_instr *mfu = CALLOC_STRUCT(fp_mfu_instr);
       list_inithead(&mfu->link);
       setup_interpolation(mfu);
@@ -746,12 +846,27 @@ emit_TEX(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
          .datatype = FP_DATATYPE_FIXED10,
          .sub_reg_select_high = channel % 2,
       };
-      alu->slots[slot++] =
-         fp_alu_sMOV(fp_alu_dst(fp, dst, i, tgsi->Instruction.Saturate), src);
+      struct fp_alu_dst_operand out =
+         fp_alu_dst(fp, dst, i, tgsi->Instruction.Saturate);
+      /* A channel that is never read has the discard register R31: there
+       * is nothing to copy. */
+      if (dst->File == TGSI_FILE_TEMPORARY && out.index == 31)
+         continue;
+      /* A channel that the allocator left where the fetch put it (half
+       * channel % 2 of R2/R3) needs no copy. */
+      if (dst->File == TGSI_FILE_TEMPORARY && !tgsi->Instruction.Saturate &&
+          fp->temp_dst[dst->Index][i] == (int)((2 + channel / 2) | TEMP_FX10 |
+                                               (channel % 2 ? TEMP_HIGH : 0)))
+         continue;
+      alu->slots[slot++] = fp_alu_sMOV(out, src);
    }
-   sample->alu_sched.address = list_length(&fp->alu_instructions);
-   sample->alu_sched.num_instructions = 1;
-   list_addtail(&alu->link, &fp->alu_instructions);
+   if (slot) {
+      sample->alu_sched.address = list_length(&fp->alu_instructions);
+      sample->alu_sched.num_instructions = 1;
+      list_addtail(&alu->link, &fp->alu_instructions);
+   } else {
+      FREE(alu);
+   }
    if (dst->File == TGSI_FILE_OUTPUT) {
       sample->dw.enable = true;
       sample->dw.index = dst->Index + 1;
@@ -920,6 +1035,97 @@ emit_sfu_step(struct grate_fp_shader *fp, enum fp_sfu_op op, unsigned reg,
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
+/* Whether the result of this SFU instruction can stay in the SFU's row: a
+ * single FP20 channel of a temporary, with no saturate (the store step did
+ * that). Used by the allocator, which then looks for a row, and by
+ * emit_SFU(), which uses the destination's row if it got one. */
+static bool
+sfu_result_in_row(const struct tgsi_full_instruction *inst)
+{
+   switch (inst->Instruction.Opcode) {
+   case TGSI_OPCODE_RCP:
+   case TGSI_OPCODE_RSQ:
+   case TGSI_OPCODE_SQRT:
+   case TGSI_OPCODE_LG2:
+   case TGSI_OPCODE_EX2:
+   case TGSI_OPCODE_POW:
+      break;
+   default:
+      return false;
+   }
+   unsigned mask = inst->Dst[0].Register.WriteMask;
+   return inst->Dst[0].Register.File == TGSI_FILE_TEMPORARY &&
+          util_bitcount(mask) == 1 && !inst->Instruction.Saturate;
+}
+
+/* The SFU reads its operand from the row register `reg`. When the step just
+ * before this instruction computed the operand into a register of its own
+ * that nothing reads afterwards, let that step write `reg` directly instead
+ * of copying it in a step of its own (NVIDIA's compiler does this: the sum
+ * goes straight into the SFU's row). Same safe-by-construction cases as
+ * retarget_coord_producer(): the producer is the previous step, has one ALU
+ * packet, no fetch, interpolation, store or sequencer work, and exactly one
+ * of its slots writes the whole FP20 register. Returns true when the operand
+ * is in `reg` and no copy is needed. */
+static bool
+retarget_sfu_operand(struct grate_fp_shader *fp,
+                     const struct tgsi_src_register *src, unsigned comp,
+                     unsigned reg)
+{
+   if (fp->spilling || !fp->current_instruction || !fp->code_end ||
+       src->File != TGSI_FILE_TEMPORARY || src->Negate || src->Absolute ||
+       list_is_empty(&fp->fp_instructions) ||
+       list_is_empty(&fp->alu_instructions))
+      return false;
+
+   const unsigned unread = fp->code_end - (fp->current_instruction + 1);
+   int loc = fp->temp_src[src->Index][comp];
+   /* the operand dies here when nothing reads it later, or when this
+    * instruction replaces it with its result */
+   const struct tgsi_dst_register *result =
+      &fp->current_instruction->Dst[0].Register;
+   bool dies =
+      (result->File == TGSI_FILE_TEMPORARY && result->Index == src->Index &&
+       (result->WriteMask & (1 << comp))) ||
+      next_scalar_use(fp, src->Index, comp) == unread;
+   if (loc < 0 || (loc & TEMP_FX10) || (loc & 0x7f) >= 16 || !dies)
+      return false;
+   /* the operand dies here in the very row the SFU works on (the allocator
+    * put it there): nothing to copy */
+   if ((unsigned)(loc & 0x7f) == reg)
+      return true;
+
+   struct fp_instr *prev =
+      list_last_entry(&fp->fp_instructions, struct fp_instr, link);
+   struct fp_alu_instr_packet *packet = list_last_entry(
+      &fp->alu_instructions, struct fp_alu_instr_packet, link);
+   if (prev->alu_sched.num_instructions != 1 ||
+       prev->alu_sched.address + 1 != list_length(&fp->alu_instructions) ||
+       prev->mfu_sched.num_instructions || prev->tex || prev->pseq ||
+       prev->spill_load || prev->dw.enable || prev->dw.spill)
+      return false;
+
+   int writer = -1;
+   for (unsigned slot = 0; slot < 4; slot++) {
+      const struct fp_alu_dst_operand *dst = &packet->slots[slot].dst;
+      if (!dst->write_low_sub_reg && !dst->write_high_sub_reg)
+         continue;
+      /* the row register must not be written by another slot */
+      if (dst->index == reg)
+         return false;
+      if (dst->index == (unsigned)(loc & 0x7f)) {
+         if (writer >= 0 || !dst->write_low_sub_reg ||
+             !dst->write_high_sub_reg)
+            return false;
+         writer = slot;
+      }
+   }
+   if (writer < 0)
+      return false;
+   packet->slots[writer].dst.index = reg;
+   return true;
+}
+
 /* RCP, RSQ, SQRT, LG2, EX2 and POW of computed scalars, the way NVIDIA's
  * compiler does them (decoded from its output for division, sqrt, rsqrt,
  * exp2, log2 and pow, see docs/grate-register-bug-handoff.md): the SFU op
@@ -953,10 +1159,31 @@ emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
          free_rows[num_free++] = reg;
    }
 
-   /* POW: the row that holds the exponent for the multiplication */
+   /* The result stays in the SFU's row when the allocator gave the
+    * destination a whole row (see sfu_result_in_row()): no store step, the
+    * next instruction reads the register the SFU op replaced, like NVIDIA's
+    * programs do. A POW exponent must not be lost to the base's load. */
    int in_reg = num_free ? free_rows[0] : -1;
+   int dst_loc = -1;
+   if (dst->File == TGSI_FILE_TEMPORARY && sfu_result_in_row(tgsi))
+      dst_loc = fp->temp_dst[dst->Index][ffs(dst->WriteMask) - 1];
+   bool in_place = dst_loc >= 0 && dst_loc < 4;
+   if (in_place && is_pow) {
+      int y_loc = src_y->File == TGSI_FILE_TEMPORARY
+                     ? fp->temp_src[src_y->Index][src_y->SwizzleX]
+                     : -1;
+      if ((src_y->File == TGSI_FILE_INPUT &&
+           (int)src_y->SwizzleX == dst_loc) ||
+          (y_loc >= 0 && (y_loc & 0x7f) == dst_loc))
+         in_place = false;
+   }
+   if (in_place)
+      in_reg = dst_loc;
    int y_row = -1;
-   if (is_pow && num_free > 1) {
+   if (is_pow && in_place && num_free) {
+      /* the destination row is claimed, so it is not among the free ones */
+      y_row = free_rows[0];
+   } else if (is_pow && num_free > 1) {
       y_row = free_rows[1];
       if (src_y->File == TGSI_FILE_INPUT && in_reg == (int)src_y->SwizzleX) {
          /* the exponent's interpolation would overwrite the base */
@@ -974,21 +1201,27 @@ emit_SFU(struct grate_fp_shader *fp, const struct tgsi_full_instruction *tgsi)
    }
 
    /* the operands go into rows */
-   emit_load_scalar(fp, src, comp, in_reg, opcode == TGSI_OPCODE_RSQ);
-   if (is_pow)
+   bool same_operand = is_pow && src_y->File == TGSI_FILE_TEMPORARY &&
+                       src_y->Index == src->Index && src_y->SwizzleX == comp;
+   if (same_operand || !retarget_sfu_operand(fp, src, comp, in_reg))
+      emit_load_scalar(fp, src, comp, in_reg, opcode == TGSI_OPCODE_RSQ);
+   if (is_pow && !retarget_sfu_operand(fp, src_y, src_y->SwizzleX, y_row))
       emit_load_scalar(fp, src_y, src_y->SwizzleX, y_row, false);
 
    /* the store of the result into the destination, in the last step */
-   struct fp_alu_instr_packet *store = CALLOC_STRUCT(fp_alu_instr_packet);
-   list_inithead(&store->link);
-   unsigned slot = 0;
-   for (unsigned i = 0; i < 4; i++) {
-      if (!(dst->WriteMask & (1 << i)))
-         continue;
-      struct fp_alu_src_operand r = fp_alu_src_row(in_reg);
-      r.datatype = FP_DATATYPE_FP20;
-      store->slots[slot++] =
-         fp_alu_sMOV(fp_alu_dst(fp, dst, i, tgsi->Instruction.Saturate), r);
+   struct fp_alu_instr_packet *store = NULL;
+   if (!in_place) {
+      store = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&store->link);
+      unsigned slot = 0;
+      for (unsigned i = 0; i < 4; i++) {
+         if (!(dst->WriteMask & (1 << i)))
+            continue;
+         struct fp_alu_src_operand r = fp_alu_src_row(in_reg);
+         r.datatype = FP_DATATYPE_FP20;
+         store->slots[slot++] = fp_alu_sMOV(
+            fp_alu_dst(fp, dst, i, tgsi->Instruction.Saturate), r);
+      }
    }
 
    switch (opcode) {
@@ -1684,10 +1917,12 @@ eliminate_dead_code(struct tgsi_full_instruction *code, unsigned count)
    return out;
 }
 
-/* NIR emits "MOV t.xy, IN[k].xy; TEX t, t.xy" when the sample overwrites t.
- * The sampler can read a varying directly (the case emit_TEX() handles best),
- * so sample IN[k] and drop the copy, provided the TEX rewrites the copied
- * channels. Returns the new count. */
+/* NIR emits "MOV t.xy, IN[k].xy; TEX t, t.xy" when the sample overwrites t,
+ * and the same with a temporary s in place of IN[k] (coordinates computed
+ * by the ALU). The sampler can read a varying directly (the case emit_TEX()
+ * handles best) and emit_TEX() copies a temporary into the coordinate row
+ * itself, so sample IN[k] or s and drop the copy, provided the TEX rewrites
+ * the copied channels. Returns the new count. */
 static unsigned
 forward_tex_coord(struct tgsi_full_instruction *code, unsigned count)
 {
@@ -1707,9 +1942,14 @@ forward_tex_coord(struct tgsi_full_instruction *code, unsigned count)
           coord->SwizzleY != TGSI_SWIZZLE_Y || coord->Negate ||
           coord->Absolute)
          continue;
-      if (from->File != TGSI_FILE_INPUT || from->SwizzleX != TGSI_SWIZZLE_X ||
-          from->SwizzleY != TGSI_SWIZZLE_Y || from->Negate ||
-          from->Absolute || mov->Instruction.Saturate)
+      /* A varying has to be read as xy, a temporary may be swizzled: the
+       * copy into the coordinate row reads it either way. */
+      if ((from->File != TGSI_FILE_INPUT &&
+           from->File != TGSI_FILE_TEMPORARY) ||
+          (from->File == TGSI_FILE_INPUT &&
+           (from->SwizzleX != TGSI_SWIZZLE_X ||
+            from->SwizzleY != TGSI_SWIZZLE_Y)) ||
+          from->Negate || from->Absolute || mov->Instruction.Saturate)
          continue;
       /* The channels that the copy wrote beyond xy must not be read after it
        * either, and the TEX must replace them. */
@@ -1721,6 +1961,137 @@ forward_tex_coord(struct tgsi_full_instruction *code, unsigned count)
       memmove(&code[n - 1], &code[n], (count - n) * sizeof(*code));
       count--;
       n--;
+   }
+   return count;
+}
+
+/* NIR computes the coordinates of several fetches with one vector ALU
+ * instruction ("ADD t, IN[0].xyxy, IMM; TEX u, t.xy; TEX t, t.zw"). The
+ * texture unit reads R0/R1, so the half that a later fetch uses would have
+ * to be copied there; computed just before its fetch the producer can write
+ * R0/R1 itself (see retarget_coord_producer). Split such a producer and
+ * move the channels of the later fetch down to it, when that is safe: the
+ * instruction works on every channel alone, nothing between the two places
+ * reads or writes those channels or writes the temporaries it reads, and
+ * the channels are dead after the fetch. Returns the new count, the code is
+ * in instructions. */
+static unsigned
+sink_coord_producers(struct util_dynarray *instructions, unsigned count)
+{
+   instructions->size = count * sizeof(struct tgsi_full_instruction);
+
+   for (unsigned n = 0; n < count; n++) {
+      struct tgsi_full_instruction *code = instructions->data;
+      struct tgsi_full_instruction *prod = &code[n];
+      unsigned op = prod->Instruction.Opcode;
+
+      if (prod->Instruction.NumDstRegs != 1 ||
+          prod->Dst[0].Register.File != TGSI_FILE_TEMPORARY ||
+          (op != TGSI_OPCODE_ADD && op != TGSI_OPCODE_MUL &&
+           op != TGSI_OPCODE_MAD && op != TGSI_OPCODE_MOV))
+         continue;
+      const unsigned temp = prod->Dst[0].Register.Index;
+      const unsigned mask = prod->Dst[0].Register.WriteMask;
+
+      for (unsigned m = n + 2; m < count; m++) {
+         const struct tgsi_full_instruction *tex = &code[m];
+         if (tex->Instruction.Opcode != TGSI_OPCODE_TEX)
+            continue;
+         const struct tgsi_src_register *coord = &tex->Src[0].Register;
+         if (coord->File != TGSI_FILE_TEMPORARY || coord->Index != temp ||
+             coord->Negate || coord->Absolute)
+            continue;
+         const unsigned moved =
+            (1u << coord->SwizzleX) | (1u << coord->SwizzleY);
+         if ((moved & ~mask) || moved == mask)
+            continue;
+         /* a fetch with the same sampler read at its own coordinates only */
+         if (tgsi_util_get_inst_usage_mask(tex, 0) & ~moved)
+            continue;
+
+         bool safe = true;
+         /* nothing between the producer and the fetch touches the moved
+          * channels, or writes a temporary that the producer reads */
+         for (unsigned k = n + 1; k < m && safe; k++) {
+            const struct tgsi_full_instruction *mid = &code[k];
+            for (unsigned s = 0; s < mid->Instruction.NumSrcRegs; s++) {
+               const struct tgsi_src_register *src = &mid->Src[s].Register;
+               if (src->File == TGSI_FILE_TEMPORARY && src->Index == temp &&
+                   (tgsi_util_get_inst_usage_mask(mid, s) & moved))
+                  safe = false;
+            }
+            for (unsigned d = 0; d < mid->Instruction.NumDstRegs; d++) {
+               const struct tgsi_dst_register *dst = &mid->Dst[d].Register;
+               if (dst->File != TGSI_FILE_TEMPORARY)
+                  continue;
+               if (dst->Index == temp && (dst->WriteMask & moved))
+                  safe = false;
+               for (unsigned s = 0; s < prod->Instruction.NumSrcRegs; s++) {
+                  const struct tgsi_src_register *src =
+                     &prod->Src[s].Register;
+                  if (src->File == TGSI_FILE_TEMPORARY &&
+                      src->Index == dst->Index)
+                     safe = false;
+               }
+            }
+            if (mid->Instruction.Opcode == TGSI_OPCODE_TEX &&
+                mid->Dst[0].Register.File != TGSI_FILE_TEMPORARY)
+               safe = false;
+         }
+         /* the producer itself must not read the temporary it writes (the
+          * second half would see the first half's result) */
+         for (unsigned s = 0; s < prod->Instruction.NumSrcRegs; s++) {
+            const struct tgsi_src_register *src = &prod->Src[s].Register;
+            if (src->File == TGSI_FILE_TEMPORARY && src->Index == temp)
+               safe = false;
+            if (src->File != TGSI_FILE_INPUT &&
+                src->File != TGSI_FILE_IMMEDIATE &&
+                src->File != TGSI_FILE_CONSTANT &&
+                src->File != TGSI_FILE_TEMPORARY)
+               safe = false;
+         }
+         /* dead after the fetch: no later read of a moved channel before
+          * it is written again */
+         unsigned pending = moved;
+         /* the fetch's own destination may be the temporary: it is written
+          * after the coordinates are read, as before */
+         if (tex->Dst[0].Register.File == TGSI_FILE_TEMPORARY &&
+             tex->Dst[0].Register.Index == temp)
+            pending &= ~tex->Dst[0].Register.WriteMask;
+         for (unsigned k = m; k < count && pending && safe; k++) {
+            const struct tgsi_full_instruction *later = &code[k];
+            for (unsigned s = 0; s < later->Instruction.NumSrcRegs; s++) {
+               const struct tgsi_src_register *src = &later->Src[s].Register;
+               if (src->File == TGSI_FILE_TEMPORARY && src->Index == temp &&
+                   (tgsi_util_get_inst_usage_mask(later, s) & pending &
+                    ~(k == m ? moved : 0)))
+                  safe = false;
+            }
+            if (k == m)
+               continue;
+            for (unsigned d = 0; d < later->Instruction.NumDstRegs; d++) {
+               const struct tgsi_dst_register *dst = &later->Dst[d].Register;
+               if (dst->File == TGSI_FILE_TEMPORARY && dst->Index == temp)
+                  pending &= ~dst->WriteMask;
+            }
+         }
+         if (!safe)
+            continue;
+
+         /* split: the producer keeps the other channels, a copy with the
+          * moved ones goes in front of the fetch */
+         struct tgsi_full_instruction moved_part = *prod;
+         moved_part.Dst[0].Register.WriteMask = moved;
+         code[n].Dst[0].Register.WriteMask = mask & ~moved;
+         util_dynarray_append_typed(instructions,
+                                    struct tgsi_full_instruction, moved_part);
+         code = instructions->data;
+         memmove(&code[m + 1], &code[m],
+                 (count - m) * sizeof(struct tgsi_full_instruction));
+         code[m] = moved_part;
+         count++;
+         break;
+      }
    }
    return count;
 }
@@ -2095,6 +2466,8 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
       util_dynarray_num_elements(&instructions, struct tgsi_full_instruction);
    struct tgsi_full_instruction *code = instructions.data;
    count = forward_tex_coord(code, count);
+   count = sink_coord_producers(&instructions, count);
+   code = instructions.data;
    count = eliminate_dead_code(code, count);
    fp->code_end = code + count;
    uint8_t (*live_after)[GRATE_FP_MAX_TEMPS] =
@@ -2269,15 +2642,23 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                case TGSI_OPCODE_LG2:
                case TGSI_OPCODE_EX2:
                case TGSI_OPCODE_POW:
+                  /* alive after the op, and not the op's own result (the
+                   * op overwrites a value of that channel) */
                   fp->avoid_rows =
-                     live_after[m + 1][dst->Index] & (1 << c);
+                     (live_after[m + 1][dst->Index] & (1 << c)) &&
+                     !(code[m].Dst[0].Register.File == TGSI_FILE_TEMPORARY &&
+                       code[m].Dst[0].Register.Index == dst->Index &&
+                       (code[m].Dst[0].Register.WriteMask & (1 << c)));
                   break;
                default:
                   break;
                }
             }
             memset(fp->reusable, 0, sizeof(fp->reusable));
-            bool simple = inst->Instruction.Opcode != TGSI_OPCODE_TEX;
+            /* A fetch reads its coordinate (staged into R0/R1 by the step
+             * before) before it writes its result, so a coordinate that
+             * dies here leaves its row free for the result too. */
+            bool simple = true;
             for (unsigned src = 0; src < inst->Instruction.NumSrcRegs; src++)
                simple &= inst->Src[src].Register.File != TGSI_FILE_INPUT;
             if (simple) {
@@ -2312,7 +2693,12 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                      unsigned swizzle[] = {
                         operand->SwizzleX, operand->SwizzleY,
                         operand->SwizzleZ, operand->SwizzleW};
-                     for (unsigned lane = c + 1; lane < 4; lane++) {
+                     /* a fetch has read its coordinate before any result
+                      * lane is written */
+                     for (unsigned lane = c + 1;
+                          lane < 4 &&
+                          inst->Instruction.Opcode != TGSI_OPCODE_TEX;
+                          lane++) {
                         int loc = fp->temp_src[operand->Index][swizzle[lane]];
                         if ((dst->WriteMask & (1 << lane)) && loc >= 0 &&
                             (loc & 0x7f) == reg)
@@ -2329,10 +2715,11 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                   ? (fp->texture_rows
                         ? (2 + c / 2) | TEMP_FX10 | (c % 2 ? TEMP_HIGH : 0)
                         : across_fetch(
-                             fp, clobber, clobber_after, live_after, count, n,
-                             dst->Index, c, kind,
+                             fp, code, clobber, clobber_after, live_after,
+                             count, n, dst->Index, c, kind,
                              inst->Instruction.Opcode == TGSI_OPCODE_TEX,
-                             (int)n < row_limit))
+                             (int)n < row_limit || sfu_result_in_row(inst) ||
+                                inst->Instruction.Opcode == TGSI_OPCODE_TEX))
                   : 31;
          }
       }
