@@ -924,10 +924,10 @@ emit_fs_uniforms(struct grate_context *context, uint32_t **ptrp)
 #define GRATE_PIXEL_SPILL_SIZE (1 << 20) /* per pixel pipeline */
 
 static int
-emit_epochs(struct grate_context *context, uint32_t **ptrp)
+emit_epochs(struct grate_context *context, struct grate_fp_epochs *epochs,
+            uint32_t **ptrp)
 {
    struct grate_stream *stream = &context->gr3d->stream;
-   struct grate_fp_epochs *epochs = context->fshader->info.epochs;
    const struct pipe_constant_buffer *cb =
       &context->constant_buffer[MESA_SHADER_FRAGMENT];
    unsigned const_offset[GRATE_FP_MAX_EPOCHS];
@@ -1049,15 +1049,19 @@ emit_program(struct grate_context *context, uint32_t **ptrp)
 
    emit_shader(stream, ptrp, &context->vshader->blob);
    const struct grate_shader_blob *fragment = &context->fshader->blob;
+   struct grate_fp_epochs *epochs = context->fshader->info.epochs;
 
    if (context->blend_key && context->framebuffer.base.nr_cbufs == 1) {
-      const struct grate_shader_blob *blended =
-         grate_fragment_blend_blob(context->fshader, context->blend_key);
-      if (blended)
-         fragment = blended;
+      const struct grate_blend_variant *blended =
+         grate_fragment_blend_variant(context->fshader, context->blend_key);
+      if (blended) {
+         fragment = &blended->blob;
+         if (blended->epochs)
+            epochs = blended->epochs;
+      }
    }
    emit_shader(stream, ptrp, fragment);
-   if (context->fshader->info.epochs && emit_epochs(context, ptrp))
+   if (epochs && emit_epochs(context, epochs, ptrp))
       grate_loge("cannot set up the epochs of the fragment program\n");
 
    cull_face_linker_setup = TGR3D_SU_PARAM_SUBPIX_XOFF(0x38) |
