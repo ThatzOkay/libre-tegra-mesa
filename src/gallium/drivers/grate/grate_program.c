@@ -21,6 +21,7 @@
 #include "grate_compiler.h"
 #include "fp/blend.h"
 #include "fp/fpir.h"
+#include "fp/layout.h"
 #include "vp/vpir.h"
 
 struct grate_vs_tgsi_transform_context {
@@ -581,6 +582,304 @@ debug_packing_bound(const struct grate_fp_shader *fp)
            "floor %u packets\n",
            packets, ops, discard, copies, mads, hist[1], hist[2], hist[3],
            hist[4], DIV_ROUND_UP(ops, 4));
+}
+
+/*
+ * Dry run of a scheduler over slot operations (GRATE_PACKING_DEBUG, no effect
+ * on the program): how many packets would a list scheduler need for the
+ * ALU-only runs of steps, under different latency models? The steps that
+ * carry a unit (interpolation or SFU, fetch, output write, sequencer
+ * command, spill) keep their packets as they are.
+ */
+#define DRY_MAX_OPS 512
+
+struct dry_op {
+   int dst;
+   unsigned wmask;          /* bit 0 low half, bit 1 high half */
+   int src[4];
+   unsigned rmask[4];
+   unsigned height;
+   int cycle;
+};
+
+static bool
+dry_step_is_barrier(const struct fp_instr *instr)
+{
+   return instr->mfu_sched.num_instructions || (instr->tex & (1 << 10)) ||
+          instr->dw.enable || instr->pseq || instr->spill_load;
+}
+
+/* Dependency latencies in packets: RAW raw_lat, WAR 0, WAW 1. */
+static unsigned
+dry_schedule(struct dry_op *ops, unsigned n, unsigned raw_lat, bool false_deps,
+             bool raw_deps)
+{
+   /* edges stored as a dense matrix of latencies, -1 = none */
+   static int8_t edge[DRY_MAX_OPS][DRY_MAX_OPS];
+   for (unsigned i = 0; i < n; i++)
+      for (unsigned j = 0; j < n; j++)
+         edge[i][j] = -1;
+
+   for (unsigned j = 0; j < n; j++) {
+      for (unsigned i = 0; i < j; i++) {
+         int best = -1;
+         /* RAW: j reads what i writes */
+         for (unsigned k = 0; k < 4; k++) {
+            if (ops[j].src[k] >= 0 && ops[j].src[k] == ops[i].dst &&
+                (ops[j].rmask[k] & ops[i].wmask) && raw_deps)
+               best = MAX2(best, (int)raw_lat);
+         }
+         if (false_deps) {
+            /* WAR: j writes what i reads (may share a packet) */
+            for (unsigned k = 0; k < 4; k++)
+               if (ops[i].src[k] >= 0 && ops[i].src[k] == ops[j].dst &&
+                   (ops[i].rmask[k] & ops[j].wmask))
+                  best = MAX2(best, 0);
+            /* WAW: keep the order, the second write lands later */
+            if (ops[i].dst >= 0 && ops[i].dst == ops[j].dst &&
+                (ops[i].wmask & ops[j].wmask))
+               best = MAX2(best, 1);
+         }
+         edge[i][j] = best;
+      }
+   }
+
+   for (int i = (int)n - 1; i >= 0; i--) {
+      ops[i].height = 1;
+      for (unsigned j = i + 1; j < n; j++)
+         if (edge[i][j] >= 0)
+            ops[i].height = MAX2(ops[i].height, ops[j].height + edge[i][j]);
+      ops[i].cycle = -1;
+   }
+
+   unsigned done = 0, cycle = 0;
+   while (done < n && cycle < 4 * n + 8) {
+      unsigned used = 0;
+      bool progress = true;
+      while (progress && used < 4) {
+         progress = false;
+         int pick = -1;
+         for (unsigned j = 0; j < n; j++) {
+            if (ops[j].cycle >= 0)
+               continue;
+            bool ready = true;
+            for (unsigned i = 0; i < j && ready; i++)
+               if (edge[i][j] >= 0 &&
+                   (ops[i].cycle < 0 || ops[i].cycle + edge[i][j] > (int)cycle))
+                  ready = false;
+            if (!ready)
+               continue;
+            if (pick < 0 || ops[j].height > ops[pick].height)
+               pick = j;
+         }
+         if (pick >= 0) {
+            ops[pick].cycle = cycle;
+            used++;
+            done++;
+            progress = true;
+         }
+      }
+      cycle++;
+   }
+   return cycle;
+}
+
+static void
+dry_fill_op(struct dry_op *op, const struct fp_alu_instr *alu)
+{
+   op->dst = alu->dst.index == 31 ? -1 : (int)alu->dst.index;
+   op->wmask = (alu->dst.write_low_sub_reg ? 1 : 0) |
+               (alu->dst.write_high_sub_reg ? 2 : 0);
+   for (unsigned k = 0; k < 4; k++) {
+      unsigned reg = alu->src[k].index;
+      op->src[k] = (reg == 31 || (reg >= 24 && reg < 64)) ? -1 : (int)reg;
+      op->rmask[k] = alu->src[k].datatype == FP_DATATYPE_FIXED10
+                        ? (alu->src[k].sub_reg_select_high ? 2 : 1)
+                        : 3;
+   }
+   /* a conditional write keeps the old value, so it reads it */
+   if (alu->condition != FP_CONDITION_ALWAYS && op->dst >= 0) {
+      for (unsigned k = 0; k < 4; k++)
+         if (op->src[k] < 0) {
+            op->src[k] = op->dst;
+            op->rmask[k] = op->wmask;
+            break;
+         }
+   }
+}
+
+/* GRATE_PACKING_DEBUG=2: print the steps with their unit operations and the ALU slots (registers as allocated). */
+static void
+debug_dump_steps(const struct grate_fp_shader *fp, const char *when)
+{
+   unsigned num_packets = list_length(&fp->alu_instructions);
+   const struct fp_alu_instr_packet **pk = CALLOC(num_packets + 1, sizeof(*pk));
+   const struct fp_mfu_instr **mf =
+      CALLOC(list_length(&fp->mfu_instructions) + 1, sizeof(*mf));
+   if (!pk || !mf) {
+      FREE(pk);
+      FREE(mf);
+      return;
+   }
+   unsigned i = 0;
+   list_for_each_entry (struct fp_alu_instr_packet, packet,
+                        &fp->alu_instructions, link)
+      pk[i++] = packet;
+   i = 0;
+   list_for_each_entry (struct fp_mfu_instr, m, &fp->mfu_instructions, link)
+      mf[i++] = m;
+   fprintf(stderr, "GRATE STEPS %s (%u rows):\n", when, fp->info.num_rows);
+   unsigned step = 0;
+   list_for_each_entry (struct fp_instr, instr, &fp->fp_instructions, link) {
+      fprintf(stderr, " step %2u:", step++);
+      if (instr->mfu_sched.num_instructions) {
+         const struct fp_mfu_instr *m = mf[instr->mfu_sched.address];
+         fprintf(stderr, " MFU[");
+         if (m->sfu.op != FP_SFU_OP_NOP)
+            fprintf(stderr, "sfu%d@%u ", m->sfu.op, m->sfu.reg);
+         for (unsigned k = 0; k < 4; k++)
+            if (m->var[k].op != FP_VAR_OP_NOP)
+               fprintf(stderr, "v%u=%s%u ", k,
+                       m->var[k].op == FP_VAR_OP_FP20 ? "fp" : "fx",
+                       m->var[k].tram_row);
+         for (unsigned k = 0; k < 2; k++)
+            if (m->mul[k].dst != FP_MFU_MUL_DST_BARYCENTRIC_WEIGHT)
+               fprintf(stderr, "mul%u:%u<-%u,%u ", k, m->mul[k].dst,
+                       m->mul[k].src[0], m->mul[k].src[1]);
+         fprintf(stderr, "]");
+      }
+      if (instr->tex & (1 << 10))
+         fprintf(stderr, " TEX%03x", instr->tex & 0xfff);
+      if (instr->dw.enable)
+         fprintf(stderr, instr->dw.spill ? " SPILLST" : " DW(r%s)",
+                 instr->dw.src_regs == FP_DW_REGS_R2_R3 ? "2r3" : "0r1");
+      if (instr->pseq)
+         fprintf(stderr, " PSEQ%x", instr->pseq);
+      for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
+         unsigned a = instr->alu_sched.address + p;
+         fprintf(stderr, "\n          pk%u:", p);
+         if (a >= num_packets)
+            continue;
+         for (unsigned sl = 0; sl < 4; sl++) {
+            const struct fp_alu_instr *alu = &pk[a]->slots[sl];
+            if (!alu->dst.write_low_sub_reg && !alu->dst.write_high_sub_reg)
+               continue;
+            fprintf(stderr, " r%u%s=%s(", alu->dst.index,
+                    alu->dst.write_low_sub_reg && alu->dst.write_high_sub_reg
+                       ? "" : alu->dst.write_low_sub_reg ? ".l" : ".h",
+                    alu->op == FP_ALU_OP_MAD ? "mad" : alu->op == FP_ALU_OP_MIN
+                       ? "min" : alu->op == FP_ALU_OP_MAX ? "max" : "csel");
+            for (unsigned k = 0; k < 3; k++)
+               fprintf(stderr, "%sr%u%s%s", k ? "," : "",
+                       alu->src[k].index,
+                       alu->src[k].datatype == FP_DATATYPE_FIXED10
+                          ? (alu->src[k].sub_reg_select_high ? ".h" : ".l") : "",
+                       alu->src[k].negate ? "-" : "");
+            fprintf(stderr, ")%s",
+                    alu->condition != FP_CONDITION_ALWAYS ? "?" : "");
+         }
+      }
+      fprintf(stderr, "\n");
+   }
+   FREE(pk);
+   FREE(mf);
+}
+
+static void
+debug_schedule_bound(const struct grate_fp_shader *fp)
+{
+   unsigned num_packets = list_length(&fp->alu_instructions);
+   const struct fp_alu_instr_packet **pk =
+      CALLOC(num_packets + 1, sizeof(*pk));
+   if (!pk)
+      return;
+   unsigned i = 0;
+   list_for_each_entry (struct fp_alu_instr_packet, packet,
+                        &fp->alu_instructions, link)
+      pk[i++] = packet;
+
+   static struct dry_op ops[DRY_MAX_OPS], all[DRY_MAX_OPS];
+   unsigned num_all = 0;
+   /* totals: fixed packets, then per model */
+   unsigned fixed = 0, region_now = 0, ops_total = 0, skipped = 0;
+   unsigned sum[4] = {0};
+   unsigned n = 0, now = 0;
+   bool in_region = false;
+
+   list_for_each_entry (struct fp_instr, instr, &fp->fp_instructions, link) {
+      bool barrier = dry_step_is_barrier(instr);
+      for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
+         unsigned address = instr->alu_sched.address + p;
+         if (address >= num_packets)
+            continue;
+         for (unsigned slot = 0; slot < 4; slot++) {
+            const struct fp_alu_instr *alu = &pk[address]->slots[slot];
+            if ((alu->dst.write_low_sub_reg || alu->dst.write_high_sub_reg) &&
+                num_all < DRY_MAX_OPS)
+               dry_fill_op(&all[num_all++], alu);
+         }
+      }
+      if (!barrier) {
+         for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
+            unsigned address = instr->alu_sched.address + p;
+            if (address >= num_packets)
+               continue;
+            now++;
+            for (unsigned slot = 0; slot < 4; slot++) {
+               const struct fp_alu_instr *alu = &pk[address]->slots[slot];
+               if (!alu->dst.write_low_sub_reg && !alu->dst.write_high_sub_reg)
+                  continue;
+               if (n >= DRY_MAX_OPS) {
+                  skipped++;
+                  continue;
+               }
+               dry_fill_op(&ops[n++], alu);
+            }
+         }
+         in_region = true;
+         continue;
+      }
+      /* a barrier step closes the region and keeps its own packets */
+      if (in_region && n) {
+         sum[0] += dry_schedule(ops, n, 2, true, true);
+         sum[1] += dry_schedule(ops, n, 2, false, true);
+         sum[2] += dry_schedule(ops, n, 1, true, true);
+         sum[3] += dry_schedule(ops, n, 1, false, true);
+         ops_total += n;
+      }
+      region_now += now;
+      n = 0;
+      now = 0;
+      in_region = false;
+      fixed += instr->alu_sched.num_instructions;
+   }
+   if (in_region && n) {
+      sum[0] += dry_schedule(ops, n, 2, true, true);
+      sum[1] += dry_schedule(ops, n, 2, false, true);
+      sum[2] += dry_schedule(ops, n, 1, true, true);
+      sum[3] += dry_schedule(ops, n, 1, false, true);
+      ops_total += n;
+   }
+   region_now += now;
+
+   fprintf(stderr,
+           "GRATE SCHED DRY: %u packets now (%u in barrier steps, %u in "
+           "ALU-only runs holding %u ops%s); same runs scheduled: lat 2 with "
+           "all deps %u, lat 2 RAW only %u, forward lat 1 all deps %u, "
+           "forward lat 1 RAW only %u; so the program would take %u/%u/%u/%u\n",
+           fixed + region_now, fixed, region_now, ops_total,
+           skipped ? ", some runs too long and cut" : "", sum[0], sum[1],
+           sum[2], sum[3], fixed + sum[0], fixed + sum[1], fixed + sum[2],
+           fixed + sum[3]);
+   if (num_all)
+      fprintf(stderr,
+              "GRATE SCHED DRY: whole program as one run (optimistic: units "
+              "and their results ignored) %u ops: lat 2 %u packets, forward "
+              "lat 1 %u packets, floor %u\n",
+              num_all, dry_schedule(all, num_all, 2, true, true),
+              dry_schedule(all, num_all, 1, true, true),
+              DIV_ROUND_UP(num_all, 4));
+   FREE(pk);
 }
 
 static bool
@@ -1193,6 +1492,20 @@ fail:
    return false;
 }
 
+/* The NVIDIA-style layout (fp/layout2.c) is on unless GRATE_LAYOUT_V1 is set
+ * (or GRATE_LAYOUT_V2=0). It only replaces the old layout when its own
+ * symbolic check agrees. */
+static bool
+layout_v2_enabled(void)
+{
+   const char *off = getenv("GRATE_LAYOUT_V1");
+   const char *v2 = getenv("GRATE_LAYOUT_V2");
+
+   if (off && *off && strcmp(off, "0"))
+      return false;
+   return !(v2 && !strcmp(v2, "0"));
+}
+
 /**
  * Compiles the program of so->base.tokens, storing the output the mode asks
  * for, into so->blob and so->info.
@@ -1248,15 +1561,111 @@ grate_compile_fs(struct grate_context *context,
    if (has_spills)
       fp.info.num_rows = 4;
 
-   if (getenv("GRATE_PACKING_DEBUG"))
+   if (getenv("GRATE_PACKING_DEBUG")) {
       debug_packing_bound(&fp);
+      debug_schedule_bound(&fp);
+      if (atoi(getenv("GRATE_PACKING_DEBUG")) >= 2)
+         debug_dump_steps(&fp, "before align_to_rows");
+   }
    if (fp.spilling)
       coalesce_scalar_alu(&fp);
-   align_to_rows(&fp);
+   uint64_t sig_seq = 0, sig_hw = 0;
+   const char *sig_why = NULL;
+   bool have_seq = false;
+   if (getenv("GRATE_PACKING_DEBUG")) {
+      have_seq = grate_fp_layout_signature(&fp, true, &sig_seq, &sig_why);
+      if (!have_seq)
+         fprintf(stderr, "GRATE LAYOUT CHECK: not modelled (%s)\n",
+                 sig_why ? sig_why : "?");
+   }
+   bool laid_out = false;
+   if (layout_v2_enabled() && !fp.allocation_failed &&
+       fp.info.num_constants <= GRATE_FP_MAX_CONSTANTS) {
+      if (!have_seq)
+         have_seq = grate_fp_layout_signature(&fp, true, &sig_seq, &sig_why);
+      if (have_seq) {
+         /* the old layout, for comparison: keep a copy of the program as the
+          * emitter wrote it, lay it out the old way, and give the new layout
+          * the original */
+         struct list_head pre_steps, pre_alus, pre_mfus;
+         unsigned pre_rows = fp.info.num_rows;
+         if (grate_fp_ir_clone(&fp, &pre_steps, &pre_alus, &pre_mfus)) {
+            align_to_rows(&fp);
+            unsigned old_steps = list_length(&fp.fp_instructions);
+            unsigned old_packets = list_length(&fp.alu_instructions);
+            unsigned old_rows = fp.info.num_rows;
+            struct list_head old_s, old_a, old_m;
+            list_replace(&fp.fp_instructions, &old_s);
+            list_replace(&fp.alu_instructions, &old_a);
+            list_replace(&fp.mfu_instructions, &old_m);
+            list_replace(&pre_steps, &fp.fp_instructions);
+            list_replace(&pre_alus, &fp.alu_instructions);
+            list_replace(&pre_mfus, &fp.mfu_instructions);
+            fp.info.num_rows = pre_rows;
+            laid_out = grate_fp_layout_nvidia(&fp, sig_seq,
+                                              getenv("GRATE_PACKING_DEBUG") != NULL,
+                                              old_steps, old_packets);
+            if (laid_out) {
+               grate_fp_ir_free(&old_s, &old_a, &old_m);
+            } else {
+               grate_fp_ir_free(&fp.fp_instructions, &fp.alu_instructions,
+                                &fp.mfu_instructions);
+               list_replace(&old_s, &fp.fp_instructions);
+               list_replace(&old_a, &fp.alu_instructions);
+               list_replace(&old_m, &fp.mfu_instructions);
+               fp.info.num_rows = old_rows;
+               laid_out = true; /* the old layout is in place already */
+            }
+         }
+      }
+   }
+   if (!laid_out)
+      align_to_rows(&fp);
+   else {
+      /* the new layout may have removed every spill */
+      has_spills = false;
+      list_for_each_entry (struct fp_instr, instr, &fp.fp_instructions, link)
+         has_spills |= instr->dw.spill || instr->spill_load;
+      if (!has_spills)
+         fp.info.num_spill_slots = 0;
+   }
+   if (getenv("GRATE_PACKING_DEBUG") && atoi(getenv("GRATE_PACKING_DEBUG")) >= 2)
+      debug_dump_steps(&fp, "after align_to_rows");
+   if (have_seq && getenv("GRATE_PACKING_DEBUG")) {
+      if (!grate_fp_layout_signature(&fp, false, &sig_hw, &sig_why))
+         fprintf(stderr, "GRATE LAYOUT CHECK: emitted layout not modelled (%s)\n",
+                 sig_why ? sig_why : "?");
+      else
+         fprintf(stderr, "GRATE LAYOUT CHECK: emitted layout %s the sequential program (%016llx / %016llx)\n",
+                 sig_seq == sig_hw ? "MATCHES" : "DIFFERS FROM",
+                 (unsigned long long)sig_seq, (unsigned long long)sig_hw);
+   }
 
    unsigned num_fp_instrs = list_length(&fp.fp_instructions);
    unsigned num_mfu_instrs = list_length(&fp.mfu_instructions);
    unsigned num_alu_instrs = list_length(&fp.alu_instructions);
+   if (getenv("GRATE_PACKING_DEBUG"))
+      fprintf(stderr, "GRATE SCHED DRY: emitted after align_to_rows: %u ALU packets in %u steps (%u rows)\n", num_alu_instrs, num_fp_instrs, fp.info.num_rows);
+   if (getenv("GRATE_PACKING_DEBUG")) {
+      /* one letter per step: M interpolation/SFU, T fetch, D output write, S spill, digit = ALU packets, . = empty */
+      char line[256];
+      unsigned n = 0;
+      list_for_each_entry (struct fp_instr, instr, &fp.fp_instructions, link) {
+         if (n + 8 >= sizeof(line))
+            break;
+         if (instr->mfu_sched.num_instructions)
+            line[n++] = 'M';
+         if (instr->tex & (1 << 10))
+            line[n++] = 'T';
+         if (instr->dw.enable)
+            line[n++] = instr->dw.spill ? 'S' : 'D';
+         line[n++] = instr->alu_sched.num_instructions ?
+                        '0' + instr->alu_sched.num_instructions : '.';
+         line[n++] = ' ';
+      }
+      line[n] = 0;
+      fprintf(stderr, "GRATE SCHED DRY: steps (%u rows): %s\n", fp.info.num_rows, line);
+   }
    /* The ALU and MFU instruction addresses of a step are six bits: a
     * program with more instructions than that also needs epochs. */
    if (!fp.allocation_failed &&
@@ -1310,6 +1719,8 @@ grate_compile_fs(struct grate_context *context,
     * (capacity - 1) >> 2, >> 3, / 12, >> 4 for 1 to 4 rows). A value in R4
     * or above is only kept per pixel when NUM_ROWS covers it; the
     * programs that used the globals 16-23 for it needed MAX_OUT 4. */
+   if (getenv("GRATE_NUMROWS")) /* EXPERIMENT hook, see docs/grate-alu-latency.md */
+      fp.info.num_rows = atoi(getenv("GRATE_NUMROWS"));
    assert(fp.info.num_rows >= 1 && fp.info.num_rows <= 4);
    PUSH(TGR3D_GLOBAL_PIX_ATTR_MAX_QID(grate_fp_max_qid(fp.info.num_rows)) |
         TGR3D_GLOBAL_PIX_ATTR_NUM_ROWS(fp.info.num_rows - 1));
@@ -1328,14 +1739,41 @@ grate_compile_fs(struct grate_context *context,
    size_t cmd_start = buf.size;
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_COMMAND_EVEN(0), 1));
    // TODO: document/convert these values
+   if (getenv("GRATE_REPLAY_N")) /* EXPERIMENT hook */
+      num_fp_instrs = atoi(getenv("GRATE_REPLAY_N"));
    PUSH(0x20006000 | num_fp_instrs);
 
    PUSH(host1x_opcode_incr(REG_TGR3D_PSEQ_DWR_IF_STATE, 1));
    // TODO: document/convert these values
    PUSH(TGR3D_PSEQ_DWR_IF_STATE_COUNT(num_fp_instrs));
 
+   size_t replay_start = buf.size;
    emit_fp_blocks(&buf, soc_id, &fp.fp_instructions, &fp.mfu_instructions,
                    &fp.alu_instructions);
+
+   if (getenv("GRATE_REPLAY")) { /* EXPERIMENT hook: a raw stream replaces our program */
+      FILE *rf = fopen(getenv("GRATE_REPLAY"), "rb");
+      if (rf) {
+         uint32_t rw[1 << 14];
+         size_t n = fread(rw, 4, 1 << 14, rf);
+         fclose(rf);
+         buf.size = replay_start;
+         for (size_t i = 0; i < n; i++)
+            PUSH(rw[i]);
+      }
+   }
+
+   if (getenv("GRATE_DUMP_FS")) { /* EXPERIMENT hook: the program words, with a header like a compiled .bin */
+      FILE *df = fopen(getenv("GRATE_DUMP_FS"), "wb");
+      if (df) {
+         uint32_t hdr[2] = {fp.info.num_rows, num_fp_instrs};
+         fwrite("AR20-BIN", 1, 8, df);
+         fwrite(hdr, 4, 2, df);
+         fwrite((uint32_t *)buf.data + replay_start / 4, 1,
+                buf.size - replay_start, df);
+         fclose(df);
+      }
+   }
 
    /* A program of more than one epoch is loaded by the sequencer's DMA,
     * from the buffers of grate_fp_epochs: keep the common state only. */
