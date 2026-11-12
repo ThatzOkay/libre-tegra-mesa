@@ -583,6 +583,227 @@ debug_packing_bound(const struct grate_fp_shader *fp)
            hist[4], DIV_ROUND_UP(ops, 4));
 }
 
+/*
+ * Dry run of a scheduler over slot operations (GRATE_PACKING_DEBUG, no effect
+ * on the program): how many packets would a list scheduler need for the
+ * ALU-only runs of steps, under different latency models? The steps that
+ * carry a unit (interpolation or SFU, fetch, output write, sequencer
+ * command, spill) keep their packets as they are.
+ */
+#define DRY_MAX_OPS 512
+
+struct dry_op {
+   int dst;
+   unsigned wmask;          /* bit 0 low half, bit 1 high half */
+   int src[4];
+   unsigned rmask[4];
+   unsigned height;
+   int cycle;
+};
+
+static bool
+dry_step_is_barrier(const struct fp_instr *instr)
+{
+   return instr->mfu_sched.num_instructions || (instr->tex & (1 << 10)) ||
+          instr->dw.enable || instr->pseq || instr->spill_load;
+}
+
+/* Dependency latencies in packets: RAW raw_lat, WAR 0, WAW 1. */
+static unsigned
+dry_schedule(struct dry_op *ops, unsigned n, unsigned raw_lat, bool false_deps,
+             bool raw_deps)
+{
+   /* edges stored as a dense matrix of latencies, -1 = none */
+   static int8_t edge[DRY_MAX_OPS][DRY_MAX_OPS];
+   for (unsigned i = 0; i < n; i++)
+      for (unsigned j = 0; j < n; j++)
+         edge[i][j] = -1;
+
+   for (unsigned j = 0; j < n; j++) {
+      for (unsigned i = 0; i < j; i++) {
+         int best = -1;
+         /* RAW: j reads what i writes */
+         for (unsigned k = 0; k < 4; k++) {
+            if (ops[j].src[k] >= 0 && ops[j].src[k] == ops[i].dst &&
+                (ops[j].rmask[k] & ops[i].wmask) && raw_deps)
+               best = MAX2(best, (int)raw_lat);
+         }
+         if (false_deps) {
+            /* WAR: j writes what i reads (may share a packet) */
+            for (unsigned k = 0; k < 4; k++)
+               if (ops[i].src[k] >= 0 && ops[i].src[k] == ops[j].dst &&
+                   (ops[i].rmask[k] & ops[j].wmask))
+                  best = MAX2(best, 0);
+            /* WAW: keep the order, the second write lands later */
+            if (ops[i].dst >= 0 && ops[i].dst == ops[j].dst &&
+                (ops[i].wmask & ops[j].wmask))
+               best = MAX2(best, 1);
+         }
+         edge[i][j] = best;
+      }
+   }
+
+   for (int i = (int)n - 1; i >= 0; i--) {
+      ops[i].height = 1;
+      for (unsigned j = i + 1; j < n; j++)
+         if (edge[i][j] >= 0)
+            ops[i].height = MAX2(ops[i].height, ops[j].height + edge[i][j]);
+      ops[i].cycle = -1;
+   }
+
+   unsigned done = 0, cycle = 0;
+   while (done < n && cycle < 4 * n + 8) {
+      unsigned used = 0;
+      bool progress = true;
+      while (progress && used < 4) {
+         progress = false;
+         int pick = -1;
+         for (unsigned j = 0; j < n; j++) {
+            if (ops[j].cycle >= 0)
+               continue;
+            bool ready = true;
+            for (unsigned i = 0; i < j && ready; i++)
+               if (edge[i][j] >= 0 &&
+                   (ops[i].cycle < 0 || ops[i].cycle + edge[i][j] > (int)cycle))
+                  ready = false;
+            if (!ready)
+               continue;
+            if (pick < 0 || ops[j].height > ops[pick].height)
+               pick = j;
+         }
+         if (pick >= 0) {
+            ops[pick].cycle = cycle;
+            used++;
+            done++;
+            progress = true;
+         }
+      }
+      cycle++;
+   }
+   return cycle;
+}
+
+static void
+dry_fill_op(struct dry_op *op, const struct fp_alu_instr *alu)
+{
+   op->dst = alu->dst.index == 31 ? -1 : (int)alu->dst.index;
+   op->wmask = (alu->dst.write_low_sub_reg ? 1 : 0) |
+               (alu->dst.write_high_sub_reg ? 2 : 0);
+   for (unsigned k = 0; k < 4; k++) {
+      unsigned reg = alu->src[k].index;
+      op->src[k] = (reg == 31 || (reg >= 24 && reg < 64)) ? -1 : (int)reg;
+      op->rmask[k] = alu->src[k].datatype == FP_DATATYPE_FIXED10
+                        ? (alu->src[k].sub_reg_select_high ? 2 : 1)
+                        : 3;
+   }
+   /* a conditional write keeps the old value, so it reads it */
+   if (alu->condition != FP_CONDITION_ALWAYS && op->dst >= 0) {
+      for (unsigned k = 0; k < 4; k++)
+         if (op->src[k] < 0) {
+            op->src[k] = op->dst;
+            op->rmask[k] = op->wmask;
+            break;
+         }
+   }
+}
+
+static void
+debug_schedule_bound(const struct grate_fp_shader *fp)
+{
+   unsigned num_packets = list_length(&fp->alu_instructions);
+   const struct fp_alu_instr_packet **pk =
+      CALLOC(num_packets + 1, sizeof(*pk));
+   if (!pk)
+      return;
+   unsigned i = 0;
+   list_for_each_entry (struct fp_alu_instr_packet, packet,
+                        &fp->alu_instructions, link)
+      pk[i++] = packet;
+
+   static struct dry_op ops[DRY_MAX_OPS], all[DRY_MAX_OPS];
+   unsigned num_all = 0;
+   /* totals: fixed packets, then per model */
+   unsigned fixed = 0, region_now = 0, ops_total = 0, skipped = 0;
+   unsigned sum[4] = {0};
+   unsigned n = 0, now = 0;
+   bool in_region = false;
+
+   list_for_each_entry (struct fp_instr, instr, &fp->fp_instructions, link) {
+      bool barrier = dry_step_is_barrier(instr);
+      for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
+         unsigned address = instr->alu_sched.address + p;
+         if (address >= num_packets)
+            continue;
+         for (unsigned slot = 0; slot < 4; slot++) {
+            const struct fp_alu_instr *alu = &pk[address]->slots[slot];
+            if ((alu->dst.write_low_sub_reg || alu->dst.write_high_sub_reg) &&
+                num_all < DRY_MAX_OPS)
+               dry_fill_op(&all[num_all++], alu);
+         }
+      }
+      if (!barrier) {
+         for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
+            unsigned address = instr->alu_sched.address + p;
+            if (address >= num_packets)
+               continue;
+            now++;
+            for (unsigned slot = 0; slot < 4; slot++) {
+               const struct fp_alu_instr *alu = &pk[address]->slots[slot];
+               if (!alu->dst.write_low_sub_reg && !alu->dst.write_high_sub_reg)
+                  continue;
+               if (n >= DRY_MAX_OPS) {
+                  skipped++;
+                  continue;
+               }
+               dry_fill_op(&ops[n++], alu);
+            }
+         }
+         in_region = true;
+         continue;
+      }
+      /* a barrier step closes the region and keeps its own packets */
+      if (in_region && n) {
+         sum[0] += dry_schedule(ops, n, 2, true, true);
+         sum[1] += dry_schedule(ops, n, 2, false, true);
+         sum[2] += dry_schedule(ops, n, 1, true, true);
+         sum[3] += dry_schedule(ops, n, 1, false, true);
+         ops_total += n;
+      }
+      region_now += now;
+      n = 0;
+      now = 0;
+      in_region = false;
+      fixed += instr->alu_sched.num_instructions;
+   }
+   if (in_region && n) {
+      sum[0] += dry_schedule(ops, n, 2, true, true);
+      sum[1] += dry_schedule(ops, n, 2, false, true);
+      sum[2] += dry_schedule(ops, n, 1, true, true);
+      sum[3] += dry_schedule(ops, n, 1, false, true);
+      ops_total += n;
+   }
+   region_now += now;
+
+   fprintf(stderr,
+           "GRATE SCHED DRY: %u packets now (%u in barrier steps, %u in "
+           "ALU-only runs holding %u ops%s); same runs scheduled: lat 2 with "
+           "all deps %u, lat 2 RAW only %u, forward lat 1 all deps %u, "
+           "forward lat 1 RAW only %u; so the program would take %u/%u/%u/%u\n",
+           fixed + region_now, fixed, region_now, ops_total,
+           skipped ? ", some runs too long and cut" : "", sum[0], sum[1],
+           sum[2], sum[3], fixed + sum[0], fixed + sum[1], fixed + sum[2],
+           fixed + sum[3]);
+   if (num_all)
+      fprintf(stderr,
+              "GRATE SCHED DRY: whole program as one run (optimistic: units "
+              "and their results ignored) %u ops: lat 2 %u packets, forward "
+              "lat 1 %u packets, floor %u\n",
+              num_all, dry_schedule(all, num_all, 2, true, true),
+              dry_schedule(all, num_all, 1, true, true),
+              DIV_ROUND_UP(num_all, 4));
+   FREE(pk);
+}
+
 static bool
 step_writes_register(const struct fp_instr *instr,
                      struct fp_alu_instr_packet **packets,
@@ -1248,8 +1469,10 @@ grate_compile_fs(struct grate_context *context,
    if (has_spills)
       fp.info.num_rows = 4;
 
-   if (getenv("GRATE_PACKING_DEBUG"))
+   if (getenv("GRATE_PACKING_DEBUG")) {
       debug_packing_bound(&fp);
+      debug_schedule_bound(&fp);
+   }
    if (fp.spilling)
       coalesce_scalar_alu(&fp);
    align_to_rows(&fp);
@@ -1257,6 +1480,8 @@ grate_compile_fs(struct grate_context *context,
    unsigned num_fp_instrs = list_length(&fp.fp_instructions);
    unsigned num_mfu_instrs = list_length(&fp.mfu_instructions);
    unsigned num_alu_instrs = list_length(&fp.alu_instructions);
+   if (getenv("GRATE_PACKING_DEBUG"))
+      fprintf(stderr, "GRATE SCHED DRY: emitted after align_to_rows: %u ALU packets in %u steps (%u rows)\n", num_alu_instrs, num_fp_instrs, fp.info.num_rows);
    /* The ALU and MFU instruction addresses of a step are six bits: a
     * program with more instructions than that also needs epochs. */
    if (!fp.allocation_failed &&
