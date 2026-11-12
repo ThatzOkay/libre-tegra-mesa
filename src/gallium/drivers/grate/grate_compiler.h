@@ -57,6 +57,7 @@ struct grate_fp_epoch {
    unsigned prog_offset; /* byte offset of the block in the program buffer */
    unsigned prog_words;  /* length of the block in words */
    unsigned steps;       /* instructions of this epoch */
+   unsigned packets;     /* ALU packets of this epoch */
    unsigned const_bank;  /* first bank slot of the constant packet */
    unsigned num_constants;
    struct {
