@@ -21,6 +21,7 @@
 #include "grate_compiler.h"
 #include "fp/blend.h"
 #include "fp/fpir.h"
+#include "fp/layout.h"
 #include "vp/vpir.h"
 
 struct grate_vs_tgsi_transform_context {
@@ -705,6 +706,83 @@ dry_fill_op(struct dry_op *op, const struct fp_alu_instr *alu)
             break;
          }
    }
+}
+
+/* GRATE_PACKING_DEBUG=2: print the steps with their unit operations and the ALU slots (registers as allocated). */
+static void
+debug_dump_steps(const struct grate_fp_shader *fp, const char *when)
+{
+   unsigned num_packets = list_length(&fp->alu_instructions);
+   const struct fp_alu_instr_packet **pk = CALLOC(num_packets + 1, sizeof(*pk));
+   const struct fp_mfu_instr **mf =
+      CALLOC(list_length(&fp->mfu_instructions) + 1, sizeof(*mf));
+   if (!pk || !mf) {
+      FREE(pk);
+      FREE(mf);
+      return;
+   }
+   unsigned i = 0;
+   list_for_each_entry (struct fp_alu_instr_packet, packet,
+                        &fp->alu_instructions, link)
+      pk[i++] = packet;
+   i = 0;
+   list_for_each_entry (struct fp_mfu_instr, m, &fp->mfu_instructions, link)
+      mf[i++] = m;
+   fprintf(stderr, "GRATE STEPS %s (%u rows):\n", when, fp->info.num_rows);
+   unsigned step = 0;
+   list_for_each_entry (struct fp_instr, instr, &fp->fp_instructions, link) {
+      fprintf(stderr, " step %2u:", step++);
+      if (instr->mfu_sched.num_instructions) {
+         const struct fp_mfu_instr *m = mf[instr->mfu_sched.address];
+         fprintf(stderr, " MFU[");
+         if (m->sfu.op != FP_SFU_OP_NOP)
+            fprintf(stderr, "sfu%d@%u ", m->sfu.op, m->sfu.reg);
+         for (unsigned k = 0; k < 4; k++)
+            if (m->var[k].op != FP_VAR_OP_NOP)
+               fprintf(stderr, "v%u=%s%u ", k,
+                       m->var[k].op == FP_VAR_OP_FP20 ? "fp" : "fx",
+                       m->var[k].tram_row);
+         for (unsigned k = 0; k < 2; k++)
+            if (m->mul[k].dst != FP_MFU_MUL_DST_BARYCENTRIC_WEIGHT)
+               fprintf(stderr, "mul%u:%u<-%u,%u ", k, m->mul[k].dst,
+                       m->mul[k].src[0], m->mul[k].src[1]);
+         fprintf(stderr, "]");
+      }
+      if (instr->tex & (1 << 10))
+         fprintf(stderr, " TEX%03x", instr->tex & 0xfff);
+      if (instr->dw.enable)
+         fprintf(stderr, instr->dw.spill ? " SPILLST" : " DW(r%s)",
+                 instr->dw.src_regs == FP_DW_REGS_R2_R3 ? "2r3" : "0r1");
+      if (instr->pseq)
+         fprintf(stderr, " PSEQ%x", instr->pseq);
+      for (unsigned p = 0; p < instr->alu_sched.num_instructions; p++) {
+         unsigned a = instr->alu_sched.address + p;
+         fprintf(stderr, "\n          pk%u:", p);
+         if (a >= num_packets)
+            continue;
+         for (unsigned sl = 0; sl < 4; sl++) {
+            const struct fp_alu_instr *alu = &pk[a]->slots[sl];
+            if (!alu->dst.write_low_sub_reg && !alu->dst.write_high_sub_reg)
+               continue;
+            fprintf(stderr, " r%u%s=%s(", alu->dst.index,
+                    alu->dst.write_low_sub_reg && alu->dst.write_high_sub_reg
+                       ? "" : alu->dst.write_low_sub_reg ? ".l" : ".h",
+                    alu->op == FP_ALU_OP_MAD ? "mad" : alu->op == FP_ALU_OP_MIN
+                       ? "min" : alu->op == FP_ALU_OP_MAX ? "max" : "csel");
+            for (unsigned k = 0; k < 3; k++)
+               fprintf(stderr, "%sr%u%s%s", k ? "," : "",
+                       alu->src[k].index,
+                       alu->src[k].datatype == FP_DATATYPE_FIXED10
+                          ? (alu->src[k].sub_reg_select_high ? ".h" : ".l") : "",
+                       alu->src[k].negate ? "-" : "");
+            fprintf(stderr, ")%s",
+                    alu->condition != FP_CONDITION_ALWAYS ? "?" : "");
+         }
+      }
+      fprintf(stderr, "\n");
+   }
+   FREE(pk);
+   FREE(mf);
 }
 
 static void
@@ -1472,10 +1550,32 @@ grate_compile_fs(struct grate_context *context,
    if (getenv("GRATE_PACKING_DEBUG")) {
       debug_packing_bound(&fp);
       debug_schedule_bound(&fp);
+      if (atoi(getenv("GRATE_PACKING_DEBUG")) >= 2)
+         debug_dump_steps(&fp, "before align_to_rows");
    }
    if (fp.spilling)
       coalesce_scalar_alu(&fp);
+   uint64_t sig_seq = 0, sig_hw = 0;
+   const char *sig_why = NULL;
+   bool have_seq = false;
+   if (getenv("GRATE_PACKING_DEBUG")) {
+      have_seq = grate_fp_layout_signature(&fp, true, &sig_seq, &sig_why);
+      if (!have_seq)
+         fprintf(stderr, "GRATE LAYOUT CHECK: not modelled (%s)\n",
+                 sig_why ? sig_why : "?");
+   }
    align_to_rows(&fp);
+   if (getenv("GRATE_PACKING_DEBUG") && atoi(getenv("GRATE_PACKING_DEBUG")) >= 2)
+      debug_dump_steps(&fp, "after align_to_rows");
+   if (have_seq) {
+      if (!grate_fp_layout_signature(&fp, false, &sig_hw, &sig_why))
+         fprintf(stderr, "GRATE LAYOUT CHECK: emitted layout not modelled (%s)\n",
+                 sig_why ? sig_why : "?");
+      else
+         fprintf(stderr, "GRATE LAYOUT CHECK: emitted layout %s the sequential program (%016llx / %016llx)\n",
+                 sig_seq == sig_hw ? "MATCHES" : "DIFFERS FROM",
+                 (unsigned long long)sig_seq, (unsigned long long)sig_hw);
+   }
 
    unsigned num_fp_instrs = list_length(&fp.fp_instructions);
    unsigned num_mfu_instrs = list_length(&fp.mfu_instructions);

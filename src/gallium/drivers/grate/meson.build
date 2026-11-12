@@ -28,6 +28,8 @@ files_libgrate = files(
   'fp/blend.c',
   'fp/blend.h',
   'fp/fpir.h',
+  'fp/layout.c',
+  'fp/layout.h',
   'fp/pack.c',
   'fp/tgsi.c',
   'fp/vliw.h',
