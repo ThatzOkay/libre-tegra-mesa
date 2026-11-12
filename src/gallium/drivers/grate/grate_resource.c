@@ -143,6 +143,13 @@ grate_pixel_format(enum pipe_format format)
       return TGR3D_SURF_FORMAT_A8;
    case PIPE_FORMAT_L8_UNORM:
       return TGR3D_SURF_FORMAT_L8;
+   /* Only meant for sampling the planes of an imported planar YUV buffer
+    * (I420/YV12 from the video decoder), whose per-plane format is R8.  An L8
+    * texel reads (L,L,L,1), so the .r the YUV lowering uses is the plane
+    * value.  grate_screen_is_format_supported() keeps R8 out of render
+    * targets. */
+   case PIPE_FORMAT_R8_UNORM:
+      return TGR3D_SURF_FORMAT_L8;
     case PIPE_FORMAT_S8_UINT:
       return TGR3D_SURF_FORMAT_S8;
     case PIPE_FORMAT_L8A8_UNORM:
@@ -371,8 +378,11 @@ grate_screen_resource_from_handle(struct pipe_screen *pscreen,
    default:
       UNREACHABLE("invalid winsys handle type");
    }
-   if (!resource->bo || handle->offset != 0)
+   /* One plane of a multi-plane dma-buf (e.g. the U and V planes of I420) lives
+    * at a non-zero offset inside the same buffer. */
+   if (!resource->bo || handle->offset >= resource->bo->size)
       goto fail;
+   resource->level_offset[0] = handle->offset;
 
    resource->pitch = handle->stride;
    resource->level_pitch[0] = resource->pitch;
