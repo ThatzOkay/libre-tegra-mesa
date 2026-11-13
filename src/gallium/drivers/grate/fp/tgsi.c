@@ -1768,6 +1768,73 @@ writes_temp(const struct tgsi_full_instruction *inst, unsigned index)
    return false;
 }
 
+/* The hardware has no sign op. NVIDIA's compiler builds it from condition
+ * flags (decoded with ar20bin-dump.py: two steps, three packets for a
+ * vec4); here SSG(x) is SLT(0, x) - SLT(x, 0), which is exact for 0, NaN
+ * aside, and uses only ops that are checked against the CPU model. */
+static void
+lower_ssg(struct grate_fp_shader *fp, struct util_dynarray *instructions)
+{
+   bool any = false;
+   util_dynarray_foreach (instructions, struct tgsi_full_instruction, code)
+      any |= code->Instruction.Opcode == TGSI_OPCODE_SSG;
+   if (!any)
+      return;
+
+   unsigned zero_comp;
+   unsigned zero_imm = find_immediate(fp, 0.0f, &zero_comp);
+
+   struct util_dynarray out;
+   util_dynarray_init(&out, NULL);
+   util_dynarray_foreach (instructions, struct tgsi_full_instruction, code) {
+      struct tgsi_full_instruction inst = *code;
+      if (inst.Instruction.Opcode != TGSI_OPCODE_SSG) {
+         util_dynarray_append_typed(&out, struct tgsi_full_instruction, inst);
+         continue;
+      }
+
+      assert(fp->num_temporaries + 2 <= GRATE_FP_MAX_TEMPS);
+      unsigned temp[2] = {fp->num_temporaries, fp->num_temporaries + 1};
+      fp->num_temporaries += 2;
+
+      for (unsigned k = 0; k < 2; k++) {
+         struct tgsi_full_instruction slt = {0};
+         slt.Instruction.Opcode = TGSI_OPCODE_SLT;
+         slt.Instruction.NumDstRegs = 1;
+         slt.Instruction.NumSrcRegs = 2;
+         slt.Dst[0].Register.File = TGSI_FILE_TEMPORARY;
+         slt.Dst[0].Register.Index = temp[k];
+         slt.Dst[0].Register.WriteMask = inst.Dst[0].Register.WriteMask;
+         /* temp[0] = 0 < x, temp[1] = x < 0 */
+         struct tgsi_full_src_register *zero = &slt.Src[k ? 1 : 0];
+         struct tgsi_full_src_register *value = &slt.Src[k ? 0 : 1];
+         *value = inst.Src[0];
+         zero->Register.File = TGSI_FILE_IMMEDIATE;
+         zero->Register.Index = zero_imm;
+         set_src_swizzle(&zero->Register, zero_comp, zero_comp, zero_comp,
+                         zero_comp);
+         util_dynarray_append_typed(&out, struct tgsi_full_instruction, slt);
+      }
+
+      struct tgsi_full_instruction add = {0};
+      add.Instruction.Opcode = TGSI_OPCODE_ADD;
+      add.Instruction.NumDstRegs = 1;
+      add.Instruction.NumSrcRegs = 2;
+      add.Instruction.Saturate = inst.Instruction.Saturate;
+      add.Dst[0] = inst.Dst[0];
+      for (unsigned k = 0; k < 2; k++) {
+         add.Src[k].Register.File = TGSI_FILE_TEMPORARY;
+         add.Src[k].Register.Index = temp[k];
+         add.Src[k].Register.Negate = k;
+         set_src_swizzle(&add.Src[k].Register, TGSI_SWIZZLE_X,
+                         TGSI_SWIZZLE_Y, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+      }
+      util_dynarray_append_typed(&out, struct tgsi_full_instruction, add);
+   }
+   util_dynarray_fini(instructions);
+   *instructions = out;
+}
+
 /* The hardware has EQUAL, GREATER and GEQUAL conditions but no NOTEQUAL:
  * SNE(a, b) is SEQ(a, b) followed by 1 - x. */
 static void
@@ -2415,6 +2482,7 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
       return;
    }
 
+   lower_ssg(fp, &instructions);
    lower_sne(fp, &instructions);
    lower_select_comparisons(&instructions);
 
