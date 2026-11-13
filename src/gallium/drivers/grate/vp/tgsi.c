@@ -137,6 +137,12 @@ emit_vMOV(struct vp_dst_operand dst, struct vp_src_operand src)
 }
 
 static struct vp_vec_instr
+emit_vFLR(struct vp_dst_operand dst, struct vp_src_operand src)
+{
+   return emit_vec_unop(VP_VEC_OP_FLR, dst, src);
+}
+
+static struct vp_vec_instr
 emit_vADD(struct vp_dst_operand dst, struct vp_src_operand src0,
           struct vp_src_operand src2)
 {
@@ -334,6 +340,13 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
                    tgsi_src_to_vp(vp, &inst->Src[0].Register),
                    tgsi_src_to_vp(vp, &inst->Src[1].Register)),
          emit_sNOP());
+
+   case TGSI_OPCODE_FLR:
+      /* One vector op like MOV: NVIDIA's compiler compiles floor() to a
+       * FLR with the operand in slot A (decoded with ar20vp-dump.py). */
+      return emit_packed(emit_vFLR(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
+                                   tgsi_src_to_vp(vp, &inst->Src[0].Register)),
+                         emit_sNOP());
 
    case TGSI_OPCODE_SQRT: {
       /* The scalar unit has no square root. NVIDIA's compiler computes
