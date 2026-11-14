@@ -915,6 +915,55 @@ emit_load_scalar(struct grate_fp_shader *fp,
    list_addtail(&inst->link, &fp->fp_instructions);
 }
 
+/* KILL_IF (discard): the pixel is killed when a component of the source is
+ * negative. NVIDIA's compiler does it with an ordinary ALU write of the
+ * negated value to R76 (checked with cgtest on `if (x < c) discard;`:
+ * `r76 = -x + c`; `alpha < 0.5` is `r76 = -alpha + 0.5`; two discards are two
+ * writes to R76 in one packet). One write per distinct source component. */
+#define GRATE_FP_KILL_REGISTER 76
+
+static void
+emit_kill_if(struct grate_fp_shader *fp,
+             const struct tgsi_full_instruction *tgsi)
+{
+   const struct tgsi_src_register *src = &tgsi->Src[0].Register;
+   const unsigned swizzle[] = {src->SwizzleX, src->SwizzleY, src->SwizzleZ,
+                               src->SwizzleW};
+   unsigned done = 0;
+
+   for (unsigned c = 0; c < 4; c++) {
+      if (done & (1 << swizzle[c]))
+         continue;
+      done |= 1 << swizzle[c];
+
+      struct fp_instr *kill = CALLOC_STRUCT(fp_instr);
+      list_inithead(&kill->link);
+      struct fp_mfu_instr *mfu = NULL;
+      if (src->File == TGSI_FILE_INPUT) {
+         mfu = CALLOC_STRUCT(fp_mfu_instr);
+         list_inithead(&mfu->link);
+         setup_interpolation(mfu);
+      }
+      struct fp_alu_instr_packet *packet = CALLOC_STRUCT(fp_alu_instr_packet);
+      list_inithead(&packet->link);
+      struct fp_alu_dst_operand dst = {.index = GRATE_FP_KILL_REGISTER,
+                                       .write_low_sub_reg = true,
+                                       .write_high_sub_reg = true};
+      struct fp_alu_src_operand value = fp_tgsi_src(fp, src, c, mfu);
+      value.negate = !value.negate;
+      packet->slots[0] = fp_alu_sMOV(dst, value);
+      kill->alu_sched.address = list_length(&fp->alu_instructions);
+      kill->alu_sched.num_instructions = 1;
+      if (mfu) {
+         kill->mfu_sched.num_instructions = 1;
+         kill->mfu_sched.address = list_length(&fp->mfu_instructions);
+         list_addtail(&mfu->link, &fp->mfu_instructions);
+      }
+      list_addtail(&packet->link, &fp->alu_instructions);
+      list_addtail(&kill->link, &fp->fp_instructions);
+   }
+}
+
 /* dFdx and dFdy over the pixel quad. Every pixel writes the value to the
  * exchange port r32; two packets later (the layout adds the empty one) the
  * four values of its 2x2 quad can be read back, whichever pixel wrote them:
@@ -1431,6 +1480,9 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
    switch (inst->Instruction.Opcode) {
    case TGSI_OPCODE_TEX:
       emit_TEX(fp, inst);
+      break;
+   case TGSI_OPCODE_KILL_IF:
+      emit_kill_if(fp, inst);
       break;
    case TGSI_OPCODE_DDX:
    case TGSI_OPCODE_DDY:
