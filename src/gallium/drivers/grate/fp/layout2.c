@@ -1137,28 +1137,41 @@ l2_schedule(struct l2 *s)
       s->step_first[t] = gfirst;
       bool progress = false;
 
-      /* unit operations first, the best of each kind */
-      for (int kind = L2_MFU; kind <= L2_TEX; kind++) {
-         int best = -1;
-         for (unsigned i = 0; i < s->num_ops; i++) {
-            struct l2_op *op = &s->ops[i];
-            if (op->placed || (int)op->kind != kind)
-               continue;
-            if (i >= first_waiting(s) + s->window)
-               continue;
-            if (!unit_row_ok(s, op, t) || !ops_ready(s, op, gfirst, t))
-               continue;
-            if (best < 0 || op->height > s->ops[best].height)
-               best = i;
-         }
-         if (best >= 0 && place_unit(s, &s->ops[best], t,
-                                     s->step_first[t - t % s->rows])) {
-            if (kind == L2_MFU)
-               s->step_mfu[t] = best;
-            else
-               s->step_tex[t] = best;
-            remaining--;
-            progress = true;
+      /* Unit operations first, the best of each kind. All units of a round
+       * act at its start, before every ALU packet of the round, so the
+       * units of all the steps of a round are chosen when the round starts:
+       * the ALU packets of its first steps can already read their results
+       * (docs/grate-alu-latency.md, experiments ix_*). */
+      const bool early = !getenv("GRATE_LAYOUT_UNITS_LATE");
+      const unsigned first_unit_step = t;
+      const unsigned last_unit_step =
+         early && t % s->rows == 0 ? t + s->rows - 1 : t;
+      if (early && t % s->rows != 0) {
+         /* chosen at the start of the round */
+      } else
+      for (unsigned tt = first_unit_step; tt <= last_unit_step; tt++) {
+         for (int kind = L2_MFU; kind <= L2_TEX; kind++) {
+            int best = -1;
+            for (unsigned i = 0; i < s->num_ops; i++) {
+               struct l2_op *op = &s->ops[i];
+               if (op->placed || (int)op->kind != kind)
+                  continue;
+               if (i >= first_waiting(s) + s->window)
+                  continue;
+               if (!unit_row_ok(s, op, tt) || !ops_ready(s, op, gfirst, tt))
+                  continue;
+               if (best < 0 || op->height > s->ops[best].height)
+                  best = i;
+            }
+            if (best >= 0 && place_unit(s, &s->ops[best], tt,
+                                        s->step_first[t - t % s->rows])) {
+               if (kind == L2_MFU)
+                  s->step_mfu[tt] = best;
+               else
+                  s->step_tex[tt] = best;
+               remaining--;
+               progress = true;
+            }
          }
       }
 
