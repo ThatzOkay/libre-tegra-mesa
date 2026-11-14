@@ -595,9 +595,10 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
       return;
    }
 
-   /* The plain 2D copy reads src.box at the size of dst.box: a box outside
-    * the source, or another size, reads memory that is not the source (the
-    * tegra-mc g2sr SMMU faults), so refuse it. */
+   /* The plain 2D copy reads the source from src.box.x/y at the size of
+    * dst.box (it does not scale: a smaller destination, as in mipmap
+    * generation, gets the top-left part): a read outside the source is memory
+    * that is not the source (the tegra-mc g2sr SMMU faults), so refuse it. */
    {
       unsigned sw = u_minify(info->src.resource->width0, info->src.level);
       unsigned sh = u_minify(info->src.resource->height0, info->src.level);
@@ -608,9 +609,7 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
           info->src.box.x + info->dst.box.width > sw ||
           info->src.box.y + info->dst.box.height > sh ||
           info->dst.box.x + info->dst.box.width > dw ||
-          info->dst.box.y + info->dst.box.height > dh ||
-          info->src.box.width != info->dst.box.width ||
-          info->src.box.height != info->dst.box.height) {
+          info->dst.box.y + info->dst.box.height > dh) {
          grate_unimplemented();
          return;
       }
