@@ -1143,13 +1143,10 @@ l2_schedule(struct l2 *s)
        * the ALU packets of its first steps can already read their results
        * (docs/grate-alu-latency.md, experiments ix_*). */
       const bool early = !getenv("GRATE_LAYOUT_UNITS_LATE");
-      const unsigned first_unit_step = t;
-      const unsigned last_unit_step =
-         early && t % s->rows == 0 ? t + s->rows - 1 : t;
-      if (early && t % s->rows != 0) {
-         /* chosen at the start of the round */
-      } else
-      for (unsigned tt = first_unit_step; tt <= last_unit_step; tt++) {
+      /* the units of the later steps of a round were chosen at its start */
+      const bool chosen = early && t % s->rows != 0;
+      const unsigned last_unit_step = early ? t + s->rows - 1 : t;
+      for (unsigned tt = t; !chosen && tt <= last_unit_step; tt++) {
          for (int kind = L2_MFU; kind <= L2_TEX; kind++) {
             int best = -1;
             for (unsigned i = 0; i < s->num_ops; i++) {
