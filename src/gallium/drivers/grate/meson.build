@@ -70,7 +70,7 @@ libgrate = static_library(
     inc_src, inc_include, inc_gallium, inc_gallium_aux,
     inc_gallium_drivers, inc_libgrate,
   ],
-  dependencies : [dep_libdrm, dep_valgrind, idep_mesautil],
+  dependencies : [dep_libdrm, dep_valgrind, idep_mesautil, idep_nir_headers],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
 )

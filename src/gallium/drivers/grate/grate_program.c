@@ -4,6 +4,7 @@
 #include "util/u_dynarray.h"
 #include "util/u_memory.h"
 
+#include "compiler/nir/nir.h"
 #include "nir/nir_to_tgsi.h"
 
 #include "tgsi/tgsi_dump.h"
@@ -1912,6 +1913,11 @@ grate_create_fs_state(struct pipe_context *pcontext,
    so->base = *template;
 
    if (template->type == PIPE_SHADER_IR_NIR) {
+      /* The fragment compiler has no TGSI TXP: divide the coordinates by the
+       * projector here (reciprocal and multiply) and fetch with TEX. NVIDIA's
+       * compiler does the division in the interpolation unit instead. */
+      nir_lower_tex_options lower_txp = {.lower_txp = ~0u};
+      nir_lower_tex(template->ir.nir, &lower_txp);
       so->base.tokens = nir_to_tgsi(template->ir.nir, pcontext->screen);
       so->base.type = PIPE_SHADER_IR_TGSI;
    }
