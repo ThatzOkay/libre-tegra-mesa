@@ -1173,7 +1173,7 @@ l2_schedule(struct l2 *s)
                struct l2_op *op = &s->ops[i];
                if (op->placed || op->kind != L2_ALU)
                   continue;
-               if (i >= first_waiting(s) + s->window)
+               if (i >= first_waiting(s) + s->window && !reads_quad(s, op))
                   continue;
                if (!ops_ready(s, op, g, t))
                   continue;
@@ -1196,7 +1196,8 @@ l2_schedule(struct l2 *s)
                   struct l2_op *op = &s->ops[i];
                   if (op->placed || op->kind != L2_ALU || (int)i == best)
                      continue;
-                  if (i >= first_waiting(s) + s->window)
+                  if (i >= first_waiting(s) + s->window &&
+                      !reads_quad(s, op))
                      continue;
                   if (!ops_ready(s, op, g, t))
                      continue;
@@ -1226,6 +1227,22 @@ l2_schedule(struct l2 *s)
          /* nothing could go: a bubble if an operation only waits for the
           * latency of an earlier packet of this round */
          bool waiting = false;
+         /* a read of the quad port that is due in the packet after this one
+          * needs an empty packet here, even at the start of a step or the end
+          * of a round (the write may have been the last packet of a step) */
+         for (unsigned i = 0; i < s->num_ops && !waiting; i++) {
+            struct l2_op *op = &s->ops[i];
+            if (op->placed || !reads_quad(s, op))
+               continue;
+            if (ops_ready(s, op, g + 1, p < 2 ? t : t + 1) &&
+                !ops_ready(s, op, g, t))
+               waiting = true;
+         }
+         if (waiting) {
+            s->step_packets[t]++;
+            s->total_packets++;
+            continue;
+         }
          if (p < 2 && (t + 1) % s->rows != 0 && s->step_packets[t] > 0)
             for (unsigned i = 0; i < s->num_ops && !waiting; i++) {
                struct l2_op *op = &s->ops[i];
