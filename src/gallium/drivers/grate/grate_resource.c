@@ -452,6 +452,94 @@ grate_resource_copy_region(struct pipe_context *pcontext,
       grate_bo_unmap(dst->bo);
 }
 
+/* A flipped copy on the 2D engine. Gallium flips a blit with a negative width
+ * or height in a box; the 2D engine's "fast rotate" mode (CONTROLSECOND
+ * orientation, as in xf86-video-opentegra) flips one axis exactly. Measured on
+ * the tablet (docs/grate-2d-flip.md): correct for 32 bits per pixel with pitches,
+ * base offsets and the width and height multiples of 16 bytes (4 pixels), up to
+ * 4096; anything else gives wrong pixels and writes past the destination.
+ * Only one axis flipped, the same format on both sides, no scaling. Returns
+ * false when the blit does not qualify. */
+#define GRATE_2D_ORIENT_FLIP_X 0
+#define GRATE_2D_ORIENT_FLIP_Y 1
+
+static bool
+grate_blit_flip_2d(struct grate_context *context,
+                   const struct pipe_blit_info *info, struct grate_resource *src,
+                   struct grate_resource *dst)
+{
+   const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
+   bool flip_x = (sb->width < 0) != (db->width < 0);
+   bool flip_y = (sb->height < 0) != (db->height < 0);
+
+   if (flip_x == flip_y) /* both axes flipped: not measured */
+      return false;
+   if (src->tiled || dst->tiled || info->src.format != info->dst.format ||
+       util_format_get_blocksize(info->src.format) != 4 ||
+       info->mask != PIPE_MASK_RGBA || info->scissor_enable)
+      return false;
+
+   int w = abs(sb->width), h = abs(sb->height);
+   if (w != abs(db->width) || h != abs(db->height) || w == 0 || h == 0 ||
+       w > 4096 || h > 4096 || w % 4 || h % 4)
+      return false;
+
+   /* the rectangle of each side, flipped boxes start at their far edge */
+   int sx = sb->width < 0 ? sb->x + sb->width : sb->x;
+   int sy = sb->height < 0 ? sb->y + sb->height : sb->y;
+   int dx = db->width < 0 ? db->x + db->width : db->x;
+   int dy = db->height < 0 ? db->y + db->height : db->y;
+   unsigned sw = u_minify(info->src.resource->width0, info->src.level);
+   unsigned sh = u_minify(info->src.resource->height0, info->src.level);
+   unsigned dw = u_minify(info->dst.resource->width0, info->dst.level);
+   unsigned dh = u_minify(info->dst.resource->height0, info->dst.level);
+   if (sx < 0 || sy < 0 || dx < 0 || dy < 0 || sx + w > (int)sw ||
+       sy + h > (int)sh || dx + w > (int)dw || dy + h > (int)dh)
+      return false;
+
+   unsigned spitch = src->level_pitch[info->src.level];
+   unsigned dpitch = dst->level_pitch[info->dst.level];
+   unsigned soff = src->level_offset[info->src.level] + sy * spitch + sx * 4;
+   unsigned doff = dst->level_offset[info->dst.level] + dy * dpitch + dx * 4;
+   if (spitch % 16 || dpitch % 16 || soff % 16 || doff % 16)
+      return false;
+
+   struct grate_channel *gr2d = context->gr2d;
+   uint32_t *ptr;
+   if (grate_stream_begin(&gr2d->stream, &ptr) < 0)
+      return false;
+
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x009, 0x9));
+   GRATE_PUSHBUF_WORD(ptr, 0x00000037);            /* 0x009 - trigger */
+   GRATE_PUSHBUF_WORD(ptr, 0x00000000);            /* 0x00c - cmdsel */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x01e, 0x5));
+   /* 0x01e - controlsecond: [31:26] orientation, [25:24] 1 = source to
+    * another destination */
+   GRATE_PUSHBUF_WORD(ptr, (flip_y ? GRATE_2D_ORIENT_FLIP_Y
+                                   : GRATE_2D_ORIENT_FLIP_X) << 26 |
+                              1 << 24);
+   GRATE_PUSHBUF_WORD(ptr, 0x000000cc);            /* 0x020 - ropfade */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x046, 1));
+   GRATE_PUSHBUF_WORD(ptr, 0x00000000);            /* 0x046 - tilemode: linear */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_mask(0x02b, 0x108));
+   GRATE_PUSHBUF_WORD(ptr, dpitch);                /* 0x02e - dstst */
+   GRATE_PUSHBUF_WORD(ptr, spitch);                /* 0x033 - srcst */
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x02b, 1));
+   grate_stream_push_reloc(&gr2d->stream, &ptr, dst->bo, doff);
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x031, 1));
+   grate_stream_push_reloc(&gr2d->stream, &ptr, src->bo, soff);
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x01f, 1));
+   /* 0x01f - controlmain: [29] fast rotate wait for read, [20] source colour
+    * depth same, [17:16] destination 32 bits per pixel */
+   GRATE_PUSHBUF_WORD(ptr, 1 << 29 | 1 << 20 | 2 << 16);
+   GRATE_PUSHBUF_WORD(ptr, host1x_opcode_nonincr(0x037, 1));
+   GRATE_PUSHBUF_WORD(ptr, (h - 1) << 16 | (w - 1)); /* 0x037 - srcsize, starts it */
+
+   grate_stream_end(&gr2d->stream, &ptr);
+   grate_stream_flush(&gr2d->stream, true);
+   return true;
+}
+
 static void
 grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
 {
@@ -464,6 +552,69 @@ grate_blit(struct pipe_context *pcontext, const struct pipe_blit_info *info)
 
    dst = grate_resource(info->dst.resource);
    src = grate_resource(info->src.resource);
+
+   if (getenv("GRATE_BLIT_LOG")) {
+      /* every 2D blit, with the sizes of both levels, to find reads outside a
+       * buffer (tegra-mc g2sr SMMU faults) */
+      FILE *log = fopen(getenv("GRATE_BLIT_LOG"), "a");
+      if (log) {
+         const struct pipe_blit_info *i = info;
+         unsigned sw = u_minify(i->src.resource->width0, i->src.level);
+         unsigned sh = u_minify(i->src.resource->height0, i->src.level);
+         unsigned dw = u_minify(i->dst.resource->width0, i->dst.level);
+         unsigned dh = u_minify(i->dst.resource->height0, i->dst.level);
+         fprintf(log,
+                 "blit src %s lvl %u %ux%u box %d,%d %dx%d tiled %d | dst %s "
+                 "lvl %u %ux%u box %d,%d %dx%d tiled %d | mask %x filter %u "
+                 "scissor %d%s\n",
+                 util_format_short_name(i->src.format), i->src.level, sw, sh,
+                 i->src.box.x, i->src.box.y, i->src.box.width,
+                 i->src.box.height, src->tiled,
+                 util_format_short_name(i->dst.format), i->dst.level, dw, dh,
+                 i->dst.box.x, i->dst.box.y, i->dst.box.width,
+                 i->dst.box.height, dst->tiled, i->mask, i->filter,
+                 i->scissor_enable,
+                 (i->src.box.x < 0 || i->src.box.y < 0 ||
+                  i->src.box.x + (int)i->dst.box.width > (int)sw ||
+                  i->src.box.y + (int)i->dst.box.height > (int)sh ||
+                  i->dst.box.x < 0 || i->dst.box.y < 0 ||
+                  i->dst.box.x + i->dst.box.width > dw ||
+                  i->dst.box.y + i->dst.box.height > dh ||
+                  i->src.box.width != i->dst.box.width ||
+                  i->src.box.height != i->dst.box.height)
+                    ? " SUSPECT"
+                    : "");
+         fclose(log);
+      }
+   }
+
+   if (info->src.box.width < 0 || info->src.box.height < 0 ||
+       info->dst.box.width < 0 || info->dst.box.height < 0) {
+      if (!grate_blit_flip_2d(context, info, src, dst))
+         grate_unimplemented(); /* TODO: flip on the 3D engine or the CPU */
+      return;
+   }
+
+   /* The plain 2D copy reads src.box at the size of dst.box: a box outside
+    * the source, or another size, reads memory that is not the source (the
+    * tegra-mc g2sr SMMU faults), so refuse it. */
+   {
+      unsigned sw = u_minify(info->src.resource->width0, info->src.level);
+      unsigned sh = u_minify(info->src.resource->height0, info->src.level);
+      unsigned dw = u_minify(info->dst.resource->width0, info->dst.level);
+      unsigned dh = u_minify(info->dst.resource->height0, info->dst.level);
+      if (info->src.box.x < 0 || info->src.box.y < 0 || info->dst.box.x < 0 ||
+          info->dst.box.y < 0 ||
+          info->src.box.x + info->dst.box.width > sw ||
+          info->src.box.y + info->dst.box.height > sh ||
+          info->dst.box.x + info->dst.box.width > dw ||
+          info->dst.box.y + info->dst.box.height > dh ||
+          info->src.box.width != info->dst.box.width ||
+          info->src.box.height != info->dst.box.height) {
+         grate_unimplemented();
+         return;
+      }
+   }
 
    err = grate_stream_begin(&gr2d->stream, &ptr);
    if (err < 0) {
