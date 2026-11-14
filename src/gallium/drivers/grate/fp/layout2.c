@@ -60,6 +60,8 @@ struct l2_def {
    bool dead;      /* folded away */
    int interp_key; /* tram row << 3 | variable, for an interpolated value,
                       else -1 */
+   bool quad;      /* a write to the quad exchange port r32: no register, read
+                      back as r32/r40/r48/r56 at a fixed distance */
 };
 
 struct l2_op {
@@ -167,6 +169,7 @@ tie(struct l2 *s, int def, int op, int k, int half)
 /* the definitions the halves of a register hold, -1 when never written */
 struct l2_cur {
    int def[48];
+   int quad; /* the last write to the quad exchange port, -1 none */
 };
 
 /* R0-R15, then R64-R71 */
@@ -217,6 +220,7 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
 
    struct l2_cur cur;
    memset(&cur, 0xff, sizeof(cur));
+   const bool deriv = fp->uses_derivatives;
    bool ok = true;
    bool have_dw = false;
    /* the value stored under each spill slot, so that a reload can read it */
@@ -391,7 +395,11 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             if (!a->dst.write_low_sub_reg && !a->dst.write_high_sub_reg)
                continue;
             bool pinned = a->dst.index >= 64 && a->dst.index < 72;
-            if ((a->dst.index >= 16 && a->dst.index != 31 && !pinned) ||
+            bool quad = deriv && a->dst.index == 32 &&
+                        a->condition == FP_CONDITION_ALWAYS &&
+                        a->dst.write_low_sub_reg && a->dst.write_high_sub_reg;
+            if ((a->dst.index >= 16 && a->dst.index != 31 && !pinned &&
+                 !quad) ||
                 (a->condition != FP_CONDITION_ALWAYS && !pinned) ||
                 (pinned &&
                  a->dst.write_low_sub_reg == a->dst.write_high_sub_reg)) {
@@ -412,6 +420,16 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
                }
                if (reload_def >= 0 && src->index == 12) {
                   op->src_def[k] = reload_def;
+                  continue;
+               }
+               if (deriv && src->index >= 32 && src->index < 64 &&
+                   src->index % 8 == 0) {
+                  /* a pixel of the quad published by the last r32 write */
+                  if (cur.quad < 0) {
+                     ok = false;
+                     break;
+                  }
+                  op->src_def[k] = cur.quad;
                   continue;
                }
                if (src->index >= 16 && cur_slot(src->index) < 0)
@@ -465,6 +483,7 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
                   s->defs[d].fixed_reg = a->dst.index;
                   s->defs[d].fixed_half = a->dst.write_low_sub_reg ? 0 : 1;
                }
+               s->defs[d].quad = quad;
                op->dst_def = d;
                pending[npend].op = oi;
                pending[npend].reg = a->dst.index;
@@ -476,6 +495,24 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
          }
          /* the slots of a packet read before any of them writes */
          for (unsigned n = 0; n < npend && ok; n++) {
+            if (s->defs[pending[n].def].quad) {
+               /* the next value may only be published once every read of the
+                * one it replaces is placed */
+               struct l2_op *w = &s->ops[pending[n].op];
+               if (cur.quad >= 0) {
+                  const struct l2_def *pd = &s->defs[cur.quad];
+                  w->pre[w->num_pre++] = pd->writer;
+                  for (unsigned r = 0; r < pd->num_readers; r++)
+                     if (pd->readers[r] != pending[n].op && w->num_pre < 24)
+                        w->pre[w->num_pre++] = pd->readers[r];
+                  if (w->num_pre >= 24) {
+                     ok = false;
+                     break;
+                  }
+               }
+               cur.quad = pending[n].def;
+               continue;
+            }
             int sl = cur_slot(pending[n].reg);
             if (sl < 0) {
                ok = false;
@@ -665,6 +702,9 @@ l2_fold_copies(struct l2 *s)
          continue;
       struct l2_def *x = &s->defs[cp->src_def[0]];
       struct l2_def *y = &s->defs[cp->dst_def];
+      /* the quad exchange has its own timing: leave those copies alone */
+      if (x->quad || y->quad)
+         continue;
       /* a copy between values of the same width: the readers of the copy
        * read its source instead (copy propagation) */
       if (uses[cp->src_def[0]] != 1 && s->prop && !x->dead && x->tie_k < 0 &&
@@ -746,6 +786,15 @@ visible(const struct l2 *s, int def, int64_t g, unsigned step,
    if (!d->written)
       return false;
    bool earlier_round = (unsigned)(d->step / s->rows) < step / s->rows;
+   if (d->quad) {
+      /* the value of the quad port only lives exactly two packets after the
+       * write, inside one round (docs/grate-derivatives.md; NVIDIA's code
+       * always reads it there, and a read across the round boundary gave
+       * zeros on hardware: grate-derivative-test, linear) */
+      if (unit_reader)
+         return false;
+      return g == d->issue + 2 && d->step / s->rows == step / s->rows;
+   }
    if (unit_reader) {
       /* a unit reads at the start of its round: only earlier rounds, or
        * another unit's write on the same step (experiments d1-d4) */
@@ -773,7 +822,7 @@ fwd_slot(const struct l2 *s, const struct l2_op *op, unsigned k, int64_t g,
    if (getenv("GRATE_LAYOUT_FWD_SAME_STEP") &&
        s->defs[op->src_def[k]].step != (int)step)
       return -1;
-   if (!d->written || s->ops[d->writer].kind != L2_ALU)
+   if (!d->written || d->quad || s->ops[d->writer].kind != L2_ALU)
       return -1;
    const struct l2_op *p = &s->ops[d->writer];
    if (!p->placed || d->issue != g - 1 ||
@@ -930,6 +979,10 @@ place_alu(struct l2 *s, struct l2_op *op, unsigned step, int64_t g,
 {
    if (!ops_ready(s, op, g, step))
       return false;
+   /* the reads of a quad write need the packet two after it in the same round */
+   if (op->dst_def >= 0 && s->defs[op->dst_def].quad &&
+       step % s->rows == s->rows - 1)
+      return false;
    if (op->dst_def >= 0 && s->defs[op->dst_def].tie_k >= 0) {
       int cls = cls_find(s, s->defs[op->dst_def].cls);
       if (s->cls_row[cls] < 0) {
@@ -964,6 +1017,54 @@ place_alu(struct l2 *s, struct l2_op *op, unsigned step, int64_t g,
    op->packet = packet;
    op->slot = slot;
    return true;
+}
+
+/* An operation that reads the quad port has to go at the one packet where the
+ * value lives: it comes before the others */
+static int
+op_priority(const struct l2 *s, const struct l2_op *op, int64_t g,
+            unsigned step)
+{
+   int bonus = 0;
+   if (op->kind == L2_ALU)
+      for (unsigned k = 0; k < 3; k++)
+         if (op->src_def[k] >= 0 && s->defs[op->src_def[k]].quad &&
+             visible(s, op->src_def[k], g, step, false))
+            bonus = 1000;
+   return op->height + bonus;
+}
+
+static bool
+reads_quad(const struct l2 *s, const struct l2_op *op)
+{
+   if (op->kind != L2_ALU)
+      return false;
+   for (unsigned k = 0; k < 3; k++)
+      if (op->src_def[k] >= 0 && s->defs[op->src_def[k]].quad)
+         return true;
+   return false;
+}
+
+static bool
+writes_quad(const struct l2 *s, const struct l2_op *op)
+{
+   return op->kind == L2_ALU && op->dst_def >= 0 &&
+          s->defs[op->dst_def].quad;
+}
+
+/* NVIDIA never writes the quad port in a packet that reads it (a write in the
+ * packet of a read gave zeros on hardware: grate-derivative-test, uniforms) */
+static bool
+quad_packet_conflict(const struct l2 *s, const struct l2_op *op,
+                     const int *picked, unsigned np)
+{
+   for (unsigned i = 0; i < np; i++) {
+      const struct l2_op *o = &s->ops[picked[i]];
+      if ((writes_quad(s, op) && reads_quad(s, o)) ||
+          (reads_quad(s, op) && writes_quad(s, o)))
+         return true;
+   }
+   return false;
 }
 
 static void
@@ -1076,13 +1177,15 @@ l2_schedule(struct l2 *s)
                   continue;
                if (!ops_ready(s, op, g, t))
                   continue;
-               if (best < 0 || op->height > s->ops[best].height)
+               if (best < 0 || op_priority(s, op, g, t) >
+                                  op_priority(s, &s->ops[best], g, t))
                   best = i;
             }
             /* try the best candidates in order until one is placed */
             bool placed = false;
             while (best >= 0) {
-               if (place_alu(s, &s->ops[best], t, g, p, np)) {
+               if (!quad_packet_conflict(s, &s->ops[best], picked, np) &&
+                   place_alu(s, &s->ops[best], t, g, p, np)) {
                   picked[np++] = best;
                   placed = true;
                   break;
@@ -1097,10 +1200,11 @@ l2_schedule(struct l2 *s)
                      continue;
                   if (!ops_ready(s, op, g, t))
                      continue;
-                  if (s->ops[best].height < op->height ||
-                      (s->ops[best].height == op->height && (int)i < best))
+                  int pi = op_priority(s, op, g, t),
+                      pb = op_priority(s, &s->ops[best], g, t);
+                  if (pb < pi || (pb == pi && (int)i < best))
                      continue;
-                  if (next < 0 || op->height > s->ops[next].height)
+                  if (next < 0 || pi > op_priority(s, &s->ops[next], g, t))
                      next = i;
                }
                best = next;
@@ -1279,7 +1383,7 @@ l2_allocate(struct l2 *s)
       for (unsigned d = 0; d < s->num_defs; d++) {
          struct l2_def *def = &s->defs[d];
          def->reg_free =
-            !def->dead && def->width == 2 && def->tie_k < 0 &&
+            !def->dead && !def->quad && def->width == 2 && def->tie_k < 0 &&
             def->fixed_reg < 0 && uses[d] > 0 && uses[d] == fwds[d] &&
             s->ops[def->writer].kind == L2_ALU &&
             s->ops[def->writer].alu.condition == FP_CONDITION_ALWAYS;
@@ -1392,7 +1496,7 @@ l2_allocate(struct l2 *s)
       int pick = -1;
       for (unsigned d = 0; d < s->num_defs; d++) {
          if (done[d] || s->defs[d].tie_k >= 0 || s->defs[d].fixed_reg >= 0 ||
-             s->defs[d].reg_free || s->defs[d].dead)
+             s->defs[d].reg_free || s->defs[d].dead || s->defs[d].quad)
             continue;
          if (pick < 0 || s->defs[d].land < s->defs[pick].land)
             pick = d;
@@ -1462,6 +1566,8 @@ rewrite_src(const struct l2 *s, struct fp_alu_src_operand *src, int def)
    if (def < 0)
       return;
    const struct l2_def *d = &s->defs[def];
+   if (d->quad) /* r32/r40/r48/r56 stay as the emitter wrote them */
+      return;
    src->index = d->reg;
    if (d->width == 1) {
       src->datatype = FP_DATATYPE_FIXED10;
@@ -1526,7 +1632,7 @@ l2_rebuild(struct l2 *s, struct grate_fp_shader *fp,
                   a->src[k].sub_reg_select_high = d->width == 2 ? 0 : d->half;
                }
             }
-            if (op->dst_def >= 0) {
+            if (op->dst_def >= 0 && !s->defs[op->dst_def].quad) {
                const struct l2_def *d = &s->defs[op->dst_def];
                a->dst.index = d->reg_free ? 31 : d->reg;
                a->dst.write_low_sub_reg = d->width == 2 || d->half == 0;
@@ -1636,7 +1742,8 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
    } cands[8 * ARRAY_SIZE(windows)];
    unsigned num_cands = 0;
 
-   for (unsigned rows = 1; rows <= 4; rows++) {
+   /* the quad exchange needs three register rows, as in NVIDIA's code */
+   for (unsigned rows = fp->uses_derivatives ? 3 : 1; rows <= 4; rows++) {
       for (unsigned w = 0; w < 2 * ARRAY_SIZE(windows); w++) {
          memset(s, 0, sizeof(*s));
          s->rows = rows;
