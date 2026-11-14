@@ -1200,11 +1200,17 @@ emit_fp_blocks(struct util_dynarray *buf, enum drm_tegra_soc_id soc_id,
 #define GRATE_FP_MAX_EPOCH_MFUS 61
 
 static void
-epoch_note_constants(const struct fp_alu_instr_packet *packet, uint32_t *bits)
+epoch_note_constants(const struct fp_alu_instr_packet *packet, uint32_t *bits,
+                     bool derivatives)
 {
    for (unsigned slot = 0; slot < 4; slot++) {
       for (unsigned i = 0; i < 4; i++) {
          unsigned index = packet->slots[slot].src[i].index;
+         /* with derivatives the logical constants 0, 8, 16, ... are
+          * reserved: reads of r32, r40, r48 and r56 are the quad exchange,
+          * not constants */
+         if (derivatives && index >= 32 && (index - 32) % 8 == 0)
+            continue;
          if (index >= 32 && index - 32 < GRATE_FP_MAX_LOGICAL_CONSTANTS)
             bits[(index - 32) / 32] |= 1u << ((index - 32) % 32);
       }
@@ -1249,6 +1255,12 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
       CALLOC(num_rounds + 1, sizeof(*round_bits));
    unsigned *round_packets = CALLOC(num_rounds + 1, sizeof(unsigned));
    unsigned *round_mfus = CALLOC(num_rounds + 1, sizeof(unsigned));
+   unsigned *round_first_packet = CALLOC(num_rounds + 1, sizeof(unsigned));
+   bool *unsafe_cut = CALLOC(num_rounds + 1, sizeof(bool));
+   /* the constants an epoch can hold: the quad exchange registers r32, r40,
+    * r48 and r56 take four of the 32 bank slots */
+   const unsigned max_constants =
+      fp->uses_derivatives ? GRATE_FP_MAX_CONSTANTS - 4 : GRATE_FP_MAX_CONSTANTS;
    struct grate_fp_epochs *epochs = CALLOC_STRUCT(grate_fp_epochs);
    unsigned begin[GRATE_FP_MAX_EPOCHS + 1]; /* first round of each epoch */
    struct util_dynarray program;
@@ -1257,13 +1269,12 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
 
    util_dynarray_init(&program, NULL);
    if (!steps || !packets || !mfus || !round_bits || !round_packets ||
-       !round_mfus || !epochs) {
+       !round_mfus || !round_first_packet || !unsafe_cut || !epochs) {
       why = "out of memory";
       goto fail;
    }
-   if (fp->uses_derivatives || has_spills) {
-      why = fp->uses_derivatives ? "derivatives need constant slots 0, 8, 16, 24"
-                                 : "register spills";
+   if (has_spills) {
+      why = "register spills";
       goto fail;
    }
 
@@ -1284,6 +1295,8 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
       const struct fp_sched *alu = &steps[i]->alu_sched;
       const struct fp_sched *mfu = &steps[i]->mfu_sched;
 
+      if (i % rows == 0)
+         round_first_packet[i / rows] = next_packet;
       if (alu->num_instructions) {
          if (alu->address < next_packet ||
              alu->address + alu->num_instructions > num_packets) {
@@ -1294,7 +1307,7 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
          round_packets[i / rows] += alu->num_instructions;
          for (int j = 0; j < alu->num_instructions; j++)
             epoch_note_constants(packets[alu->address + j],
-                                 round_bits[i / rows]);
+                                 round_bits[i / rows], fp->uses_derivatives);
       }
       if (mfu->num_instructions) {
          if (mfu->address < next_mfu ||
@@ -1307,15 +1320,43 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
       }
    }
 
+   /* A read of the quad exchange (r32, r40, r48, r56) only works at the
+    * distance of the write to r32 that it belongs to, so an epoch must not
+    * start between the write and its last read. */
+   if (fp->uses_derivatives) {
+      int last_write = -1;
+      for (unsigned p = 0; p < num_packets; p++) {
+         bool reads = false, writes = false;
+         for (unsigned slot = 0; slot < 4; slot++) {
+            const struct fp_alu_instr *op = &packets[p]->slots[slot];
+            for (unsigned i = 0; i < 4; i++) {
+               unsigned index = op->src[i].index;
+               reads |= index >= 32 && index < 64 && (index - 32) % 8 == 0;
+            }
+            writes |= (op->dst.write_low_sub_reg ||
+                       op->dst.write_high_sub_reg) && op->dst.index == 32;
+         }
+         if (reads && last_write >= 0) {
+            for (unsigned r = 1; r < num_rounds; r++) {
+               if ((int)round_first_packet[r] > last_write &&
+                   round_first_packet[r] <= p)
+                  unsafe_cut[r] = true;
+            }
+         }
+         if (writes)
+            last_write = p;
+      }
+   }
+
    /* Fill an epoch with rounds while their constants fit the bank. */
    uint32_t bits[GRATE_FP_LOGICAL_WORDS] = {0};
    unsigned epoch_steps = 0, epoch_packets = 0, epoch_mfus = 0;
    begin[0] = 0;
-   for (unsigned r = 0; r < num_rounds; r++) {
+   for (unsigned r = 0; r < num_rounds;) {
       uint32_t merged[GRATE_FP_LOGICAL_WORDS];
       unsigned round_steps = MIN2(rows, num_steps - r * rows);
 
-      if (epoch_count_bits(round_bits[r]) > GRATE_FP_MAX_CONSTANTS ||
+      if (epoch_count_bits(round_bits[r]) > max_constants ||
           round_steps > GRATE_FP_MAX_EPOCH_STEPS ||
           round_packets[r] > GRATE_FP_MAX_EPOCH_PACKETS ||
           round_mfus[r] > GRATE_FP_MAX_EPOCH_MFUS) {
@@ -1325,22 +1366,40 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
       for (unsigned i = 0; i < GRATE_FP_LOGICAL_WORDS; i++)
          merged[i] = bits[i] | round_bits[r][i];
       if (epoch_steps &&
-          (epoch_count_bits(merged) > GRATE_FP_MAX_CONSTANTS ||
+          (epoch_count_bits(merged) > max_constants ||
            epoch_steps + round_steps > GRATE_FP_MAX_EPOCH_STEPS ||
            epoch_packets + round_packets[r] > GRATE_FP_MAX_EPOCH_PACKETS ||
            epoch_mfus + round_mfus[r] > GRATE_FP_MAX_EPOCH_MFUS)) {
+         /* start the next epoch at the latest round boundary that does not
+          * cut a quad exchange, and fill it again from there */
+         unsigned cut = r;
+         while (cut > begin[count] && unsafe_cut[cut])
+            cut--;
+         if (cut == begin[count]) {
+            why = "a derivative sequence does not fit an epoch";
+            goto fail;
+         }
          if (++count == GRATE_FP_MAX_EPOCHS) {
             why = "more than five epochs";
             goto fail;
          }
-         begin[count] = r;
+         begin[count] = cut;
+         memset(bits, 0, sizeof(bits));
          epoch_steps = epoch_packets = epoch_mfus = 0;
-         memcpy(merged, round_bits[r], sizeof(merged));
+         for (unsigned q = cut; q < r; q++) {
+            for (unsigned i = 0; i < GRATE_FP_LOGICAL_WORDS; i++)
+               bits[i] |= round_bits[q][i];
+            epoch_steps += MIN2(rows, num_steps - q * rows);
+            epoch_packets += round_packets[q];
+            epoch_mfus += round_mfus[q];
+         }
+         continue;
       }
       memcpy(bits, merged, sizeof(bits));
       epoch_steps += round_steps;
       epoch_packets += round_packets[r];
       epoch_mfus += round_mfus[r];
+      r++;
    }
    begin[++count] = num_rounds;
    epochs->count = count;
@@ -1416,7 +1475,19 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
 
                if (src->index < 32 || id >= GRATE_FP_MAX_LOGICAL_CONSTANTS)
                   continue;
+               /* a read of the quad exchange, not a constant */
+               if (fp->uses_derivatives && id % 8 == 0)
+                  continue;
                if (slot_of[id] < 0) {
+                  /* the bank slots 0, 8, 16 and 24 belong to the quad
+                   * exchange: leave them empty */
+                  while (fp->uses_derivatives &&
+                         epoch->num_constants < GRATE_FP_MAX_CONSTANTS &&
+                         epoch->num_constants % 8 == 0) {
+                     epoch->constants[epoch->num_constants].word = -1;
+                     epoch->constants[epoch->num_constants].immediate = 0.0f;
+                     epoch->num_constants++;
+                  }
                   if (epoch->num_constants == GRATE_FP_MAX_CONSTANTS) {
                      why = "an epoch reads more constants than the bank holds";
                      free_epoch_lists(&epoch_steps_list, &epoch_mfus,
@@ -1484,6 +1555,8 @@ split_into_epochs(struct grate_fp_shader *fp, enum drm_tegra_soc_id soc_id,
    FREE(round_bits);
    FREE(round_packets);
    FREE(round_mfus);
+   FREE(round_first_packet);
+   FREE(unsafe_cut);
    return true;
 
 fail:
@@ -1496,6 +1569,8 @@ fail:
    FREE(round_bits);
    FREE(round_packets);
    FREE(round_mfus);
+   FREE(round_first_packet);
+   FREE(unsafe_cut);
    FREE(epochs);
    return false;
 }
