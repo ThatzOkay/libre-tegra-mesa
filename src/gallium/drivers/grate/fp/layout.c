@@ -41,6 +41,14 @@ struct lo_write {
 
 struct lo_eval {
    bool sequential;
+   /* The quad exchange of derivatives: a write to r32 publishes the value to
+    * the 2x2 quad, and r32, r40, r48 and r56 return the four pixels'
+    * values exactly two packets later (docs/grate-derivatives.md). */
+   bool derivatives;
+   bool quad_valid;
+   uint64_t quad_value;
+   int64_t quad_g;
+   int quad_round;
    unsigned rows;
    struct lo_write writes[LO_MAX_WRITES];
    unsigned num_writes;
@@ -211,6 +219,21 @@ lo_leaf(const struct lo_eval *e, const struct fp_alu_src_operand *s,
          leaf = lo_fwd.v[k];
       else
          leaf = mix(0xbadf0, k); /* reads zero or garbage on hardware */
+   } else if (e->derivatives && reg >= 32 && reg < 64 && reg % 8 == 0) {
+      /* the register of one pixel of the quad; on hardware the value only
+       * lives at exactly this distance from the write */
+      /* NVIDIA's code reads exactly two packets after the write, inside one
+       * round; the emitter's layout also reads in the round after the write
+       * (checked on hardware with the derivative tests) */
+      if (e->quad_valid &&
+          (e->sequential ||
+           (round == e->quad_round && q == e->quad_g + 2) ||
+           round == e->quad_round + 1)) {
+         uint64_t a[] = {0x9ad0, reg, e->quad_value};
+         leaf = mixn(3, a);
+      } else {
+         leaf = mix(0xbad9ad, reg);
+      }
    } else {
       uint64_t a[] = {0x57a7, reg, s->datatype, s->sub_reg_select_high};
       leaf = mixn(4, a);
@@ -235,6 +258,8 @@ lo_supported_packet(struct lo_eval *e, const struct fp_alu_instr_packet *p)
    for (unsigned sl = 0; sl < 4; sl++) {
       const struct fp_alu_instr *a = &p->slots[sl];
       if (!a->dst.write_low_sub_reg && !a->dst.write_high_sub_reg)
+         continue;
+      if (e->derivatives && a->dst.index == 32 && a->condition == FP_CONDITION_ALWAYS)
          continue;
       if (!lo_reg_ok(a->dst.index) && a->dst.index != 31) {
          if (getenv("GRATE_PACKING_DEBUG"))
@@ -365,6 +390,8 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
    static struct lo_eval e_storage;
    struct lo_eval *e = &e_storage;
    e->sequential = sequential;
+   e->derivatives = fp->uses_derivatives;
+   e->quad_valid = false;
    e->rows = sequential ? 1 : MAX2(fp->info.num_rows, 1);
    e->num_writes = 0;
    e->why = NULL;
@@ -476,6 +503,8 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
             unsigned width;
          } res[4];
          unsigned nres = 0;
+         bool quad_pending = false;
+         uint64_t quad_pending_value = 0;
          uint64_t fv[4] = {0};
          unsigned fm[4] = {0};
          for (unsigned sl = 0; sl < 4; sl++) {
@@ -518,6 +547,12 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
                      (a->dst.write_high_sub_reg ? 2 : 0);
             if (a->dst.index == 31)
                continue;
+            if (e->derivatives && a->dst.index == 32) {
+               /* published when the packet is done, after its reads */
+               quad_pending = true;
+               quad_pending_value = v;
+               continue;
+            }
             res[nres].n = 0;
             if (a->dst.write_low_sub_reg)
                res[nres].loc[res[nres].n++] = a->dst.index * 2;
@@ -531,6 +566,12 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
             for (unsigned k = 0; k < res[r].n; k++)
                lo_write(e, res[r].loc[k], res[r].v, res[r].width, g,
                         sequential ? g + 1 : g + 2, round);
+         if (quad_pending) {
+            e->quad_valid = true;
+            e->quad_value = quad_pending_value;
+            e->quad_g = g;
+            e->quad_round = round;
+         }
          /* the next packet can read these results as R24-R27 */
          lo_fwd.valid = !sequential;
          lo_fwd.g = g;
