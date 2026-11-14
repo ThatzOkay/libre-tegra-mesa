@@ -1451,6 +1451,30 @@ l2_allocate(struct l2 *s)
       }
    }
 
+   if (s->verbose) {
+      /* half-registers live at each packet, to compare with NVIDIA's code */
+      unsigned maxlive = 0, at = 0;
+      for (int64_t g = 0; g < total; g++) {
+         unsigned live = 0;
+         for (unsigned d = 0; d < s->num_defs; d++) {
+            const struct l2_def *def = &s->defs[d];
+            if (def->dead || def->quad || def->reg_free || !def->written ||
+                s->ops[def->writer].dead)
+               continue;
+            if (def->start <= g && g <= def->last_read)
+               live += def->width;
+         }
+         if (live > maxlive) {
+            maxlive = live;
+            at = g;
+         }
+      }
+      fprintf(stderr,
+              "GRATE LAYOUT2: rows %u: %lld packets, at most %u.%u registers "
+              "live (packet %u)\n",
+              s->rows, (long long)total, maxlive / 2, (maxlive % 2) * 5, at);
+   }
+
    /* tied and pinned values first, they have no choice */
    for (unsigned d = 0; d < s->num_defs; d++) {
       struct l2_def *def = &s->defs[d];
