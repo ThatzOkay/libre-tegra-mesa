@@ -28,6 +28,14 @@ struct tgsi_full_instruction;
 /* Constants a program may use before it is split into epochs of at most
  * GRATE_FP_MAX_CONSTANTS each. */
 #define GRATE_FP_MAX_LOGICAL_CONSTANTS 192
+
+/* Constants the driver supplies, not the application: a constant whose word is
+ * GRATE_FP_DRIVER_WORD_BASE + n takes the value of driver constant n when the
+ * bank is uploaded (grate_state.c). 0: the viewport's depth scale, 1: its depth
+ * translate (what gl_FragCoord.z needs). */
+#define GRATE_FP_DRIVER_WORD_BASE 0x1c000 /* vec4 index 0x7000: a TGSI register index has 16 bits */
+#define GRATE_FP_DRIVER_Z_SCALE   (GRATE_FP_DRIVER_WORD_BASE + 0)
+#define GRATE_FP_DRIVER_Z_OFFSET  (GRATE_FP_DRIVER_WORD_BASE + 1)
 #define GRATE_FP_UNIFORM_COMPONENTS 256
 
 struct grate_vp_shader {

@@ -2581,19 +2581,26 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
          }
       }
 
-      /* The position registers hold the integer pixel coordinates plus 8192
-       * (measured: R72 is 8192 + x, R73 is 8192 + y counted from the bottom,
-       * grate-fragcoord-test). Take the bias off once, at the start:
-       * TEMP[t].xy = SV[0].xy - 8192, and read x and y from the temporary. */
-      unsigned pos_xy_reads = 0;
+      /* gl_FragCoord comes from two places. x and y: the position registers
+       * hold the integer pixel coordinates plus 8192 (measured: R72 is
+       * 8192 + x, R73 is 8192 + y counted from the top, grate-fragcoord-test).
+       * z and w: NVIDIA's compiler interpolates the vertex position (tram row
+       * of vertex output 0, perspective correct, so it yields the clip
+       * coordinates of the pixel) and takes w = 1 / w_clip and
+       * z = z_clip / w_clip * depth scale + depth offset, with the scale and
+       * the offset of the viewport as constants. All reads of the position
+       * read one temporary that is filled at the start of the program. */
+      unsigned pos_reads = 0;
       util_dynarray_foreach (&instructions, struct tgsi_full_instruction,
                              pos_inst) {
          for (unsigned i = 0; i < pos_inst->Instruction.NumSrcRegs; i++)
             if (pos_inst->Src[i].Register.File == TGSI_FILE_SYSTEM_VALUE)
-               pos_xy_reads |= tgsi_util_get_inst_usage_mask(pos_inst, i);
+               pos_reads |= tgsi_util_get_inst_usage_mask(pos_inst, i);
       }
-      if ((pos_xy_reads & 0x3) && fp->num_temporaries < GRATE_FP_MAX_TEMPS &&
-          fp->num_immediates < GRATE_FP_MAX_IMMEDIATES) {
+      const bool pos_zw = pos_reads & 0xc;
+      if (pos_reads && fp->num_temporaries < GRATE_FP_MAX_TEMPS &&
+          fp->num_immediates < GRATE_FP_MAX_IMMEDIATES &&
+          (!pos_zw || fp->info.num_inputs < 15)) {
          unsigned temp = fp->num_temporaries++;
          unsigned imm = fp->num_immediates++;
          fp->immediates[imm][0] = -8192.0f;
@@ -2603,41 +2610,87 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                                 pos_inst) {
             for (unsigned i = 0; i < pos_inst->Instruction.NumSrcRegs; i++) {
                struct tgsi_src_register *reg = &pos_inst->Src[i].Register;
-               if (reg->File == TGSI_FILE_SYSTEM_VALUE &&
-                   !(tgsi_util_get_inst_usage_mask(pos_inst, i) & 0xc)) {
+               if (reg->File == TGSI_FILE_SYSTEM_VALUE) {
                   reg->File = TGSI_FILE_TEMPORARY;
                   reg->Index = temp;
                }
             }
          }
-         struct tgsi_full_instruction bias;
-         memset(&bias, 0, sizeof(bias));
-         bias.Instruction.Type = TGSI_TOKEN_TYPE_INSTRUCTION;
-         bias.Instruction.NrTokens = 1;
-         bias.Instruction.Opcode = TGSI_OPCODE_ADD;
-         bias.Instruction.NumDstRegs = 1;
-         bias.Instruction.NumSrcRegs = 2;
-         bias.Dst[0].Register.File = TGSI_FILE_TEMPORARY;
-         bias.Dst[0].Register.Index = temp;
-         bias.Dst[0].Register.WriteMask = TGSI_WRITEMASK_XY;
-         bias.Src[0].Register.File = TGSI_FILE_SYSTEM_VALUE;
-         bias.Src[0].Register.Index = 0;
-         bias.Src[0].Register.SwizzleX = TGSI_SWIZZLE_X;
-         bias.Src[0].Register.SwizzleY = TGSI_SWIZZLE_Y;
-         bias.Src[0].Register.SwizzleZ = TGSI_SWIZZLE_X;
-         bias.Src[0].Register.SwizzleW = TGSI_SWIZZLE_X;
-         bias.Src[1].Register.File = TGSI_FILE_IMMEDIATE;
-         bias.Src[1].Register.Index = imm;
-         /* SwizzleX/Y/Z/W of the immediate: all X (value 0) */
-         util_dynarray_append_typed(&instructions,
-                                    struct tgsi_full_instruction, bias);
-         /* the bias goes first */
-         struct tgsi_full_instruction *code = instructions.data;
+
+         struct tgsi_full_instruction fill[6];
+         unsigned nfill = 0;
+         memset(fill, 0, sizeof(fill));
+#define FILL_INST(op_, nsrc_, mask_)                                         \
+   ({                                                                        \
+      struct tgsi_full_instruction *f_ = &fill[nfill++];                     \
+      f_->Instruction.Type = TGSI_TOKEN_TYPE_INSTRUCTION;                    \
+      f_->Instruction.NrTokens = 1;                                          \
+      f_->Instruction.Opcode = (op_);                                        \
+      f_->Instruction.NumDstRegs = 1;                                        \
+      f_->Instruction.NumSrcRegs = (nsrc_);                                  \
+      f_->Dst[0].Register.File = TGSI_FILE_TEMPORARY;                        \
+      f_->Dst[0].Register.Index = temp;                                      \
+      f_->Dst[0].Register.WriteMask = (mask_);                               \
+      f_;                                                                    \
+   })
+#define FILL_SRC(inst_, n_, file_, index_, sw_)                              \
+   do {                                                                      \
+      (inst_)->Src[n_].Register.File = (file_);                              \
+      (inst_)->Src[n_].Register.Index = (index_);                            \
+      (inst_)->Src[n_].Register.SwizzleX = (sw_)[0];                         \
+      (inst_)->Src[n_].Register.SwizzleY = (sw_)[1];                         \
+      (inst_)->Src[n_].Register.SwizzleZ = (sw_)[2];                         \
+      (inst_)->Src[n_].Register.SwizzleW = (sw_)[3];                         \
+   } while (0)
+         static const unsigned xyxx[4] = {0, 1, 0, 0}, xxxx[4] = {0, 0, 0, 0},
+                               yyyy[4] = {1, 1, 1, 1}, zzzz[4] = {2, 2, 2, 2},
+                               wwww[4] = {3, 3, 3, 3};
+         if (pos_reads & 0x3) {
+            /* t.xy = position.xy - 8192 */
+            struct tgsi_full_instruction *f = FILL_INST(
+               TGSI_OPCODE_ADD, 2, TGSI_WRITEMASK_XY);
+            FILL_SRC(f, 0, TGSI_FILE_SYSTEM_VALUE, 0, xyxx);
+            FILL_SRC(f, 1, TGSI_FILE_IMMEDIATE, imm, xxxx);
+         }
+         if (pos_zw) {
+            /* the vertex position as one more fragment input (tram row) */
+            unsigned row = fp->info.num_inputs;
+            fp->info.inputs[row].src = LINK_SRC(0) | (row << 9);
+            fp->info.inputs[row].dst = 0;
+            for (int i = 0; i < 4; ++i)
+               fp->info.inputs[row].dst |= LINK_DST(i, i, LINK_DST_FP20);
+            fp->info.num_inputs++;
+            const unsigned k = GRATE_FP_DRIVER_WORD_BASE / 4;
+            /* t.w = 1 / w_clip (gl_FragCoord.w) */
+            struct tgsi_full_instruction *f =
+               FILL_INST(TGSI_OPCODE_RCP, 1, TGSI_WRITEMASK_W);
+            FILL_SRC(f, 0, TGSI_FILE_INPUT, row, wwww);
+            /* t.z = z_clip * t.w */
+            f = FILL_INST(TGSI_OPCODE_MUL, 2, TGSI_WRITEMASK_Z);
+            FILL_SRC(f, 0, TGSI_FILE_INPUT, row, zzzz);
+            FILL_SRC(f, 1, TGSI_FILE_TEMPORARY, temp, wwww);
+            /* t.z = t.z * depth scale + depth offset (gl_FragCoord.z); the
+             * compiler has no MAD */
+            f = FILL_INST(TGSI_OPCODE_MUL, 2, TGSI_WRITEMASK_Z);
+            FILL_SRC(f, 0, TGSI_FILE_TEMPORARY, temp, zzzz);
+            FILL_SRC(f, 1, TGSI_FILE_CONSTANT, k, xxxx);
+            f = FILL_INST(TGSI_OPCODE_ADD, 2, TGSI_WRITEMASK_Z);
+            FILL_SRC(f, 0, TGSI_FILE_TEMPORARY, temp, zzzz);
+            FILL_SRC(f, 1, TGSI_FILE_CONSTANT, k, yyyy);
+         }
+#undef FILL_INST
+#undef FILL_SRC
+         /* the fill instructions go first */
          unsigned count = util_dynarray_num_elements(
             &instructions, struct tgsi_full_instruction);
-         struct tgsi_full_instruction last = code[count - 1];
-         memmove(code + 1, code, (count - 1) * sizeof(*code));
-         code[0] = last;
+         for (unsigned i = 0; i < nfill; i++)
+            util_dynarray_append_typed(&instructions,
+                                       struct tgsi_full_instruction, fill[i]);
+         struct tgsi_full_instruction *code = instructions.data;
+         struct tgsi_full_instruction moved[6];
+         memcpy(moved, code + count, nfill * sizeof(*code));
+         memmove(code + nfill, code, count * sizeof(*code));
+         memcpy(code, moved, nfill * sizeof(*code));
       }
    }
 

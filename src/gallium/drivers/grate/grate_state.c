@@ -166,6 +166,8 @@ grate_set_viewport_states(struct pipe_context *pcontext,
    assert(num_viewports == 1);
    assert(start_slot == 0);
 
+   context->viewport_z_scale = viewports[0].scale[2];
+   context->viewport_z_translate = viewports[0].translate[2];
    context->viewport[0] = host1x_opcode_incr(REG_TGR3D_SU_VIEWPORT_X, 6);
    context->viewport[1] = u_bitcast_f2u(viewports[0].translate[0] * 16.0f);
    context->viewport[2] = u_bitcast_f2u(viewports[0].translate[1] * 16.0f);
@@ -873,6 +875,21 @@ fragment_fp20(float value)
    return sign | ((uint32_t)adjusted << 13) | ((bits & 0x7fffff) >> 10);
 }
 
+
+/* The value of a constant the driver supplies, see GRATE_FP_DRIVER_WORD_BASE */
+static float
+grate_fp_driver_constant(const struct grate_context *context, int word)
+{
+   switch (word) {
+   case GRATE_FP_DRIVER_Z_SCALE:
+      return context->viewport_z_scale;
+   case GRATE_FP_DRIVER_Z_OFFSET:
+      return context->viewport_z_translate;
+   default:
+      return 0.0f;
+   }
+}
+
 static void
 emit_fs_uniforms(struct grate_context *context, uint32_t **ptrp)
 {
@@ -888,7 +905,9 @@ emit_fs_uniforms(struct grate_context *context, uint32_t **ptrp)
    for (unsigned i = 0; i < info->num_constants; i++) {
       float value = info->constants[i].immediate;
       int word = info->constants[i].word;
-      if (word >= 0) {
+      if (word >= GRATE_FP_DRIVER_WORD_BASE) {
+         value = grate_fp_driver_constant(context, word);
+      } else if (word >= 0) {
          assert(cb->user_buffer &&
                 ((unsigned)word + 1) * sizeof(float) <= cb->buffer_size);
          memcpy(&value,
@@ -970,7 +989,9 @@ emit_epochs(struct grate_context *context, struct grate_fp_epochs *epochs,
       for (unsigned j = 0; j < epoch->num_constants; j++) {
          float value = epoch->constants[j].immediate;
          int word = epoch->constants[j].word;
-         if (word >= 0) {
+         if (word >= GRATE_FP_DRIVER_WORD_BASE) {
+            value = grate_fp_driver_constant(context, word);
+         } else if (word >= 0) {
             value = 0;
             if (cb->user_buffer &&
                 ((unsigned)word + 1) * sizeof(float) <= cb->buffer_size)
