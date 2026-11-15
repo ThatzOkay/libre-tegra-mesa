@@ -228,6 +228,12 @@ grate_screen_init_caps(struct grate_screen *screen)
 
    // Bool values
    caps->npot_textures = true; // not really, but mesa requires it for now!`
+   /* gl_FragCoord comes from R72/R73 (fp/tgsi.c): integer pixel coordinates
+    * counted from the top of the surface (measured with grate-fragcoord-test,
+    * window-system surfaces and FBOs alike); Mesa adds the half pixel and
+    * flips to the lower-left origin that GL asks for */
+   caps->fs_coord_origin_upper_left = true;
+   caps->fs_coord_pixel_center_integer = true;
    caps->blend_equation_separate = true;
    caps->max_dual_source_render_targets = 1;
    caps->vertex_color_unclamped = true;  // probably irrelevant for GLES2

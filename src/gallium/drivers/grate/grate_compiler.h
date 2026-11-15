@@ -138,6 +138,11 @@ struct grate_fp_shader {
    /* DDX/DDY use the quad exchange registers r32, r40, r48 and r56, which
     * the constants must not occupy. */
    bool uses_derivatives;
+   /* index of the TGSI system value with the POSITION semantic (gl_FragCoord), -1 none */
+   int position_sysval;
+   /* index of the fragment input with the POSITION semantic (gl_FragCoord), -1 none; it
+    * is not a varying: the inputs after it are numbered one lower */
+   int position_input;
    bool register_pressure;
    const struct tgsi_full_instruction *current_instruction;
    const struct tgsi_full_instruction *code_end;

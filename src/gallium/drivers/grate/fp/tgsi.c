@@ -518,6 +518,21 @@ fp_tgsi_src(struct grate_fp_shader *fp, const struct tgsi_src_register *src,
                             : fp_constant(fp, -1, imm);
       break;
    }
+   case TGSI_FILE_SYSTEM_VALUE:
+      /* gl_FragCoord: NVIDIA's compiler reads the window position from two
+       * special ALU source registers (cgtest on gl_FragCoord.x / .y: R72 is x,
+       * R73 is y). z and w are interpolated values, not done yet. */
+      if (src->Index == fp->position_sysval && comp < 2) {
+         value = (struct fp_alu_src_operand){.index = 72 + comp};
+      } else {
+         if (!fp->allocation_failed)
+            fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: gl_FragCoord.%c\n",
+                    "xyzw"[comp]);
+         fp->allocation_failed = true;
+         fp->register_pressure = false;
+         return fp_alu_src_zero();
+      }
+      break;
    case TGSI_FILE_CONSTANT:
       if (src->Indirect) {
          if (!fp->allocation_failed)
@@ -1755,7 +1770,32 @@ emit_tgsi_declaration(struct grate_fp_shader *fp, const struct tgsi_full_declara
       fp->num_temporaries = MAX2(fp->num_temporaries, decl->Range.Last + 1);
       break;
    case TGSI_FILE_INPUT:
-      emit_tgsi_input(fp, decl);
+      if (decl->Declaration.Semantic &&
+          decl->Semantic.Name == TGSI_SEMANTIC_POSITION) {
+         /* gl_FragCoord is not a varying (the inputs are declared in order,
+          * and POSITION is the first): reads of it become reads of the
+          * position registers, see grate_tgsi_to_fp() */
+         fp->position_input = decl->Range.First;
+         fp->position_sysval = 0;
+      } else if (fp->position_input >= 0 &&
+                 decl->Range.First > (unsigned)fp->position_input) {
+         struct tgsi_full_declaration shifted = *decl;
+         shifted.Range.First--;
+         shifted.Range.Last--;
+         emit_tgsi_input(fp, &shifted);
+      } else {
+         emit_tgsi_input(fp, decl);
+      }
+      break;
+   case TGSI_FILE_SYSTEM_VALUE:
+      if (decl->Declaration.Semantic &&
+          decl->Semantic.Name == TGSI_SEMANTIC_POSITION) {
+         fp->position_sysval = decl->Range.First;
+      } else {
+         fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: system value %s\n",
+                 tgsi_semantic_names[decl->Semantic.Name]);
+         fp->allocation_failed = true;
+      }
       break;
    }
 }
@@ -2477,6 +2517,8 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
    fp->allocation_failed = false;
    fp->spilling = spilling;
    fp->uses_derivatives = false;
+   fp->position_sysval = -1;
+   fp->position_input = -1;
    fp->avoid_rows = false;
    fp->register_pressure = false;
    fp->current_instruction = NULL;
@@ -2518,6 +2560,84 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
                                        struct tgsi_full_instruction,
                                        tgsi->FullToken.FullInstruction);
          break;
+      }
+   }
+
+   /* gl_FragCoord: reads of the POSITION input become reads of the position
+    * system value, and the inputs after it move down by one */
+   if (fp->position_input >= 0) {
+      util_dynarray_foreach (&instructions, struct tgsi_full_instruction,
+                             pos_inst) {
+         for (unsigned i = 0; i < pos_inst->Instruction.NumSrcRegs; i++) {
+            struct tgsi_src_register *reg = &pos_inst->Src[i].Register;
+            if (reg->File != TGSI_FILE_INPUT)
+               continue;
+            if (reg->Index == fp->position_input) {
+               reg->File = TGSI_FILE_SYSTEM_VALUE;
+               reg->Index = 0;
+            } else if (reg->Index > fp->position_input) {
+               reg->Index--;
+            }
+         }
+      }
+
+      /* The position registers hold the integer pixel coordinates plus 8192
+       * (measured: R72 is 8192 + x, R73 is 8192 + y counted from the bottom,
+       * grate-fragcoord-test). Take the bias off once, at the start:
+       * TEMP[t].xy = SV[0].xy - 8192, and read x and y from the temporary. */
+      unsigned pos_xy_reads = 0;
+      util_dynarray_foreach (&instructions, struct tgsi_full_instruction,
+                             pos_inst) {
+         for (unsigned i = 0; i < pos_inst->Instruction.NumSrcRegs; i++)
+            if (pos_inst->Src[i].Register.File == TGSI_FILE_SYSTEM_VALUE)
+               pos_xy_reads |= tgsi_util_get_inst_usage_mask(pos_inst, i);
+      }
+      if ((pos_xy_reads & 0x3) && fp->num_temporaries < GRATE_FP_MAX_TEMPS &&
+          fp->num_immediates < GRATE_FP_MAX_IMMEDIATES) {
+         unsigned temp = fp->num_temporaries++;
+         unsigned imm = fp->num_immediates++;
+         fp->immediates[imm][0] = -8192.0f;
+         fp->immediates[imm][1] = fp->immediates[imm][2] =
+            fp->immediates[imm][3] = 0.0f;
+         util_dynarray_foreach (&instructions, struct tgsi_full_instruction,
+                                pos_inst) {
+            for (unsigned i = 0; i < pos_inst->Instruction.NumSrcRegs; i++) {
+               struct tgsi_src_register *reg = &pos_inst->Src[i].Register;
+               if (reg->File == TGSI_FILE_SYSTEM_VALUE &&
+                   !(tgsi_util_get_inst_usage_mask(pos_inst, i) & 0xc)) {
+                  reg->File = TGSI_FILE_TEMPORARY;
+                  reg->Index = temp;
+               }
+            }
+         }
+         struct tgsi_full_instruction bias;
+         memset(&bias, 0, sizeof(bias));
+         bias.Instruction.Type = TGSI_TOKEN_TYPE_INSTRUCTION;
+         bias.Instruction.NrTokens = 1;
+         bias.Instruction.Opcode = TGSI_OPCODE_ADD;
+         bias.Instruction.NumDstRegs = 1;
+         bias.Instruction.NumSrcRegs = 2;
+         bias.Dst[0].Register.File = TGSI_FILE_TEMPORARY;
+         bias.Dst[0].Register.Index = temp;
+         bias.Dst[0].Register.WriteMask = TGSI_WRITEMASK_XY;
+         bias.Src[0].Register.File = TGSI_FILE_SYSTEM_VALUE;
+         bias.Src[0].Register.Index = 0;
+         bias.Src[0].Register.SwizzleX = TGSI_SWIZZLE_X;
+         bias.Src[0].Register.SwizzleY = TGSI_SWIZZLE_Y;
+         bias.Src[0].Register.SwizzleZ = TGSI_SWIZZLE_X;
+         bias.Src[0].Register.SwizzleW = TGSI_SWIZZLE_X;
+         bias.Src[1].Register.File = TGSI_FILE_IMMEDIATE;
+         bias.Src[1].Register.Index = imm;
+         /* SwizzleX/Y/Z/W of the immediate: all X (value 0) */
+         util_dynarray_append_typed(&instructions,
+                                    struct tgsi_full_instruction, bias);
+         /* the bias goes first */
+         struct tgsi_full_instruction *code = instructions.data;
+         unsigned count = util_dynarray_num_elements(
+            &instructions, struct tgsi_full_instruction);
+         struct tgsi_full_instruction last = code[count - 1];
+         memmove(code + 1, code, (count - 1) * sizeof(*code));
+         code[0] = last;
       }
    }
 
