@@ -261,6 +261,10 @@ lo_supported_packet(struct lo_eval *e, const struct fp_alu_instr_packet *p)
          continue;
       if (e->derivatives && a->dst.index == 32 && a->condition == FP_CONDITION_ALWAYS)
          continue;
+      if (a->dst.index == GRATE_FP_KILL_REGISTER &&
+          a->condition == FP_CONDITION_ALWAYS && a->dst.write_low_sub_reg &&
+          a->dst.write_high_sub_reg)
+         continue;
       if (!lo_reg_ok(a->dst.index) && a->dst.index != 31) {
          if (getenv("GRATE_PACKING_DEBUG"))
             fprintf(stderr,
@@ -418,6 +422,9 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
       mf[i++] = m;
 
    uint64_t sig = 0x5167;
+   /* the pixel kills: a sum, so that the order of the writes does not matter */
+   uint64_t kill_sum = 0;
+   bool has_kill = false;
    int64_t g = 0;
    unsigned step = 0;
    unsigned seq_dw = 0;
@@ -547,6 +554,13 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
                      (a->dst.write_high_sub_reg ? 2 : 0);
             if (a->dst.index == 31)
                continue;
+            if (a->dst.index == GRATE_FP_KILL_REGISTER) {
+               /* the kill flag is not a register that anything reads: only
+                * the value that is written counts */
+               kill_sum += mix(0x4b111, v);
+               has_kill = true;
+               continue;
+            }
             if (e->derivatives && a->dst.index == 32) {
                /* published when the packet is done, after its reads */
                quad_pending = true;
@@ -650,6 +664,6 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
       *why = "no output write";
       return false;
    }
-   *signature = sig;
+   *signature = has_kill ? mix(sig, kill_sum) : sig;
    return true;
 }

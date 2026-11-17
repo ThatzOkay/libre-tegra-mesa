@@ -395,11 +395,15 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             if (!a->dst.write_low_sub_reg && !a->dst.write_high_sub_reg)
                continue;
             bool pinned = a->dst.index >= 64 && a->dst.index < 72;
+            /* a kill: the written value is not kept in a register */
+            bool kill = a->dst.index == GRATE_FP_KILL_REGISTER &&
+                        a->condition == FP_CONDITION_ALWAYS &&
+                        a->dst.write_low_sub_reg && a->dst.write_high_sub_reg;
             bool quad = deriv && a->dst.index == 32 &&
                         a->condition == FP_CONDITION_ALWAYS &&
                         a->dst.write_low_sub_reg && a->dst.write_high_sub_reg;
             if ((a->dst.index >= 16 && a->dst.index != 31 && !pinned &&
-                 !quad) ||
+                 !quad && !kill) ||
                 (a->condition != FP_CONDITION_ALWAYS && !pinned) ||
                 (pinned &&
                  a->dst.write_low_sub_reg == a->dst.write_high_sub_reg)) {
@@ -470,7 +474,7 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             }
             if (!ok)
                break;
-            if (a->dst.index != 31) {
+            if (a->dst.index != 31 && !kill) {
                unsigned width =
                   a->dst.write_low_sub_reg && a->dst.write_high_sub_reg ? 2
                                                                         : 1;
