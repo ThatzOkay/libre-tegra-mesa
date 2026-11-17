@@ -246,9 +246,19 @@ lo_src(const struct lo_eval *e, const struct fp_alu_src_operand *s, int64_t q,
        int round)
 {
    uint64_t leaf = lo_leaf(e, s, q, round);
-   uint64_t a[] = {
-      leaf,         s->negate,   s->absolute_value,     s->scale_by_two,
-      s->minus_one, s->datatype, s->sub_reg_select_high};
+   /* Which half of a register or forward a half-precision operand reads is a
+    * choice of location: the leaf already is the value of that half, and a
+    * value stored in a half is the same whichever half holds it. */
+   const bool half_select =
+      s->datatype == FP_DATATYPE_FIXED10 &&
+      (lo_reg_ok(s->index) || (s->index >= 24 && s->index <= 27));
+   uint64_t a[] = {leaf,
+                   s->negate,
+                   s->absolute_value,
+                   s->scale_by_two,
+                   s->minus_one,
+                   s->datatype,
+                   half_select ? 0 : s->sub_reg_select_high};
    return mixn(7, a);
 }
 
