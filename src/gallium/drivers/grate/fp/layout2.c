@@ -395,11 +395,15 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             if (!a->dst.write_low_sub_reg && !a->dst.write_high_sub_reg)
                continue;
             bool pinned = a->dst.index >= 64 && a->dst.index < 72;
+            /* a kill: the written value is not kept in a register */
+            bool kill = a->dst.index == GRATE_FP_KILL_REGISTER &&
+                        a->condition == FP_CONDITION_ALWAYS &&
+                        a->dst.write_low_sub_reg && a->dst.write_high_sub_reg;
             bool quad = deriv && a->dst.index == 32 &&
                         a->condition == FP_CONDITION_ALWAYS &&
                         a->dst.write_low_sub_reg && a->dst.write_high_sub_reg;
             if ((a->dst.index >= 16 && a->dst.index != 31 && !pinned &&
-                 !quad) ||
+                 !quad && !kill) ||
                 (a->condition != FP_CONDITION_ALWAYS && !pinned) ||
                 (pinned &&
                  a->dst.write_low_sub_reg == a->dst.write_high_sub_reg)) {
@@ -470,7 +474,7 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             }
             if (!ok)
                break;
-            if (a->dst.index != 31) {
+            if (a->dst.index != 31 && !kill) {
                unsigned width =
                   a->dst.write_low_sub_reg && a->dst.write_high_sub_reg ? 2
                                                                         : 1;
@@ -1873,18 +1877,25 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
       unsigned old_rows = fp->info.num_rows;
       fp->info.num_rows = cands[c].rows;
       bool ok = l2_rebuild(s, fp, &old_steps, &old_alus, &old_mfus);
+      const bool rebuilt = ok;
+      bool evaluated = false;
       uint64_t sig = 0;
       const char *why = NULL;
-      if (ok)
-         ok = grate_fp_layout_signature(fp, false, &sig, &why) &&
-              sig == seq_signature;
+      if (ok) {
+         evaluated = grate_fp_layout_signature(fp, false, &sig, &why);
+         ok = evaluated && sig == seq_signature;
+      }
+      if (!ok && !why)
+         why = !rebuilt ? "the rebuild failed" : "the signature differs";
       if (verbose)
-         fprintf(
-            stderr,
-            "GRATE LAYOUT2: rows %u window %u%s, %u steps, %u packets: %s\n",
-            cands[c].rows, cands[c].window, cands[c].prop ? " +prop" : "",
-            cands[c].steps, cands[c].packets,
-            ok ? "validated" : "REJECTED by the evaluator");
+         fprintf(stderr,
+                 "GRATE LAYOUT2: rows %u window %u%s, %u steps, %u packets: "
+                 "%s%s%s\n",
+                 cands[c].rows, cands[c].window,
+                 cands[c].prop ? " +prop" : "", cands[c].steps,
+                 cands[c].packets,
+                 ok ? "validated" : "REJECTED by the evaluator",
+                 !ok && why ? ": " : "", !ok && why ? why : "");
       if (ok) {
          free_lists(&old_steps, &old_alus, &old_mfus);
          return true;

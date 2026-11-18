@@ -935,8 +935,6 @@ emit_load_scalar(struct grate_fp_shader *fp,
  * negated value to R76 (checked with cgtest on `if (x < c) discard;`:
  * `r76 = -x + c`; `alpha < 0.5` is `r76 = -alpha + 0.5`; two discards are two
  * writes to R76 in one packet). One write per distinct source component. */
-#define GRATE_FP_KILL_REGISTER 76
-
 static void
 emit_kill_if(struct grate_fp_shader *fp,
              const struct tgsi_full_instruction *tgsi)

@@ -149,6 +149,10 @@ struct fp_sched {
    int address;
 };
 
+/* KILL_IF writes the negated source to this register and the hardware kills
+ * the pixel (see emit_kill_if in tgsi.c). Nothing reads it back. */
+#define GRATE_FP_KILL_REGISTER 76
+
 struct fp_instr {
    struct list_head link;
    uint32_t pseq;
