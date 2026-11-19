@@ -41,6 +41,8 @@ enum l2_kind { L2_ALU, L2_MFU, L2_TEX, L2_DW };
 struct l2_def {
    unsigned width;      /* 2: FP20 in a whole register, 1: one half */
    int tie_k, tie_half; /* row-relative register and half; -1 when free */
+   bool pair_rel;       /* tie_k is 0/1 within the register pair of its class
+                           (cls_pair): a value of a fetch */
    int cls;             /* class of the unit operations tied to it */
    int writer;
    int uses_left;
@@ -85,7 +87,11 @@ struct l2_op {
    int orig;
    int height;
    bool placed;
-   bool dead; /* folded away */
+   bool paired; /* an interpolation made for one fetch: goes on its step */
+   unsigned pair_mask; /* register pairs a fetch may use: 1 R0/R1, 2 R2/R3
+                          (only with dyn_pair, else pair_mask is the pair) */
+   bool tex_hi;        /* a fetch of fixed pair: R2/R3 instead of R0/R1 */
+   bool dead;   /* folded away */
    int step, packet, slot;
 };
 
@@ -97,6 +103,7 @@ struct l2 {
    unsigned num_defs;
    int cls_parent[L2_MAX_OPS];
    int cls_row[L2_MAX_OPS];
+   int cls_pair[L2_MAX_OPS]; /* register pair (0, 1) of a fetch's class, -1 */
    /* schedule: packets per step, and the slot operations of every packet */
    unsigned steps;
    unsigned step_packets[L2_MAX_STEPS];
@@ -113,11 +120,22 @@ struct l2 {
     * and a value that stays there for the whole program keeps a fetch from
     * using that row */
    bool detach;
+   /* the copy of an interpolated value that feeds a fetch becomes an
+    * interpolation of its own (NVIDIA interpolates the coordinates again for
+    * every fetch), which the scheduler puts on the fetch's step */
+   bool reinterp;
+   /* with reinterp: a fetch picks R0/R1 or R2/R3 when its class gets its
+    * row, else it keeps R2/R3 */
+   bool dyn_pair;
+   uint32_t dup_rows; /* grate_fp_info.dup_rows: var2/var3 alias var0/var1 */
+   struct fp_mfu_instr synth_mfu[64];
+   unsigned num_synth;
    /* an operation may only be scheduled when fewer than this many operations
     * that came before it in the program are still waiting */
    unsigned window;
 };
 
+static bool alu_is_plain_copy(const struct fp_alu_instr *a);
 static unsigned l2_fold_copies(struct l2 *s);
 static unsigned l2_cse_interp(struct l2 *s);
 
@@ -221,6 +239,7 @@ l2_new_copy(struct l2 *s, int src, bool *ok)
    c->cls = -1;
    s->cls_parent[ci] = ci;
    s->cls_row[ci] = -1;
+   s->cls_pair[ci] = -1;
    c->alu.op = FP_ALU_OP_MAD;
    c->alu.condition = FP_CONDITION_ALWAYS;
    c->alu.scale = FP_SCALE_NONE;
@@ -251,6 +270,7 @@ l2_new_copy(struct l2 *s, int src, bool *ok)
 static bool
 l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
 {
+   s->dup_rows = fp->info.dup_rows;
    unsigned num_packets = list_length(&fp->alu_instructions);
    unsigned num_mfus = list_length(&fp->mfu_instructions);
    const struct fp_alu_instr_packet **pk =
@@ -295,6 +315,7 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
       o_->dst_def = -1;                                                      \
       s->cls_parent[s->num_ops] = s->num_ops;                                \
       s->cls_row[s->num_ops] = -1;                                           \
+      s->cls_pair[s->num_ops] = -1;                                          \
       o_;                                                                    \
    })
 
@@ -397,7 +418,7 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             }
             if (!ok)
                break;
-            if (s->detach) {
+            if (s->detach && !s->reinterp) {
                for (unsigned k = 0; k < 4 && ok; k++) {
                   if (m->var[k].op == FP_VAR_OP_NOP)
                      continue;
@@ -420,9 +441,41 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
          struct l2_op *op = NEWOP(L2_TEX);
          op->tex = instr->tex;
          int oi = s->num_ops++;
+         /* The interpolation unit reads lane k of the varying for register
+          * k, so a fetch whose coordinates are interpolated again can use
+          * R2/R3 (TEX_INST_DATA 0x430) only for a varying linked into
+          * columns 2/3 as well (grate_fp_info.dup_rows); otherwise it has to
+          * use R0/R1. The other fetches may use R2/R3 */
+         unsigned mask = 1;
+         if (s->reinterp) {
+            bool again = false, all_dup = true;
+            for (unsigned k = 0; k < 2; k++) {
+               int d = cur_fp20(&cur, k);
+               if (d < 0)
+                  continue;
+               const struct l2_op *w = &s->ops[s->defs[d].writer];
+               int key = s->defs[d].interp_key;
+               if (key < 0 && w->kind == L2_ALU && w->src_def[0] >= 0 &&
+                   w->src_def[1] < 0 && w->src_def[2] < 0 &&
+                   alu_is_plain_copy(&w->alu))
+                  key = s->defs[w->src_def[0]].interp_key;
+               if (key < 0)
+                  continue;
+               again = true;
+               all_dup &= (key >> 3) < 32 && (s->dup_rows >> (key >> 3) & 1);
+            }
+            /* with dyn_pair the scheduler picks the pair of the class
+             * (cls_pair), else it is fixed here */
+            mask = again && !all_dup ? 1 : (s->dyn_pair ? 3 : 2);
+         }
+         op->pair_mask = mask;
+         const bool rel = s->dyn_pair;
+         const unsigned fixed = rel ? 0 : (mask == 2);
+         op->tex_hi = fixed;
          for (unsigned k = 0; k < 2; k++) {
             int d = cur_fp20(&cur, k);
-            if (d >= 0 && s->defs[d].detached) {
+            if (d >= 0 && (s->defs[d].detached ||
+                           (s->reinterp && s->defs[d].interp_key >= 0))) {
                /* the fetch gets its own copy: the long-lived value must not
                 * sit in the fetch's registers */
                d = l2_new_copy(s, d, &ok);
@@ -430,10 +483,11 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
                   break;
                s->defs[d].detached = false;
             }
-            if (d < 0 || !tie(s, d, oi, k, -1)) {
+            if (d < 0 || !tie(s, d, oi, 2 * fixed + k, -1)) {
                ok = false;
                break;
             }
+            s->defs[d].pair_rel = rel;
             op->in[op->num_in++] = d;
          }
          if (!ok)
@@ -442,10 +496,11 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             int d = new_def(s, 1, oi);
             /* the fetch is rebuilt in place (bit 5 clear): the result
              * overwrites the coordinates' register pair */
-            if (d < 0 || !tie(s, d, oi, c / 2, c % 2)) {
+            if (d < 0 || !tie(s, d, oi, 2 * fixed + c / 2, c % 2)) {
                ok = false;
                break;
             }
+            s->defs[d].pair_rel = rel;
             op->out[op->num_out++] = d;
             cur.def[(2 + c / 2) * 2 + c % 2] = d;
          }
@@ -854,6 +909,99 @@ l2_fold_copies(struct l2 *s)
       cp->src_def[0] = -1;
       removed++;
    }
+   /* a copy of an interpolated value that feeds a fetch: interpolate it
+    * again into the fetch's register instead (NVIDIA does) */
+   for (unsigned c = 0; s->reinterp && c < s->num_ops; c++) {
+      struct l2_op *cp = &s->ops[c];
+      if (cp->kind != L2_ALU || cp->dead || cp->dst_def < 0 ||
+          !alu_is_plain_copy(&cp->alu) || cp->src_def[0] < 0 ||
+          cp->src_def[1] >= 0 || cp->src_def[2] >= 0 || cp->src_def[3] >= 0)
+         continue;
+      const int id = cp->src_def[0];
+      struct l2_def *x = &s->defs[id];
+      struct l2_def *y = &s->defs[cp->dst_def];
+      if (x->interp_key < 0 || x->tie_k < 0 || x->width != 2 || x->dead ||
+          y->tie_k < 0 || y->width != 2 || y->quad || y->fixed_reg >= 0 ||
+          s->ops[x->writer].kind != L2_MFU || s->ops[x->writer].dead ||
+          !s->ops[x->writer].mfu || cp->alu.src[0].datatype != FP_DATATYPE_FP20)
+         continue;
+      const struct l2_op *m = &s->ops[x->writer];
+      /* register k of the interpolation reads lane k of the varying (lane k
+       * and k + 2 give the same value on a duplicated row): the coordinate
+       * must come from the lane it ends up in */
+      const bool dup_row = (x->interp_key >> 3) < 32 &&
+                           (s->dup_rows >> (x->interp_key >> 3) & 1);
+      if (dup_row ? (x->tie_k & 1) != (y->tie_k & 1) : x->tie_k != y->tie_k)
+         continue;
+      /* a fixed pair of R2/R3 needs a duplicated row */
+      if (y->tie_k > 1 && !dup_row)
+         continue;
+      /* an interpolation can write R2/R3 only for a varying linked into
+       * columns 2/3 as well: the fetch keeps R0/R1 otherwise */
+      if (y->pair_rel && !dup_row) {
+         for (unsigned j = 0; j < s->num_ops; j++)
+            if (s->ops[j].kind == L2_TEX &&
+                cls_find(s, s->ops[j].cls) == cls_find(s, y->cls))
+               s->ops[j].pair_mask &= 1;
+      }
+      /* the other coordinate of the same fetch shares the operation */
+      int sib = -1;
+      for (unsigned j = 0; j < c && sib < 0; j++) {
+         struct l2_op *o = &s->ops[j];
+         if (o->kind == L2_MFU && !o->dead && o->mfu >= s->synth_mfu &&
+             o->mfu < s->synth_mfu + ARRAY_SIZE(s->synth_mfu) &&
+             o->num_out < 4 && o->mfu->var[y->tie_k].op == FP_VAR_OP_NOP &&
+             cls_find(s, s->defs[o->out[0]].cls) == cls_find(s, y->cls))
+            sib = j;
+      }
+      if (sib < 0 && s->num_synth >= ARRAY_SIZE(s->synth_mfu))
+         continue;
+      const int yd = cp->dst_def;
+      if (sib >= 0) {
+         struct l2_op *o = &s->ops[sib];
+         ((struct fp_mfu_instr *)o->mfu)->var[y->tie_k] =
+            m->mfu->var[x->tie_k];
+         o->out[o->num_out++] = yd;
+         tie(s, yd, sib, y->tie_k, y->tie_half);
+         y->writer = sib;
+         cp->dead = true;
+         cp->placed = true;
+      } else {
+         struct fp_mfu_instr *n = &s->synth_mfu[s->num_synth++];
+         *n = *m->mfu;
+         for (unsigned k = 0; k < 4; k++)
+            n->var[k].op = FP_VAR_OP_NOP;
+         n->var[y->tie_k] = m->mfu->var[x->tie_k];
+         cp->kind = L2_MFU;
+         cp->paired = true;
+         cp->mfu = n;
+         cp->num_in = 0;
+         cp->out[0] = yd;
+         cp->num_out = 1;
+         cp->cls = c;
+         tie(s, yd, c, y->tie_k, y->tie_half);
+      }
+      cp->src_def[0] = -1;
+      cp->dst_def = -1;
+      y->interp_key = -1;
+      uses[id]--;
+      removed++;
+   }
+   /* an interpolation nothing reads any more */
+   if (s->reinterp) {
+      for (unsigned i = 0; i < s->num_ops; i++) {
+         struct l2_op *op = &s->ops[i];
+         if (op->kind != L2_MFU || op->dead || op->num_out == 0)
+            continue;
+         bool used = false;
+         for (unsigned k = 0; k < op->num_out; k++)
+            used |= s->defs[op->out[k]].interp_key < 0 || uses[op->out[k]];
+         if (!used) {
+            op->dead = true;
+            op->placed = true;
+         }
+      }
+   }
    return removed;
 }
 
@@ -959,10 +1107,35 @@ unit_row_ok(struct l2 *s, const struct l2_op *op, unsigned step)
    return row < 0 || (unsigned)row == step % s->rows;
 }
 
+/* The register of a tied value within its row: tie_k, plus two when its class
+ * (the fetch it belongs to) uses the R2/R3 pair. Class ocls is taken to use
+ * pair opair, whatever cls_pair says. */
+static int
+def_k(struct l2 *s, const struct l2_def *d, int ocls, int opair)
+{
+   if (!d->pair_rel)
+      return d->tie_k;
+   int cls = cls_find(s, d->cls);
+   int pair = cls == ocls ? opair : s->cls_pair[cls];
+   return d->tie_k + (pair > 0 ? 2 : 0);
+}
+
+/* The register pairs class cls may use. */
+static unsigned
+class_pair_mask(struct l2 *s, int cls)
+{
+   unsigned mask = 0;
+   for (unsigned i = 0; i < s->num_ops; i++)
+      if (s->ops[i].kind == L2_TEX && !s->ops[i].dead &&
+          cls_find(s, s->ops[i].cls) == cls)
+         mask = mask ? mask & s->ops[i].pair_mask : s->ops[i].pair_mask;
+   return mask ? mask : 1;
+}
+
 /* Would the tied values of class cls collide with a live or reserved value of
- * another class if the class used this row? */
+ * another class if the class used this row and register pair? */
 static bool
-class_row_conflict(struct l2 *s, int cls, unsigned row)
+class_row_conflict(struct l2 *s, int cls, unsigned row, int pair)
 {
    for (unsigned a = 0; a < s->num_defs; a++) {
       const struct l2_def *d = &s->defs[a];
@@ -971,7 +1144,8 @@ class_row_conflict(struct l2 *s, int cls, unsigned row)
          continue;
       for (unsigned b = 0; b < s->num_defs; b++) {
          const struct l2_def *e = &s->defs[b];
-         if (b == a || e->tie_k != d->tie_k || s->ops[e->writer].dead)
+         if (b == a || s->ops[e->writer].dead ||
+             def_k(s, e, cls, pair) != def_k(s, d, cls, pair))
             continue;
          int ecls = cls_find(s, e->cls);
          if (ecls == cls || s->cls_row[ecls] != (int)row)
@@ -1011,7 +1185,8 @@ unit_loc_conflict(struct l2 *s, const struct l2_op *op, unsigned row,
          continue;
       for (unsigned b = 0; b < s->num_defs; b++) {
          const struct l2_def *e = &s->defs[b];
-         if (b == a || e->tie_k != d->tie_k || s->ops[e->writer].dead)
+         if (b == a || s->ops[e->writer].dead ||
+             def_k(s, e, -1, 0) != def_k(s, d, -1, 0))
             continue;
          int ecls = cls_find(s, e->cls);
          if (ecls == cls || s->cls_row[ecls] != (int)row)
@@ -1026,6 +1201,30 @@ unit_loc_conflict(struct l2 *s, const struct l2_op *op, unsigned row,
    return false;
 }
 
+/* Give class cls the row and a register pair, when some pair of its mask does
+ * not collide with the values of the other classes there. */
+static bool
+class_assign(struct l2 *s, int cls, unsigned row, unsigned step)
+{
+   unsigned mask = class_pair_mask(s, cls);
+   const char *po = getenv("GRATE_LAYOUT_PAIRORDER");
+   const int mode = po ? atoi(po) : 0;
+   for (int i = 0; i < 2; i++) {
+      /* 0: R0/R1 first, 1: R2/R3 first, 2: the pair of the round parity,
+       * 3: the other one */
+      int pair = mode == 0 ? i
+                 : mode == 1 ? 1 - i
+                 : mode == 2 ? ((step / s->rows) & 1) ^ i
+                             : ((step / s->rows + 1) & 1) ^ i;
+      if (!(mask >> pair & 1) || class_row_conflict(s, cls, row, pair))
+         continue;
+      s->cls_row[cls] = row;
+      s->cls_pair[cls] = pair;
+      return true;
+   }
+   return false;
+}
+
 /* Place a unit operation (MFU or fetch) on step. */
 static bool
 place_unit(struct l2 *s, struct l2_op *op, unsigned step, int64_t gfirst)
@@ -1034,9 +1233,8 @@ place_unit(struct l2 *s, struct l2_op *op, unsigned step, int64_t gfirst)
       return false;
    int cls = cls_find(s, op->cls);
    if (s->cls_row[cls] < 0) {
-      if (class_row_conflict(s, cls, step % s->rows))
+      if (!class_assign(s, cls, step % s->rows, step))
          return false;
-      s->cls_row[cls] = step % s->rows;
    }
    if (unit_loc_conflict(s, op, step % s->rows, gfirst))
       return false;
@@ -1069,15 +1267,15 @@ place_alu(struct l2 *s, struct l2_op *op, unsigned step, int64_t g,
       if (s->cls_row[cls] < 0) {
          /* an interpolation of the class chooses the row, it goes first */
          /* the unit that uses it goes on the next step or one after it */
-         int row = -1;
-         for (unsigned j = 0; j < s->rows && row < 0; j++)
-            if (!class_row_conflict(s, cls, (step + 1 + j) % s->rows) &&
-                (!getenv("GRATE_LAYOUT_ROW0") ||
-                 (step + 1 + j) % s->rows == 0))
-               row = (step + 1 + j) % s->rows;
-         if (row < 0)
+         bool found = false;
+         for (unsigned j = 0; j < s->rows && !found; j++)
+            if ((!getenv("GRATE_LAYOUT_ROW0") ||
+                 (step + 1 + j) % s->rows == 0) &&
+                class_assign(s, cls, (step + 1 + j) % s->rows,
+                             step + 1 + j))
+               found = true;
+         if (!found)
             return false;
-         s->cls_row[cls] = row;
       }
    }
    for (unsigned k = 0; k < 3; k++) {
@@ -1178,6 +1376,44 @@ first_waiting(const struct l2 *s)
 }
 
 static bool
+l2_reinterp_changes(const struct l2 *s)
+{
+   if (s->num_synth)
+      return true;
+   for (unsigned i = 0; i < s->num_ops; i++)
+      if (s->ops[i].kind == L2_TEX &&
+          (s->ops[i].tex_hi || s->ops[i].pair_mask == 3))
+         return true;
+   return false;
+}
+
+/* A fetch could go on step if its inputs are visible, or are written by an
+ * interpolation made for it that can go on the same step: that one is
+ * returned in *mfu (-1 when none is needed). */
+static bool
+tex_ready_with_mfu(struct l2 *s, const struct l2_op *op, int64_t g,
+                   unsigned step, int *mfu)
+{
+   *mfu = -1;
+   for (unsigned i = 0; i < op->num_pre; i++)
+      if (!s->ops[op->pre[i]].placed)
+         return false;
+   for (unsigned k = 0; k < op->num_in; k++) {
+      int d = op->in[k];
+      if (d < 0 || visible(s, d, g, step, true))
+         continue;
+      int w = s->defs[d].writer;
+      const struct l2_op *wo = &s->ops[w];
+      if (wo->kind != L2_MFU || wo->placed || !wo->paired ||
+          (*mfu >= 0 && *mfu != w) || !unit_row_ok(s, wo, step) ||
+          !ops_ready(s, wo, g, step))
+         return false;
+      *mfu = w;
+   }
+   return true;
+}
+
+static bool
 l2_schedule(struct l2 *s)
 {
    /* DW tie: the output is read from row 0 */
@@ -1229,11 +1465,37 @@ l2_schedule(struct l2 *s)
       const bool chosen = early && t % s->rows != 0;
       const unsigned last_unit_step = early ? t + s->rows - 1 : t;
       for (unsigned tt = t; !chosen && tt <= last_unit_step; tt++) {
-         for (int kind = L2_MFU; kind <= L2_TEX; kind++) {
-            int best = -1;
+         /* the fetch of the step first, with the interpolation made for it */
+         if (s->reinterp && tt - t < s->rows) {
+            int bt = -1, bm = -1;
             for (unsigned i = 0; i < s->num_ops; i++) {
                struct l2_op *op = &s->ops[i];
-               if (op->placed || (int)op->kind != kind)
+               int m;
+               if (op->placed || op->kind != L2_TEX ||
+                   i >= first_waiting(s) + s->window ||
+                   !unit_row_ok(s, op, tt) ||
+                   !tex_ready_with_mfu(s, op, gfirst, tt, &m))
+                  continue;
+               if (bt < 0 || op->height > s->ops[bt].height) {
+                  bt = i;
+                  bm = m;
+               }
+            }
+            if (bt >= 0 && bm >= 0 &&
+                place_unit(s, &s->ops[bm], tt,
+                           s->step_first[t - t % s->rows])) {
+               s->step_mfu[tt] = bm;
+               remaining--;
+               progress = true;
+            }
+         }
+         for (int kind = L2_MFU; kind <= L2_TEX; kind++) {
+            int best = -1;
+            if (kind == L2_MFU && s->step_mfu[tt] >= 0)
+               continue;
+            for (unsigned i = 0; i < s->num_ops; i++) {
+               struct l2_op *op = &s->ops[i];
+               if (op->placed || (int)op->kind != kind || op->paired)
                   continue;
                if (i >= first_waiting(s) + s->window)
                   continue;
@@ -1265,7 +1527,8 @@ l2_schedule(struct l2 *s)
                struct l2_op *op = &s->ops[i];
                if (op->placed || op->kind != L2_ALU)
                   continue;
-               if (i >= first_waiting(s) + s->window && !reads_quad(s, op))
+               if (i >= first_waiting(s) + s->window &&
+                   !reads_quad(s, op))
                   continue;
                if (!ops_ready(s, op, g, t))
                   continue;
@@ -1349,6 +1612,51 @@ l2_schedule(struct l2 *s)
             continue;
          }
          break;
+      }
+
+      if (getenv("GRATE_LAYOUT_DIAG")) {
+         /* why the waiting ALU operations are not placed on this step */
+         unsigned cnt[8] = {0};
+         static const char *names[8] = {
+            "ready-but-refused", "producer-ALU-unplaced",
+            "producer-unit-unplaced", "unit-result-same-round",
+            "ALU-latency", "outside-window", "pre-unplaced", "other"};
+         const int64_t g = s->total_packets;
+         const unsigned first = first_waiting(s);
+         for (unsigned i = 0; i < s->num_ops; i++) {
+            const struct l2_op *op = &s->ops[i];
+            if (op->placed || op->kind != L2_ALU)
+               continue;
+            int r = 0;
+            bool pre = false;
+            for (unsigned k = 0; k < op->num_pre; k++)
+               pre |= !s->ops[op->pre[k]].placed;
+            if (pre)
+               r = 6;
+            for (unsigned k = 0; k < 3 && !r; k++) {
+               int d = op->src_def[k];
+               if (d < 0)
+                  continue;
+               const struct l2_def *def = &s->defs[d];
+               if (!def->written)
+                  r = s->ops[def->writer].kind == L2_ALU ? 1 : 2;
+               else if (!visible(s, d, g, t, false))
+                  r = s->ops[def->writer].kind == L2_ALU
+                         ? 4
+                         : (def->step / (int)s->rows == (int)(t / s->rows)
+                               ? 3
+                               : 7);
+            }
+            if (!r && i >= first + s->window)
+               r = 5;
+            cnt[r]++;
+         }
+         fprintf(stderr, "DIAG step %2u: packets %u mfu %d tex %d |", t,
+                 s->step_packets[t], s->step_mfu[t] >= 0, s->step_tex[t] >= 0);
+         for (unsigned r = 0; r < 8; r++)
+            if (cnt[r])
+               fprintf(stderr, " %s %u,", names[r], cnt[r]);
+         fprintf(stderr, "\n");
       }
 
       /* a unit operation that waits for the packet before the next step */
@@ -1565,6 +1873,38 @@ l2_allocate(struct l2 *s)
               "GRATE LAYOUT2: rows %u: %lld packets, at most %u.%u registers "
               "live (packet %u)\n",
               s->rows, (long long)total, maxlive / 2, (maxlive % 2) * 5, at);
+      if (getenv("GRATE_LAYOUT_LIVE")) {
+         /* what is live at the peak: class counts and every value */
+         unsigned cat[6] = {0};
+         static const char *cn[6] = {"fetch coordinate (ALU, tied)",
+                                     "fetch result", "interpolation",
+                                     "base/other tied", "untied ALU value",
+                                     "other"};
+         for (unsigned d = 0; d < s->num_defs; d++) {
+            const struct l2_def *def = &s->defs[d];
+            if (def->dead || def->quad || def->reg_free || !def->written ||
+                s->ops[def->writer].dead)
+               continue;
+            if (!(def->start <= at && at <= def->last_read))
+               continue;
+            const struct l2_op *w = &s->ops[def->writer];
+            int c = w->kind == L2_TEX ? 1
+                    : w->kind == L2_MFU ? (w->paired ? 0 : 2)
+                    : def->tie_k >= 0 ? (def->pair_rel ? 0 : 3)
+                    : w->kind == L2_ALU ? 4 : 5;
+            cat[c] += def->width;
+            fprintf(stderr,
+                    "   live def%-4u w%u %-28s writer op%-3d [%lld..%lld] "
+                    "tie %d%s\n",
+                    d, def->width, cn[c], def->writer, (long long)def->start,
+                    (long long)def->last_read, def->tie_k,
+                    def->pair_rel ? " rel" : "");
+         }
+         for (unsigned c = 0; c < 6; c++)
+            if (cat[c])
+               fprintf(stderr, "   => %-28s %u.%u registers\n", cn[c],
+                       cat[c] / 2, (cat[c] % 2) * 5);
+      }
    }
 
    /* tied and pinned values first, they have no choice */
@@ -1589,7 +1929,7 @@ l2_allocate(struct l2 *s)
                        def->written);
             return false;
          }
-         reg = row * 4 + def->tie_k;
+         reg = row * 4 + def_k(s, def, -1, 0);
          half = def->tie_half < 0 ? 0 : def->tie_half;
       }
       for (unsigned h = 0; h < 2; h++) {
@@ -1674,6 +2014,28 @@ l2_allocate(struct l2 *s)
                stderr,
                "GRATE LAYOUT2: no register for def%d (%lld..%lld) with %u\n",
                pick, (long long)def->start, (long long)def->last_read, regs);
+         if (s->verbose && getenv("GRATE_LAYOUT_LIVE")) {
+            /* who holds each register while the value needs one */
+            for (unsigned r = 0; r < 16; r++) {
+               fprintf(stderr, "   r%-2u:", r);
+               for (unsigned h = 0; h < 2; h++)
+                  for (unsigned i = 0; i < nocc[r * 2 + h]; i++) {
+                     const struct l2_occ *o = &occ[r * 2 + h][i];
+                     if (o->land > def->last_read || o->end < def->start)
+                        continue;
+                     const struct l2_def *od = &s->defs[o->def];
+                     const struct l2_op *w = &s->ops[od->writer];
+                     fprintf(stderr, " %c%d%c[%lld..%lld]",
+                             w->kind == L2_TEX   ? 'R'
+                             : w->kind == L2_MFU ? 'I'
+                             : od->tie_k >= 0    ? 'T'
+                                                 : 'U',
+                             o->def, h ? 'h' : 'l', (long long)o->land,
+                             (long long)o->end);
+                  }
+               fprintf(stderr, "\n");
+            }
+         }
          return false;
       }
       def->reg = best_loc / 2;
@@ -1726,14 +2088,29 @@ l2_rebuild(struct l2 *s, struct grate_fp_shader *fp,
          struct fp_mfu_instr *copy = CALLOC_STRUCT(fp_mfu_instr);
          if (!copy)
             return false;
-         *copy = *s->ops[s->step_mfu[t]].mfu;
+         const struct l2_op *mop = &s->ops[s->step_mfu[t]];
+         *copy = *mop->mfu;
+         /* an interpolation made for a fetch of the R2/R3 pair writes
+          * var2/var3 */
+         if (mop->paired && mop->num_out && s->defs[mop->out[0]].pair_rel &&
+             s->cls_pair[cls_find(s, mop->cls)] == 1)
+            for (unsigned k = 0; k < 2; k++) {
+               copy->var[k + 2] = copy->var[k];
+               copy->var[k].op = FP_VAR_OP_NOP;
+            }
          list_inithead(&copy->link);
          instr->mfu_sched.address = list_length(&fp->mfu_instructions);
          instr->mfu_sched.num_instructions = 1;
          list_addtail(&copy->link, &fp->mfu_instructions);
       }
       if (s->step_tex[t] >= 0)
-         instr->tex = s->ops[s->step_tex[t]].tex & ~0x30u;
+         {
+            const struct l2_op *top = &s->ops[s->step_tex[t]];
+            const bool hi = s->defs[top->out[0]].pair_rel
+                               ? s->cls_pair[cls_find(s, top->cls)] == 1
+                               : top->tex_hi;
+            instr->tex = (top->tex & ~0x30u) | (hi ? 0x30u : 0);
+         }
       for (unsigned i = 0; i < s->num_ops; i++)
          if (s->ops[i].kind == L2_DW && s->ops[i].step == (int)t)
             instr->dw = s->ops[i].dw;
@@ -1871,16 +2248,18 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
    static const unsigned windows[] = {3, 5, 8, 12, 20, 40, 1000};
    struct cand {
       unsigned rows, window, steps, packets;
-      bool prop, detach;
-   } cands[16 * ARRAY_SIZE(windows)];
+      bool prop, detach, reinterp, dyn_pair;
+   } cands[32 * ARRAY_SIZE(windows)];
    unsigned num_cands = 0;
 
    /* the quad exchange needs three register rows, as in NVIDIA's code */
    for (unsigned rows = fp->uses_derivatives ? 3 : 1; rows <= 4; rows++) {
-      for (unsigned w = 0; w < 4 * ARRAY_SIZE(windows); w++) {
+      for (unsigned w = 0; w < 8 * ARRAY_SIZE(windows); w++) {
          memset(s, 0, sizeof(*s));
          s->rows = rows;
          s->detach = w >= 2 * ARRAY_SIZE(windows);
+         s->reinterp = w >= 4 * ARRAY_SIZE(windows);
+         s->dyn_pair = w >= 6 * ARRAY_SIZE(windows);
          s->window = windows[w % ARRAY_SIZE(windows)];
          s->prop = (w / ARRAY_SIZE(windows)) % 2;
          s->verbose = verbose && getenv("GRATE_LAYOUT_VERBOSE");
@@ -1891,6 +2270,10 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
                continue;
             return false;
          }
+         /* nothing to re-interpolate and no fetch in R2/R3: the same
+          * program as the +detach candidate */
+         if (s->reinterp && !l2_reinterp_changes(s))
+            continue;
          if (!l2_schedule(s)) {
             if (verbose)
                fprintf(stderr,
@@ -1908,7 +2291,7 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
          cands[num_cands++] =
             (struct cand){rows,     windows[w % ARRAY_SIZE(windows)],
                           s->steps, (unsigned)s->total_packets,
-                          s->prop,  s->detach};
+                          s->prop,  s->detach, s->reinterp, s->dyn_pair};
       }
    }
    /* best first: fewest steps, then packets, then rows */
@@ -1924,10 +2307,18 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
             cands[b] = t;
          }
 
+   if (verbose && getenv("GRATE_LAYOUT_LIST"))
+      for (unsigned c = 0; c < num_cands; c++)
+         fprintf(stderr, "GRATE LAYOUT2 cand: rows %u window %u%s%s%s: %u steps, %u packets\n",
+                 cands[c].rows, cands[c].window, cands[c].prop ? " +prop" : "",
+                 cands[c].detach ? " +detach" : "",
+                 cands[c].reinterp ? (cands[c].dyn_pair ? " +dynpair" : " +reinterp") : "",
+                 cands[c].steps,
+                 cands[c].packets);
    const char *only = getenv("GRATE_LAYOUT_ONLY");
-   unsigned only_rows = 0, only_window = 0;
+   unsigned only_rows = 0, only_window = 0, only_reinterp = 9;
    if (only)
-      sscanf(only, "%u,%u", &only_rows, &only_window);
+      sscanf(only, "%u,%u,%u", &only_rows, &only_window, &only_reinterp);
    for (unsigned c = 0; c < num_cands; c++) {
       /* one epoch only: the epoch splitter has never seen these layouts */
       if (cands[c].packets > 64 || cands[c].steps > 64)
@@ -1942,6 +2333,12 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
                     old_steps, old_packets);
          return false;
       }
+      /* third field: 0 none, 1 reinterp (fetches keep R2/R3), 3 reinterp
+       * with a pair per class */
+      if (only && only_reinterp < 9 &&
+          (cands[c].reinterp ? (cands[c].dyn_pair ? 3u : 1u) : 0u) !=
+             only_reinterp)
+         continue;
       if (only && (cands[c].rows != only_rows ||
                    (only_window && cands[c].window != only_window)))
          continue;
@@ -1950,6 +2347,8 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
       s->window = cands[c].window;
       s->prop = cands[c].prop;
       s->detach = cands[c].detach;
+      s->reinterp = cands[c].reinterp;
+      s->dyn_pair = cands[c].dyn_pair;
       if (!l2_extract(s, fp) || !l2_schedule(s) || !l2_allocate(s))
          continue;
 
@@ -1976,7 +2375,8 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
             "GRATE LAYOUT2: rows %u window %u%s%s, %u steps, %u packets: "
             "%s%s%s\n",
             cands[c].rows, cands[c].window, cands[c].prop ? " +prop" : "",
-            cands[c].detach ? " +detach" : "", cands[c].steps,
+            cands[c].reinterp ? (cands[c].dyn_pair ? " +dynpair" : " +reinterp")
+            : cands[c].detach ? " +detach" : "", cands[c].steps,
             cands[c].packets, ok ? "validated" : "REJECTED by the evaluator",
             !ok && why ? ": " : "", !ok && why ? why : "");
       if (ok) {
