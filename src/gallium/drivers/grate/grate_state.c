@@ -1095,17 +1095,23 @@ emit_program(struct grate_context *context, uint32_t **ptrp)
 
    /* depends on linking */
    struct grate_fp_info *info = &context->fshader->info;
-   cull_face_linker_setup |= TGR3D_SU_PARAM_LAST_INST(0 < info->num_inputs ?
-                                                      (info->num_inputs - 1) : 0);
+   const unsigned num_insts = info->num_inputs + info->num_dup_inputs;
+   cull_face_linker_setup |= TGR3D_SU_PARAM_LAST_INST(0 < num_insts ?
+                                                      (num_insts - 1) : 0);
 
-   uint32_t linker_insts[3 + info->num_inputs * 2];
+   uint32_t linker_insts[3 + num_insts * 2];
    linker_insts[0] = host1x_opcode_incr(REG_TGR3D_SU_PARAM, 1);
    linker_insts[1] = cull_face_linker_setup;
-   linker_insts[2] = host1x_opcode_incr(REG_TGR3D_SU_INST_EVEN(0), info->num_inputs * 2);
+   linker_insts[2] = host1x_opcode_incr(REG_TGR3D_SU_INST_EVEN(0), num_insts * 2);
 
    for (int i = 0; i < info->num_inputs; ++i) {
       linker_insts[3 + i * 2] = info->inputs[i].src;
       linker_insts[3 + i * 2 + 1] = info->inputs[i].dst;
+   }
+   /* the second link of the varyings that also fill columns 2 and 3 */
+   for (unsigned i = 0; i < info->num_dup_inputs; ++i) {
+      linker_insts[3 + (info->num_inputs + i) * 2] = info->dup_inputs[i].src;
+      linker_insts[3 + (info->num_inputs + i) * 2 + 1] = info->dup_inputs[i].dst;
    }
 
    if (context->rast->base.flatshade && info->color_input >= 0)

@@ -92,6 +92,18 @@ struct grate_fp_info {
    int num_inputs;
    int color_input;
    int max_tram_row;
+   /* A varying of which the fragment program reads x and y only is linked a
+    * second time into the same tram row, columns 2 and 3 (a second setup
+    * instruction with the same source): var2/var3 of that row read the same
+    * x/y as var0/var1, so an interpolation can write R2/R3 as well as R0/R1.
+    * NVIDIA's compiler allocates such a varying twice (tram row allocator of
+    * libcgdrv.so); dup_rows has a bit for every tram row done this way. */
+   struct {
+      uint32_t src;
+      uint32_t dst;
+   } dup_inputs[8];
+   unsigned num_dup_inputs;
+   uint32_t dup_rows;
    /* Scalar hardware constants: uniforms point into TGSI constant buffer 0;
     * immediates share the same 32-entry FP20 bank. */
    struct {
