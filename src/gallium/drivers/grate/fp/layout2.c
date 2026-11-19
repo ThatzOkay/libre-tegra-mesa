@@ -62,6 +62,7 @@ struct l2_def {
                       else -1 */
    bool quad;      /* a write to the quad exchange port r32: no register, read
                       back as r32/r40/r48/r56 at a fixed distance */
+   bool detached;  /* the copy of an interpolated value (see s->detach) */
 };
 
 struct l2_op {
@@ -107,6 +108,11 @@ struct l2 {
    bool verbose;
    unsigned folded; /* copies removed */
    bool prop;       /* also propagate copies that cannot be folded */
+   /* copy every interpolated value into a free register right after the
+    * interpolation: the interpolation unit writes the registers of a row,
+    * and a value that stays there for the whole program keeps a fetch from
+    * using that row */
+   bool detach;
    /* an operation may only be scheduled when fewer than this many operations
     * that came before it in the program are still waiting */
    unsigned window;
@@ -195,6 +201,51 @@ cur_fp20(const struct l2_cur *c, unsigned reg)
 {
    int a = cur_get(c, reg, 0), b = cur_get(c, reg, 1);
    return a == b ? a : -2;
+}
+
+/* An operation that copies the FP20 value of def src (a MAD src * 1 + 0, as
+ * the emitter writes them) into a new value; returns the new value. The
+ * operation is appended to the program, so it must be called where the
+ * emitter would have written the copy. */
+static int
+l2_new_copy(struct l2 *s, int src, bool *ok)
+{
+   *ok = false;
+   if (s->num_ops >= L2_MAX_OPS)
+      return -1;
+   int ci = s->num_ops;
+   struct l2_op *c = &s->ops[ci];
+   memset(c, 0, sizeof(*c));
+   c->kind = L2_ALU;
+   c->orig = ci;
+   c->cls = -1;
+   s->cls_parent[ci] = ci;
+   s->cls_row[ci] = -1;
+   c->alu.op = FP_ALU_OP_MAD;
+   c->alu.condition = FP_CONDITION_ALWAYS;
+   c->alu.scale = FP_SCALE_NONE;
+   c->alu.dst.write_low_sub_reg = c->alu.dst.write_high_sub_reg = true;
+   c->alu.src[0].datatype = FP_DATATYPE_FP20;
+   c->alu.src[1].datatype = FP_DATATYPE_FIXED10;
+   c->alu.src[1].index = 31;
+   c->alu.src[1].sub_reg_select_high = true;
+   c->alu.src[2].datatype = FP_DATATYPE_FIXED10;
+   c->alu.src[2].index = 31;
+   c->alu.src[3].index = 31;
+   c->src_def[0] = src;
+   c->src_def[1] = c->src_def[2] = c->src_def[3] = -1;
+   int nd = new_def(s, 2, ci);
+   if (nd < 0)
+      return -1;
+   struct l2_def *sd = &s->defs[src];
+   if (sd->num_readers >= 16)
+      return -1;
+   sd->readers[sd->num_readers++] = ci;
+   c->dst_def = nd;
+   s->defs[nd].detached = true;
+   s->num_ops++;
+   *ok = true;
+   return nd;
 }
 
 static bool
@@ -346,6 +397,19 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             }
             if (!ok)
                break;
+            if (s->detach) {
+               for (unsigned k = 0; k < 4 && ok; k++) {
+                  if (m->var[k].op == FP_VAR_OP_NOP)
+                     continue;
+                  int src = cur.def[k * 2];
+                  int nd = l2_new_copy(s, src, &ok);
+                  if (!ok)
+                     break;
+                  cur.def[k * 2] = cur.def[k * 2 + 1] = nd;
+               }
+               if (!ok)
+                  break;
+            }
          }
       }
       if (instr->tex & (1 << 10)) {
@@ -358,6 +422,14 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
          int oi = s->num_ops++;
          for (unsigned k = 0; k < 2; k++) {
             int d = cur_fp20(&cur, k);
+            if (d >= 0 && s->defs[d].detached) {
+               /* the fetch gets its own copy: the long-lived value must not
+                * sit in the fetch's registers */
+               d = l2_new_copy(s, d, &ok);
+               if (!ok)
+                  break;
+               s->defs[d].detached = false;
+            }
             if (d < 0 || !tie(s, d, oi, k, -1)) {
                ok = false;
                break;
@@ -368,7 +440,9 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
             break;
          for (unsigned c = 0; c < 4; c++) {
             int d = new_def(s, 1, oi);
-            if (d < 0 || !tie(s, d, oi, 2 + c / 2, c % 2)) {
+            /* the fetch is rebuilt in place (bit 5 clear): the result
+             * overwrites the coordinates' register pair */
+            if (d < 0 || !tie(s, d, oi, c / 2, c % 2)) {
                ok = false;
                break;
             }
@@ -709,45 +783,48 @@ l2_fold_copies(struct l2 *s)
       /* the quad exchange has its own timing: leave those copies alone */
       if (x->quad || y->quad)
          continue;
-      /* a copy between values of the same width: the readers of the copy
-       * read its source instead (copy propagation) */
-      if (uses[cp->src_def[0]] != 1 && s->prop && !x->dead && x->tie_k < 0 &&
-          x->fixed_reg < 0 && y->tie_k < 0 && y->fixed_reg < 0 &&
-          y->width == x->width &&
-          (x->width == 2 ? cp->alu.src[0].datatype == FP_DATATYPE_FP20
-                         : cp->alu.src[0].datatype == FP_DATATYPE_FIXED10)) {
-         bool only_alu = true;
-         for (unsigned i = 0; i < s->num_ops && only_alu; i++) {
-            const struct l2_op *op = &s->ops[i];
-            if (op->dead)
-               continue;
-            if (op->kind == L2_ALU) {
-               if (op->src_def[3] == cp->dst_def)
-                  only_alu = false;
-            } else {
-               for (unsigned k = 0; k < op->num_in; k++)
-                  if (op->in[k] == cp->dst_def)
-                     only_alu = false;
-            }
+      /* a copy of a value several copies read: compute the value again in
+       * the copy's place (NVIDIA does the same for the coordinates of a fetch;
+       * one operation either way, but no wait for a producer packet) */
+      if (s->detach && uses[cp->src_def[0]] > 1 && x->tie_k < 0 &&
+          x->fixed_reg < 0 && !x->dead && y->fixed_reg < 0 && !y->quad &&
+          y->width == x->width && x->writer < (int)c) {
+         struct l2_op *p = &s->ops[x->writer];
+         bool can =
+            p->kind == L2_ALU && !p->dead && p->dst_def == cp->src_def[0] &&
+            p->alu.condition == FP_CONDITION_ALWAYS && p->src_def[3] < 0 &&
+            p->num_pre == 0 &&
+            (x->width == 2 ? cp->alu.src[0].datatype == FP_DATATYPE_FP20
+                           : cp->alu.src[0].datatype == FP_DATATYPE_FIXED10);
+         for (unsigned k = 0; k < 3 && can; k++) {
+            int sd = p->src_def[k];
+            if (sd >= 0 &&
+                (s->defs[sd].quad || s->defs[sd].num_readers >= 16))
+               can = false;
          }
-         if (only_alu) {
-            const int xd = cp->src_def[0], yd = cp->dst_def;
-            for (unsigned i = 0; i < s->num_ops; i++) {
-               struct l2_op *op = &s->ops[i];
-               if (op->kind != L2_ALU || op->dead)
-                  continue;
-               for (unsigned k = 0; k < 3; k++)
-                  if (op->src_def[k] == yd) {
-                     op->src_def[k] = xd;
-                     uses[xd]++;
-                  }
+         if (can) {
+            const int xd = cp->src_def[0];
+            cp->alu = p->alu;
+            for (unsigned k = 0; k < L2_SRCS; k++) {
+               cp->src_def[k] = p->src_def[k];
+               if (p->src_def[k] >= 0) {
+                  struct l2_def *sd = &s->defs[p->src_def[k]];
+                  sd->readers[sd->num_readers++] = c;
+                  uses[p->src_def[k]]++;
+               }
             }
             uses[xd]--;
-            y->dead = true;
-            cp->dead = true;
-            cp->placed = true;
-            cp->dst_def = -1;
-            cp->src_def[0] = -1;
+            if (uses[xd] == 0) {
+               for (unsigned k = 0; k < L2_SRCS; k++)
+                  if (p->src_def[k] >= 0) {
+                     uses[p->src_def[k]]--;
+                     p->src_def[k] = -1;
+                  }
+               x->dead = true;
+               p->dead = true;
+               p->placed = true;
+               p->dst_def = -1;
+            }
             removed++;
             continue;
          }
@@ -990,6 +1067,7 @@ place_alu(struct l2 *s, struct l2_op *op, unsigned step, int64_t g,
    if (op->dst_def >= 0 && s->defs[op->dst_def].tie_k >= 0) {
       int cls = cls_find(s, s->defs[op->dst_def].cls);
       if (s->cls_row[cls] < 0) {
+         /* an interpolation of the class chooses the row, it goes first */
          /* the unit that uses it goes on the next step or one after it */
          int row = -1;
          for (unsigned j = 0; j < s->rows && row < 0; j++)
@@ -1655,7 +1733,7 @@ l2_rebuild(struct l2 *s, struct grate_fp_shader *fp,
          list_addtail(&copy->link, &fp->mfu_instructions);
       }
       if (s->step_tex[t] >= 0)
-         instr->tex = s->ops[s->step_tex[t]].tex;
+         instr->tex = s->ops[s->step_tex[t]].tex & ~0x30u;
       for (unsigned i = 0; i < s->num_ops; i++)
          if (s->ops[i].kind == L2_DW && s->ops[i].step == (int)t)
             instr->dw = s->ops[i].dw;
@@ -1793,40 +1871,44 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
    static const unsigned windows[] = {3, 5, 8, 12, 20, 40, 1000};
    struct cand {
       unsigned rows, window, steps, packets;
-      bool prop;
-   } cands[8 * ARRAY_SIZE(windows)];
+      bool prop, detach;
+   } cands[16 * ARRAY_SIZE(windows)];
    unsigned num_cands = 0;
 
    /* the quad exchange needs three register rows, as in NVIDIA's code */
    for (unsigned rows = fp->uses_derivatives ? 3 : 1; rows <= 4; rows++) {
-      for (unsigned w = 0; w < 2 * ARRAY_SIZE(windows); w++) {
+      for (unsigned w = 0; w < 4 * ARRAY_SIZE(windows); w++) {
          memset(s, 0, sizeof(*s));
          s->rows = rows;
+         s->detach = w >= 2 * ARRAY_SIZE(windows);
          s->window = windows[w % ARRAY_SIZE(windows)];
-         s->prop = w >= ARRAY_SIZE(windows);
+         s->prop = (w / ARRAY_SIZE(windows)) % 2;
          s->verbose = verbose && getenv("GRATE_LAYOUT_VERBOSE");
          if (!l2_extract(s, fp)) {
             if (verbose)
                fprintf(stderr, "GRATE LAYOUT2: cannot extract the program\n");
+            if (s->detach)
+               continue;
             return false;
          }
          if (!l2_schedule(s)) {
             if (verbose)
                fprintf(stderr,
                        "GRATE LAYOUT2: rows %u window %u: no schedule\n",
-                       rows, windows[w]);
+                       rows, windows[w % ARRAY_SIZE(windows)]);
             continue;
          }
          if (!l2_allocate(s)) {
             if (verbose)
                fprintf(stderr,
                        "GRATE LAYOUT2: rows %u window %u: no registers\n",
-                       rows, windows[w]);
+                       rows, windows[w % ARRAY_SIZE(windows)]);
             continue;
          }
          cands[num_cands++] =
-            (struct cand){rows, windows[w % ARRAY_SIZE(windows)], s->steps,
-                          (unsigned)s->total_packets, s->prop};
+            (struct cand){rows,     windows[w % ARRAY_SIZE(windows)],
+                          s->steps, (unsigned)s->total_packets,
+                          s->prop,  s->detach};
       }
    }
    /* best first: fewest steps, then packets, then rows */
@@ -1867,6 +1949,7 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
       s->rows = cands[c].rows;
       s->window = cands[c].window;
       s->prop = cands[c].prop;
+      s->detach = cands[c].detach;
       if (!l2_extract(s, fp) || !l2_schedule(s) || !l2_allocate(s))
          continue;
 
@@ -1888,14 +1971,14 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
       if (!ok && !why)
          why = !rebuilt ? "the rebuild failed" : "the signature differs";
       if (verbose)
-         fprintf(stderr,
-                 "GRATE LAYOUT2: rows %u window %u%s, %u steps, %u packets: "
-                 "%s%s%s\n",
-                 cands[c].rows, cands[c].window,
-                 cands[c].prop ? " +prop" : "", cands[c].steps,
-                 cands[c].packets,
-                 ok ? "validated" : "REJECTED by the evaluator",
-                 !ok && why ? ": " : "", !ok && why ? why : "");
+         fprintf(
+            stderr,
+            "GRATE LAYOUT2: rows %u window %u%s%s, %u steps, %u packets: "
+            "%s%s%s\n",
+            cands[c].rows, cands[c].window, cands[c].prop ? " +prop" : "",
+            cands[c].detach ? " +detach" : "", cands[c].steps,
+            cands[c].packets, ok ? "validated" : "REJECTED by the evaluator",
+            !ok && why ? ": " : "", !ok && why ? why : "");
       if (ok) {
          free_lists(&old_steps, &old_alus, &old_mfus);
          return true;
