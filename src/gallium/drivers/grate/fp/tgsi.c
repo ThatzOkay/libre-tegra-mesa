@@ -1679,6 +1679,20 @@ emit_tgsi_input(struct grate_fp_shader *fp, const struct tgsi_full_declaration *
    if (getenv("GRATE_INDST") &&
        fp->info.num_inputs == 0) /* EXPERIMENT hook */
       dst = strtoul(getenv("GRATE_INDST"), NULL, 16);
+   const unsigned row = decl->Range.First;
+   /* x and y only: link them into columns 2 and 3 as well */
+   if (decl->Declaration.UsageMask && !(decl->Declaration.UsageMask & 0xc) &&
+       decl->Declaration.Semantic != TGSI_SEMANTIC_COLOR && row < 32 &&
+       fp->info.num_dup_inputs < ARRAY_SIZE(fp->info.dup_inputs) &&
+       !getenv("GRATE_NO_DUP_LINK") &&
+       !(getenv("GRATE_INDST") && fp->info.num_inputs == 0)) {
+      dst = LINK_DST(0, 0, LINK_DST_FP20) | LINK_DST(1, 1, LINK_DST_FP20);
+      fp->info.dup_inputs[fp->info.num_dup_inputs].src = src;
+      fp->info.dup_inputs[fp->info.num_dup_inputs].dst =
+         LINK_DST(0, 2, LINK_DST_FP20) | LINK_DST(1, 3, LINK_DST_FP20);
+      fp->info.num_dup_inputs++;
+      fp->info.dup_rows |= 1u << row;
+   }
    fp->info.inputs[fp->info.num_inputs].src = src;
    fp->info.inputs[fp->info.num_inputs].dst = dst;
 
@@ -1716,6 +1730,9 @@ emit_direct_varying_product(struct grate_fp_shader *fp,
    };
    fp->info.num_inputs = 8;
    fp->info.max_tram_row = 8;
+   /* its own link table: no second links */
+   fp->info.num_dup_inputs = 0;
+   fp->info.dup_rows = 0;
    for (unsigned c = 0; c < 4; c++) {
       for (unsigned operand = 0; operand < 2; operand++) {
          unsigned row = c * 2 + operand;
@@ -2505,6 +2522,8 @@ grate_tgsi_to_fp(struct grate_fp_shader *fp, struct tgsi_parse_context *tgsi,
    list_inithead(&fp->mfu_instructions);
 
    fp->info.num_inputs = 0;
+   fp->info.num_dup_inputs = 0;
+   fp->info.dup_rows = 0;
    fp->info.num_constants = 0;
    fp->info.num_spill_slots = 0;
    fp->info.color_input = -1;

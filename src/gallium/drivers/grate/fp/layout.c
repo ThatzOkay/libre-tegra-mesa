@@ -45,6 +45,9 @@ struct lo_eval {
     * the 2x2 quad, and r32, r40, r48 and r56 return the four pixels'
     * values exactly two packets later (docs/grate-derivatives.md). */
    bool derivatives;
+   /* tram rows linked twice (columns 0/1 and 2/3, grate_fp_info.dup_rows):
+    * var2/var3 of such a row read the same x/y as var0/var1 */
+   uint32_t dup_rows;
    bool quad_valid;
    uint64_t quad_value;
    int64_t quad_g;
@@ -343,7 +346,12 @@ lo_units(struct lo_eval *e, const struct fp_instr *instr,
          }
          lo_write_unit = true;
          lo_write_step = step;
-         uint64_t a[] = {0x1a7e, m->var[k].tram_row, k};
+         const unsigned lane =
+            m->var[k].tram_row < 32 &&
+                  (e->dup_rows >> m->var[k].tram_row & 1)
+               ? (k & 1)
+               : k;
+         uint64_t a[] = {0x1a7e, m->var[k].tram_row, lane};
          uint64_t r = mixn(3, a);
          if (getenv("GRATE_LAYOUT_TRACE"))
             fprintf(stderr, "  %s step %u interp var%u row %u = %08x\n",
@@ -406,6 +414,7 @@ lo_signature(const struct grate_fp_shader *fp, bool sequential,
    struct lo_eval *e = &e_storage;
    e->sequential = sequential;
    e->derivatives = fp->uses_derivatives;
+   e->dup_rows = fp->info.dup_rows;
    e->quad_valid = false;
    e->rows = sequential ? 1 : MAX2(fp->info.num_rows, 1);
    e->num_writes = 0;
