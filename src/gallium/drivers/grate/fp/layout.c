@@ -356,13 +356,13 @@ lo_units(struct lo_eval *e, const struct fp_instr *instr,
    }
 
    if (instr->tex & (1 << 10)) {
-      if (instr->tex & 0x10) {
-         e->why = "fetch with the R2R3R0 coordinate source";
-         return false;
-      }
+      /* bit 4: the coordinates are in R2/R3 of the row, else R0/R1; bit 5:
+       * the result goes to R2/R3, else R0/R1 (measured on the tablet) */
+      const unsigned cbase = base + ((instr->tex & 0x10) ? 2 : 0);
+      const unsigned rbase = base + ((instr->tex & 0x20) ? 2 : 0);
       lo_unit_read_step = sequential ? -1 : (int)step;
-      uint64_t x = lo_read_fp20(e, base + 0, gfirst, round, false);
-      uint64_t y = lo_read_fp20(e, base + 1, gfirst, round, false);
+      uint64_t x = lo_read_fp20(e, cbase + 0, gfirst, round, false);
+      uint64_t y = lo_read_fp20(e, cbase + 1, gfirst, round, false);
       lo_unit_read_step = -1;
       lo_write_unit = true;
       lo_write_step = step;
@@ -371,8 +371,9 @@ lo_units(struct lo_eval *e, const struct fp_instr *instr,
                  sequential ? "SEQ" : "HW ", step, row, (unsigned)x,
                  (unsigned)y);
       for (unsigned c = 0; c < 4; c++) {
-         uint64_t a[] = {0x7e5, instr->tex & 0x3ff, x, y, c};
-         lo_write(e, (base + 2 + c / 2) * 2 + c % 2, mixn(5, a), 1, gfirst,
+         /* the register source is not part of what the fetch computes */
+         uint64_t a[] = {0x7e5, instr->tex & 0x3cf, x, y, c};
+         lo_write(e, (rbase + c / 2) * 2 + c % 2, mixn(5, a), 1, gfirst,
                   gfirst, round);
       }
    }
