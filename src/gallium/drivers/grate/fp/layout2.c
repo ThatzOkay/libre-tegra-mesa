@@ -449,8 +449,10 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
           * columns 2/3 as well (grate_fp_info.dup_rows); otherwise it has to
           * use R0/R1. The other fetches may use R2/R3 */
          unsigned mask = 1;
+         bool either = false;
          if (s->reinterp) {
             bool again = false, all_dup = true;
+            unsigned direct = 0;
             for (unsigned k = 0; k < 2; k++) {
                int d = cur_fp20(&cur, k);
                if (d < 0)
@@ -464,14 +466,27 @@ l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
                if (key < 0)
                   continue;
                again = true;
+               direct++;
                all_dup &= (key >> 3) < 32 && (s->dup_rows >> (key >> 3) & 1);
             }
             /* with dyn_pair the scheduler picks the pair of the class
              * (cls_pair), else it is fixed here */
             mask = again && !all_dup ? 1 : (s->dyn_pair ? 3 : 2);
+            /* The fetch at the base coordinate itself (no offset added)
+             * needs no ALU operation, so it goes on the first step, and its
+             * result then waits in its row until the accumulation reaches
+             * it. On R2/R3 that holds the row against the other fetches for
+             * several rounds, and the program needs a round more. Either
+             * pair is valid for it (the varying is linked twice); NVIDIA
+             * also mixes TEX_INST_DATA 0x400 (R0/R1) and 0x430 (R2/R3) in
+             * one program. */
+            if (!s->dyn_pair && again && all_dup && direct == 2) {
+               mask = 3;
+               either = true;
+            }
          }
          op->pair_mask = mask;
-         const bool rel = s->dyn_pair;
+         const bool rel = s->dyn_pair || either;
          const unsigned fixed = rel ? 0 : (mask == 2);
          op->tex_hi = fixed;
          for (unsigned k = 0; k < 2; k++) {
@@ -1500,6 +1515,13 @@ l2_schedule(struct l2 *s)
       }
    }
    compute_heights(s);
+   if (getenv("GRATE_LAYOUT_DIAG"))
+      fprintf(
+         stderr,
+         "DIAG schedule rows %u window %u detach %d reinterp %d nodup %d "
+         "prop %d dyn %d ops %u\n",
+         s->rows, s->window, s->detach, s->reinterp, s->nodup, s->prop,
+         s->dyn_pair, s->num_ops);
    s->total_packets = 0;
    s->steps = 0;
    memset(s->step_packets, 0, sizeof(s->step_packets));
@@ -1777,6 +1799,23 @@ l2_schedule(struct l2 *s)
    }
    if (remaining)
       return false;
+
+   if (getenv("GRATE_LAYOUT_DIAG"))
+      /* every fetch: its row and step, and where what computes its
+       * coordinates went (op, kind, step, packet) */
+      for (unsigned i = 0; i < s->num_ops; i++) {
+         const struct l2_op *op = &s->ops[i];
+         if (op->kind != L2_TEX || op->dead)
+            continue;
+         fprintf(stderr, "DIAG fetch op%u row %d step %d <-", i,
+                 s->cls_row[cls_find(s, op->cls)], op->step);
+         for (unsigned k = 0; k < op->num_in; k++) {
+            const int w = s->defs[op->in[k]].writer;
+            fprintf(stderr, " [op%d kind %d step %d pk %d]", w,
+                    s->ops[w].kind, s->ops[w].step, s->ops[w].packet);
+         }
+         fprintf(stderr, "\n");
+      }
 
    /* the output write: every other operation is placed; it goes in the round
     * of the last step that does something, on the step whose row holds the
