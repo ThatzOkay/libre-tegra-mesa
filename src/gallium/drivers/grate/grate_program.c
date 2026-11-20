@@ -179,18 +179,48 @@ grate_delete_vs_state(struct pipe_context *pcontext, void *so)
  * (see fp/blend.c). The stage is one more sequencer instruction, which
  * reads the destination pixel into R0/R1, and its ALU packets. With more
  * than one register row the program is a whole number of rounds long and the
- * rows of a step are those of its index modulo `rows`: the stage becomes the
- * first step of one more round (it reads the destination into the row 0
- * registers and the output write on it reads R2/R3 of row 0), followed by
- * empty steps to the end of that round.
+ * rows of a step are those of its index modulo `rows`: the stage becomes one
+ * step of one more round, the one on the row of the application's output
+ * write (it reads the destination into R0/R1 of that row and the output
+ * write on it reads R2/R3 of that row), with empty steps around it. Its ALU
+ * packets are on the first step of the round.
  */
+
+/* The row of the application's output write: the last step that stores. */
+static unsigned
+blend_output_row(const struct grate_shader_blob *source, unsigned rows)
+{
+   unsigned row = 0;
+
+   for (unsigned i = 0; i < (unsigned)source->num_commands;) {
+      uint32_t command = source->commands[i++];
+      unsigned opcode = command >> 28;
+      unsigned reg = (command >> 16) & 0xfff;
+      unsigned count = command & 0xffff;
+      if (opcode == 4)
+         continue;
+      if ((opcode != 1 && opcode != 2) ||
+          count > (unsigned)source->num_commands - i)
+         break;
+      if (opcode == 2 && reg == REG_TGR3D_DW_INST_DATA)
+         for (unsigned j = 0; j < count; j++)
+            if ((source->commands[i + j] & 3) == TGR3D_DATA_OP_ST)
+               row = j % rows;
+      i += count;
+   }
+   return row;
+}
+
 static bool
 create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
                   unsigned alu_count, unsigned rows, uint32_t key,
                   struct grate_shader_blob *output)
 {
    uint32_t blend_words[GRATE_FP_BLEND_MAX_PACKETS * 8];
-   unsigned packets = grate_fp_blend_alu(key, blend_words);
+   const unsigned row = blend_output_row(source, rows);
+   if (getenv("GRATE_PACKING_DEBUG"))
+      fprintf(stderr, "GRATE BLEND: output on row %u of %u\n", row, rows);
+   unsigned packets = grate_fp_blend_alu(key, row, blend_words);
 
    if (!packets) {
       grate_loge("blend: no ALU packets for key 0x%08x\n", key);
@@ -291,7 +321,7 @@ create_blend_blob(const struct grate_shader_blob *source, unsigned fp_count,
          if (bit == 16)
             BLEND_PUSH(blend_words[j]);
          else
-            BLEND_PUSH(j == 0 ? last : 0);
+            BLEND_PUSH(j == ((bit == 1 || bit == 64) ? row : 0) ? last : 0);
       }
       if (bit == 1)
          BLEND_PUSH(host1x_opcode_imm(REG_TGR3D_PSEQ_FLUSH, 0));
@@ -328,7 +358,7 @@ create_blend_epochs(const struct grate_fragment_shader_state *shader,
    };
    struct grate_shader_blob blended;
    uint32_t words[GRATE_FP_BLEND_MAX_PACKETS * 8];
-   const unsigned blend_packets = grate_fp_blend_alu(key, words);
+   const unsigned blend_packets = grate_fp_blend_alu(key, 0, words);
 
    if (!create_blend_blob(&block, last->steps, last->packets,
                           shader->info.num_rows, key, &blended))

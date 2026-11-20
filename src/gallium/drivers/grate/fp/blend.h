@@ -21,11 +21,13 @@ uint32_t grate_fp_blend_key(const struct pipe_rt_blend_state *rt);
 
 /**
  * Builds the ALU packets of the epilogue for a key from
- * grate_fp_blend_key(). Writes 8 words per packet to words and returns the
+ * grate_fp_blend_key(), for a colour in R2/R3 of register row `row` (the
+ * destination is read into R0/R1 of that row). Writes 8 words per packet to
+ * words and returns the
  * number of packets (at most GRATE_FP_BLEND_MAX_PACKETS), or 0 for a key
  * that is not valid.
  */
-unsigned grate_fp_blend_alu(uint32_t key,
+unsigned grate_fp_blend_alu(uint32_t key, unsigned row,
                             uint32_t words[GRATE_FP_BLEND_MAX_PACKETS * 8]);
 
 /**
