@@ -231,8 +231,19 @@ grate_fp_blend_key(const struct pipe_rt_blend_state *rt)
           (rt->colormask & KEY_COLORMASK_MASK) << KEY_COLORMASK_SHIFT;
 }
 
+/* Move the operands that name R0-R3 to the registers of row `row`. */
+static void
+blend_to_row(struct fp_alu_instr *instr, unsigned row)
+{
+   if (instr->dst.index < 4)
+      instr->dst.index += row * 4;
+   for (unsigned k = 0; k < 4; k++)
+      if (instr->src[k].index < 4)
+         instr->src[k].index += row * 4;
+}
+
 unsigned
-grate_fp_blend_alu(uint32_t key,
+grate_fp_blend_alu(uint32_t key, unsigned row,
                    uint32_t words[GRATE_FP_BLEND_MAX_PACKETS * 8])
 {
    struct fp_alu_instr packets[GRATE_FP_BLEND_MAX_PACKETS][4] = {{{0}}};
@@ -348,8 +359,10 @@ grate_fp_blend_alu(uint32_t key,
    }
 
    for (unsigned i = 0; i < num_packets; i++) {
-      for (unsigned p = 0; p < 4; p++)
+      for (unsigned p = 0; p < 4; p++) {
+         blend_to_row(&packets[i][p], row);
          grate_fp_pack_alu(words + i * 8 + p * 2, &packets[i][p]);
+      }
    }
 
    return num_packets;

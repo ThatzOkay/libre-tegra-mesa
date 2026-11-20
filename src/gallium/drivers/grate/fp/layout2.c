@@ -114,7 +114,6 @@ struct l2 {
    int64_t total_packets;
    bool verbose;
    unsigned folded; /* copies removed */
-   bool prop;       /* also propagate copies that cannot be folded */
    /* copy every interpolated value into a free register right after the
     * interpolation: the interpolation unit writes the registers of a row,
     * and a value that stays there for the whole program keeps a fetch from
@@ -128,6 +127,9 @@ struct l2 {
     * row, else it keeps R2/R3 */
    bool dyn_pair;
    uint32_t dup_rows; /* grate_fp_info.dup_rows: var2/var3 alias var0/var1 */
+   bool nodup;        /* candidate: lay out as if no row were linked twice */
+   bool prop; /* candidate: readers of a copy read its source instead */
+   unsigned num_propped; /* copies removed that way */
    struct fp_mfu_instr synth_mfu[64];
    unsigned num_synth;
    /* an operation may only be scheduled when fewer than this many operations
@@ -270,7 +272,7 @@ l2_new_copy(struct l2 *s, int src, bool *ok)
 static bool
 l2_extract(struct l2 *s, const struct grate_fp_shader *fp)
 {
-   s->dup_rows = fp->info.dup_rows;
+   s->dup_rows = s->nodup ? 0 : fp->info.dup_rows;
    unsigned num_packets = list_length(&fp->alu_instructions);
    unsigned num_mfus = list_length(&fp->mfu_instructions);
    const struct fp_alu_instr_packet **pk =
@@ -987,6 +989,66 @@ l2_fold_copies(struct l2 *s)
       uses[id]--;
       removed++;
    }
+   /* a copy whose source cannot be folded into the slot that computes it (a
+    * fetch result, an interpolation): the readers of the copy read the source
+    * itself, as NVIDIA's code does (the first tap of a blur is added to the
+    * second one straight from the fetch registers). The source stays in its
+    * register for the later reads; the scheduler already keeps a unit from
+    * overwriting a register that is still to be read. */
+   for (unsigned c = 0; s->prop && c < s->num_ops; c++) {
+      struct l2_op *cp = &s->ops[c];
+      if (cp->kind != L2_ALU || cp->dead || cp->dst_def < 0 ||
+          !alu_is_plain_copy(&cp->alu) || cp->src_def[0] < 0 ||
+          cp->src_def[1] >= 0 || cp->src_def[2] >= 0 || cp->src_def[3] >= 0)
+         continue;
+      const int xi = cp->src_def[0], yi = cp->dst_def;
+      struct l2_def *x = &s->defs[xi];
+      struct l2_def *y = &s->defs[yi];
+      if (xi == yi || x->quad || y->quad || x->dead || y->dead ||
+          x->fixed_reg >= 0 || y->fixed_reg >= 0 || y->tie_k >= 0 ||
+          x->width != y->width || y->num_readers == 0 ||
+          x->num_readers + y->num_readers > 16 ||
+          cp->alu.src[0].datatype !=
+             (x->width == 2 ? FP_DATATYPE_FP20 : FP_DATATYPE_FIXED10))
+         continue;
+      /* every reader is an ALU slot that reads y as an ordinary source in
+       * the format of x */
+      bool ok = true;
+      for (unsigned r = 0; r < y->num_readers && ok; r++) {
+         const struct l2_op *o = &s->ops[y->readers[r]];
+         if (o->kind != L2_ALU || o->dead) {
+            ok = false;
+            break;
+         }
+         for (unsigned k = 0; k < L2_SRCS && ok; k++) {
+            if (o->src_def[k] != yi)
+               continue;
+            if (k == 3 ||
+                o->alu.src[k].datatype !=
+                   (x->width == 2 ? FP_DATATYPE_FP20 : FP_DATATYPE_FIXED10))
+               ok = false;
+         }
+      }
+      if (!ok)
+         continue;
+      for (unsigned r = 0; r < y->num_readers; r++) {
+         struct l2_op *o = &s->ops[y->readers[r]];
+         for (unsigned k = 0; k < L2_SRCS; k++)
+            if (o->src_def[k] == yi)
+               o->src_def[k] = xi;
+         x->readers[x->num_readers++] = y->readers[r];
+      }
+      uses[xi] += uses[yi] - 1;
+      uses[yi] = 0;
+      y->num_readers = 0;
+      y->dead = true;
+      cp->dead = true;
+      cp->placed = true;
+      cp->dst_def = -1;
+      cp->src_def[0] = -1;
+      s->num_propped++;
+      removed++;
+   }
    /* an interpolation nothing reads any more */
    if (s->reinterp) {
       for (unsigned i = 0; i < s->num_ops; i++) {
@@ -1416,9 +1478,10 @@ tex_ready_with_mfu(struct l2 *s, const struct l2_op *op, int64_t g,
 static bool
 l2_schedule(struct l2 *s)
 {
-   /* DW tie: the output is read from row 0 */
+   /* DW tie: the output is read from the row of the step that holds the
+    * output write; GRATE_LAYOUT_DWROW0 pins it to row 0 */
    for (unsigned i = 0; i < s->num_ops; i++)
-      if (s->ops[i].kind == L2_DW)
+      if (s->ops[i].kind == L2_DW && getenv("GRATE_LAYOUT_DWROW0"))
          s->cls_row[cls_find(s, s->ops[i].cls)] = 0;
    for (unsigned d = 0; d < s->num_defs; d++) {
       s->defs[d].uses_left = 0;
@@ -1715,8 +1778,9 @@ l2_schedule(struct l2 *s)
    if (remaining)
       return false;
 
-   /* the output write: every other operation is placed; it goes on the first
-    * step of the round of the last step that does something */
+   /* the output write: every other operation is placed; it goes in the round
+    * of the last step that does something, on the step whose row holds the
+    * output (it fires at the end of the round and reads that row) */
    unsigned last = 0;
    for (unsigned t = 0; t < s->steps; t++)
       if (s->step_packets[t] || s->step_mfu[t] >= 0 || s->step_tex[t] >= 0)
@@ -1729,7 +1793,9 @@ l2_schedule(struct l2 *s)
       for (unsigned k = 0; k < op->num_in; k++)
          if (!s->defs[op->in[k]].written)
             return false;
-      op->step = dw_step;
+      /* the output write reads the registers of the row of its step */
+      const int row = s->cls_row[cls_find(s, op->cls)];
+      op->step = dw_step + (row > 0 ? row : 0);
       op->placed = true;
    }
    s->steps = dw_step + s->rows;
@@ -2248,20 +2314,29 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
    static const unsigned windows[] = {3, 5, 8, 12, 20, 40, 1000};
    struct cand {
       unsigned rows, window, steps, packets;
-      bool prop, detach, reinterp, dyn_pair;
-   } cands[32 * ARRAY_SIZE(windows)];
+      bool prop, detach, reinterp, dyn_pair, nodup;
+   } cands[28 * ARRAY_SIZE(windows)];
    unsigned num_cands = 0;
 
    /* the quad exchange needs three register rows, as in NVIDIA's code */
    for (unsigned rows = fp->uses_derivatives ? 3 : 1; rows <= 4; rows++) {
-      for (unsigned w = 0; w < 8 * ARRAY_SIZE(windows); w++) {
+      for (unsigned w = 0; w < 7 * ARRAY_SIZE(windows); w++) {
+         const unsigned group = w / ARRAY_SIZE(windows);
+         /* groups 4 and 6 are +reinterp laid out as if no row were linked
+          * twice (what the program did before the duplicate link worked): it
+          * packs better for some programs; groups 5 and 6 also propagate the
+          * copies that cannot be folded */
+         const bool nodup = group == 4 || group == 6;
+         if (nodup && !fp->info.dup_rows)
+            continue;
          memset(s, 0, sizeof(*s));
          s->rows = rows;
-         s->detach = w >= 2 * ARRAY_SIZE(windows);
-         s->reinterp = w >= 4 * ARRAY_SIZE(windows);
-         s->dyn_pair = w >= 6 * ARRAY_SIZE(windows);
+         s->nodup = nodup;
+         s->prop = group >= 5;
+         s->detach = group >= 1;
+         s->reinterp = group >= 2;
+         s->dyn_pair = group == 3;
          s->window = windows[w % ARRAY_SIZE(windows)];
-         s->prop = (w / ARRAY_SIZE(windows)) % 2;
          s->verbose = verbose && getenv("GRATE_LAYOUT_VERBOSE");
          if (!l2_extract(s, fp)) {
             if (verbose)
@@ -2270,6 +2345,10 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
                continue;
             return false;
          }
+         /* nothing to propagate: the same program as the candidate without
+          * +prop */
+         if (s->prop && !s->num_propped)
+            continue;
          /* nothing to re-interpolate and no fetch in R2/R3: the same
           * program as the +detach candidate */
          if (s->reinterp && !l2_reinterp_changes(s))
@@ -2289,9 +2368,11 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
             continue;
          }
          cands[num_cands++] =
-            (struct cand){rows,     windows[w % ARRAY_SIZE(windows)],
-                          s->steps, (unsigned)s->total_packets,
-                          s->prop,  s->detach, s->reinterp, s->dyn_pair};
+            (struct cand){rows,        windows[w % ARRAY_SIZE(windows)],
+                          s->steps,    (unsigned)s->total_packets,
+                          s->prop,     s->detach,
+                          s->reinterp, s->dyn_pair,
+                          s->nodup};
       }
    }
    /* best first: fewest steps, then packets, then rows */
@@ -2309,12 +2390,17 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
 
    if (verbose && getenv("GRATE_LAYOUT_LIST"))
       for (unsigned c = 0; c < num_cands; c++)
-         fprintf(stderr, "GRATE LAYOUT2 cand: rows %u window %u%s%s%s: %u steps, %u packets\n",
-                 cands[c].rows, cands[c].window, cands[c].prop ? " +prop" : "",
+         fprintf(stderr,
+                 "GRATE LAYOUT2 cand: rows %u window %u%s%s%s: %u steps, %u "
+                 "packets\n",
+                 cands[c].rows, cands[c].window,
+                 cands[c].prop ? " +prop" : "",
                  cands[c].detach ? " +detach" : "",
-                 cands[c].reinterp ? (cands[c].dyn_pair ? " +dynpair" : " +reinterp") : "",
-                 cands[c].steps,
-                 cands[c].packets);
+                 cands[c].reinterp ? (cands[c].dyn_pair ? " +dynpair"
+                                      : cands[c].nodup  ? " +reinterp-nodup"
+                                                        : " +reinterp")
+                                   : "",
+                 cands[c].steps, cands[c].packets);
    const char *only = getenv("GRATE_LAYOUT_ONLY");
    unsigned only_rows = 0, only_window = 0, only_reinterp = 9;
    if (only)
@@ -2336,8 +2422,10 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
       /* third field: 0 none, 1 reinterp (fetches keep R2/R3), 3 reinterp
        * with a pair per class */
       if (only && only_reinterp < 9 &&
-          (cands[c].reinterp ? (cands[c].dyn_pair ? 3u : 1u) : 0u) !=
-             only_reinterp)
+          (cands[c].reinterp ? (cands[c].dyn_pair ? 3u
+                                : cands[c].nodup  ? 4u
+                                                  : 1u)
+                             : 0u) != only_reinterp)
          continue;
       if (only && (cands[c].rows != only_rows ||
                    (only_window && cands[c].window != only_window)))
@@ -2345,10 +2433,11 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
       memset(s, 0, sizeof(*s));
       s->rows = cands[c].rows;
       s->window = cands[c].window;
-      s->prop = cands[c].prop;
       s->detach = cands[c].detach;
       s->reinterp = cands[c].reinterp;
       s->dyn_pair = cands[c].dyn_pair;
+      s->nodup = cands[c].nodup;
+      s->prop = cands[c].prop;
       if (!l2_extract(s, fp) || !l2_schedule(s) || !l2_allocate(s))
          continue;
 
@@ -2375,9 +2464,13 @@ l2_layout(struct grate_fp_shader *fp, uint64_t seq_signature, bool verbose,
             "GRATE LAYOUT2: rows %u window %u%s%s, %u steps, %u packets: "
             "%s%s%s\n",
             cands[c].rows, cands[c].window, cands[c].prop ? " +prop" : "",
-            cands[c].reinterp ? (cands[c].dyn_pair ? " +dynpair" : " +reinterp")
-            : cands[c].detach ? " +detach" : "", cands[c].steps,
-            cands[c].packets, ok ? "validated" : "REJECTED by the evaluator",
+            cands[c].reinterp ? (cands[c].dyn_pair ? " +dynpair"
+                                 : cands[c].nodup  ? " +reinterp-nodup"
+                                                   : " +reinterp")
+            : cands[c].detach ? " +detach"
+                              : "",
+            cands[c].steps, cands[c].packets,
+            ok ? "validated" : "REJECTED by the evaluator",
             !ok && why ? ": " : "", !ok && why ? why : "");
       if (ok) {
          free_lists(&old_steps, &old_alus, &old_mfus);

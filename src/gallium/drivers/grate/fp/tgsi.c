@@ -1682,7 +1682,9 @@ emit_tgsi_input(struct grate_fp_shader *fp, const struct tgsi_full_declaration *
    const unsigned row = decl->Range.First;
    /* x and y only: link them into columns 2 and 3 as well */
    if (decl->Declaration.UsageMask && !(decl->Declaration.UsageMask & 0xc) &&
-       decl->Declaration.Semantic != TGSI_SEMANTIC_COLOR && row < 32 &&
+       !(decl->Declaration.Semantic &&
+         decl->Semantic.Name == TGSI_SEMANTIC_COLOR) &&
+       row < 32 &&
        fp->info.num_dup_inputs < ARRAY_SIZE(fp->info.dup_inputs) &&
        !getenv("GRATE_NO_DUP_LINK") &&
        !(getenv("GRATE_INDST") && fp->info.num_inputs == 0)) {
@@ -1696,8 +1698,10 @@ emit_tgsi_input(struct grate_fp_shader *fp, const struct tgsi_full_declaration *
    fp->info.inputs[fp->info.num_inputs].src = src;
    fp->info.inputs[fp->info.num_inputs].dst = dst;
 
-   if (decl->Declaration.Semantic == TGSI_SEMANTIC_COLOR)
-      fp->info.color_input = decl->Range.First;
+   /* grate_state.c flags this entry of the link table when flat shading */
+   if (decl->Declaration.Semantic &&
+       decl->Semantic.Name == TGSI_SEMANTIC_COLOR)
+      fp->info.color_input = fp->info.num_inputs;
 
    fp->info.num_inputs++;
 }
