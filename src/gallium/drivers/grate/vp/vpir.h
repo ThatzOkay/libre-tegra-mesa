@@ -89,6 +89,8 @@ struct vp_src_operand {
    int index;
    enum vp_swz swizzle[4];
    bool negate, absolute;
+   /* uniform only: read slot index + the address register (see ARL) */
+   bool relative;
 };
 
 struct vp_vec_instr {
@@ -113,11 +115,27 @@ struct vp_condition {
    enum vp_swz swizzle[4];
 };
 
+/* A branch (scalar op BRA, the vector slot is a NOP): taken when the flag of
+ * `lane` is one of those selected by lt/eq/gt, all three set is always. The
+ * target is the index of an instruction. Until the program is complete it is
+ * a label, see struct vp_instr. */
+struct vp_branch {
+   unsigned label;
+   unsigned target;
+   bool lt, eq, gt;
+   enum vp_swz lane;
+};
+
 struct vp_instr {
    struct list_head link;
    struct vp_vec_instr vec;
    struct vp_scalar_instr scalar;
    struct vp_condition cond;
+   struct vp_branch branch;
+   /* A pseudo instruction that defines `label` as the index of the next real
+    * instruction, it is dropped when the labels are resolved. */
+   bool is_label;
+   unsigned label;
 };
 
 void

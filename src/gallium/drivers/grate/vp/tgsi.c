@@ -261,11 +261,15 @@ tgsi_src_to_vp(struct grate_vp_shader *vp, const struct tgsi_src_register *src)
    case TGSI_FILE_INPUT:
       return attrib(src->Index, swizzle, negate, absolute);
 
-   case TGSI_FILE_CONSTANT:
+   case TGSI_FILE_CONSTANT: {
       /* the application's uniforms follow the immediates, see
        * grate_compiler.h */
-      return uniform(vp->num_immediates + src->Index, swizzle, negate,
-                     absolute);
+      struct vp_src_operand ret =
+         uniform(vp->num_immediates + src->Index, swizzle, negate, absolute);
+      /* CONST[ADDR[0].x + index], checked in tgsi_to_vp() */
+      ret.relative = src->Indirect != 0;
+      return ret;
+   }
 
    case TGSI_FILE_TEMPORARY:
       return src_temp(src->Index, swizzle, negate, absolute);
@@ -289,7 +293,119 @@ static struct vp_instr *
 tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
 {
    bool saturate = inst->Instruction.Saturate != 0;
+
+   /* the only indirect addressing there is: CONST[ADDR[0].x + index] */
+   for (unsigned i = 0; i < inst->Instruction.NumSrcRegs; i++) {
+      const struct tgsi_full_src_register *src = &inst->Src[i];
+      if (src->Register.Indirect &&
+          (src->Register.File != TGSI_FILE_CONSTANT ||
+           src->Indirect.File != TGSI_FILE_ADDRESS ||
+           src->Indirect.Index != 0 ||
+           src->Indirect.Swizzle != TGSI_SWIZZLE_X)) {
+         fprintf(stderr, "GRATE VERTEX: unsupported indirect addressing\n");
+         vp->failed = true;
+         return 0;
+      }
+   }
+
    switch (inst->Instruction.Opcode) {
+   case TGSI_OPCODE_ARL: {
+      /* A0.x = floor(src.x): the vector op ARL, as in NVIDIA's compiler
+       * (idx-attr in tools/gpu/grate-vertex-ops-test.c). Like NVIDIA's
+       * compiler it writes the register it reads (ARL r0.y A=r0.yyyy): with
+       * another destination, even r63 or a scratch, the address register was
+       * not loaded on the tablet (idx-attr, idx-two read slot 0). The floor
+       * stays in that register, which changes nothing, because an integer
+       * is a float holding an integer here. A source that is not lane x of
+       * a temporary, or that has a modifier, is copied to one first. */
+      static const enum vp_swz xxxx[4] = {VP_SWZ_X, VP_SWZ_X, VP_SWZ_X,
+                                          VP_SWZ_X};
+      const struct tgsi_src_register *src = &inst->Src[0].Register;
+      if (inst->Dst[0].Register.File != TGSI_FILE_ADDRESS ||
+          inst->Dst[0].Register.Index != 0 ||
+          !(inst->Dst[0].Register.WriteMask & TGSI_WRITEMASK_X)) {
+         fprintf(stderr, "GRATE VERTEX: unsupported address register\n");
+         vp->failed = true;
+         return 0;
+      }
+
+      unsigned t = src->Index;
+      struct vp_src_operand a = tgsi_src_to_vp(vp, src);
+      if (src->File != TGSI_FILE_TEMPORARY ||
+          src->SwizzleX != TGSI_SWIZZLE_X || src->Negate || src->Absolute) {
+         if (vp->num_temps >= 62) {
+            fprintf(stderr, "GRATE VERTEX: out of temporaries for ARL\n");
+            vp->failed = true;
+            return 0;
+         }
+         t = vp->num_temps++;
+         struct vp_instr *copy =
+            emit_packed(emit_vMOV(dst_temp(t, 0x1, false), a), emit_sNOP());
+         legalize_fetches(vp, copy, &vp->instructions);
+         list_addtail(&copy->link, &vp->instructions);
+         a = src_temp(t, xxxx, false, false);
+      }
+      return emit_packed(
+         emit_vec_unop(VP_VEC_OP_ARL, dst_temp(t, 0x1, false), a),
+         emit_sNOP());
+   }
+
+   case TGSI_OPCODE_TRUNC: {
+      /* trunc(x) = x < 0 ? -floor(|x|) : floor(|x|), the int() of
+       * NVIDIA's compiler (idx-offset): the flags from x, FLR of |x|, then
+       * the lanes whose flag says negative are negated. The flags come
+       * first, the destination may be x itself. */
+      static const enum vp_swz identity[4] = {VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z,
+                                              VP_SWZ_W};
+      const struct tgsi_dst_register *d = &inst->Dst[0].Register;
+      bool scratch = d->File != TGSI_FILE_TEMPORARY;
+      unsigned t = d->Index;
+      if (saturate) {
+         fprintf(stderr, "GRATE VERTEX: saturated TRUNC\n");
+         vp->failed = true;
+         return 0;
+      }
+      if (scratch) {
+         if (vp->num_temps >= 62) {
+            fprintf(stderr, "GRATE VERTEX: out of temporaries for TRUNC\n");
+            vp->failed = true;
+            return 0;
+         }
+         t = vp->num_temps++;
+      }
+
+      struct vp_instr *flags =
+         emit_packed(emit_vMOV(dst_temp(63, d->WriteMask, false),
+                               tgsi_src_to_vp(vp, &inst->Src[0].Register)),
+                     emit_sNOP());
+      flags->cond.set = true;
+      legalize_fetches(vp, flags, &vp->instructions);
+      list_addtail(&flags->link, &vp->instructions);
+
+      struct vp_src_operand x = tgsi_src_to_vp(vp, &inst->Src[0].Register);
+      x.negate = false;
+      x.absolute = true;
+      struct vp_instr *flr = emit_packed(
+         emit_vFLR(dst_temp(t, d->WriteMask, false), x), emit_sNOP());
+      legalize_fetches(vp, flr, &vp->instructions);
+      list_addtail(&flr->link, &vp->instructions);
+
+      struct vp_instr *neg =
+         emit_packed(emit_vMOV(dst_temp(t, d->WriteMask, false),
+                               src_temp(t, identity, true, false)),
+                     emit_sNOP());
+      neg->cond.check = true;
+      neg->cond.lt = true;
+      memcpy(neg->cond.swizzle, identity, sizeof(identity));
+      if (!scratch)
+         return neg;
+      list_addtail(&neg->link, &vp->instructions);
+
+      return emit_packed(emit_vMOV(tgsi_dst_to_vp(vp, d, false),
+                                   src_temp(t, identity, false, false)),
+                         emit_sNOP());
+   }
+
    case TGSI_OPCODE_MOV:
       return emit_packed(emit_vMOV(tgsi_dst_to_vp(vp, &inst->Dst[0].Register, saturate),
                                    tgsi_src_to_vp(vp, &inst->Src[0].Register)),
@@ -611,6 +727,7 @@ legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
    struct vp_src_operand *srcs[4] = {&instr->vec.src[0], &instr->vec.src[1],
                                      &instr->vec.src[2], &instr->scalar.src};
    int attr_fetch = -1, uniform_fetch = -1;
+   bool uniform_relative = false;
    unsigned next_temp = vp->num_temps;
    static const enum vp_swz identity[4] = {VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z,
                                            VP_SWZ_W};
@@ -626,8 +743,13 @@ legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
       else
          continue;
 
-      if (*fetch < 0 || *fetch == src->index) {
+      /* the relative addressing bit is one per instruction */
+      if (*fetch < 0 ||
+          (*fetch == src->index &&
+           (fetch == &attr_fetch || uniform_relative == src->relative))) {
          *fetch = src->index;
+         if (fetch == &uniform_fetch)
+            uniform_relative = src->relative;
          continue;
       }
 
@@ -654,6 +776,354 @@ legalize_fetches(struct grate_vp_shader *vp, struct vp_instr *instr,
    return true;
 }
 
+/* Control flow. NVIDIA's compiler turns an if without a loop into
+ * predicated writes and keeps a BRA for loops only (see
+ * tools/gpu/ar20vp-dump.py on cgtest output). NIR already flattens the small
+ * ifs, so what reaches this point are loops, with an IF around a BRK, and ifs
+ * that contain a loop. They are translated one to one into BRA, whose target
+ * is a label until the program is complete (resolve_labels()):
+ *
+ *    IF c         flags = c; BRA if flag == 0 to ELSE (or ENDIF)
+ *    ELSE         BRA to ENDIF, define the label of the else part
+ *    ENDIF        define the label
+ *    BGNLOOP      define the label of the top
+ *    BRK, CONT    BRA to the end of the loop, to its top
+ *    ENDLOOP      BRA to the top, define the label of the end
+ *
+ * The flags are set by the instruction right before the BRA that uses them,
+ * like NVIDIA's compiler does, so nothing else can change them in between. */
+static void
+emit_label(struct grate_vp_shader *vp, unsigned label)
+{
+   struct vp_instr *instr = emit_packed(emit_vNOP(), emit_sNOP());
+   instr->is_label = true;
+   instr->label = label;
+   list_addtail(&instr->link, &vp->instructions);
+}
+
+static void
+emit_branch(struct grate_vp_shader *vp, unsigned label, bool lt, bool eq,
+            bool gt, enum vp_swz lane)
+{
+   struct vp_vec_instr vec = emit_vNOP();
+   struct vp_scalar_instr scalar = emit_sNOP();
+
+   /* no register is written: r63 */
+   vec.dst = dst_temp(63, 0, false);
+   scalar.op = VP_SCALAR_OP_BRA;
+   scalar.dst = dst_temp(63, 0, false);
+
+   struct vp_instr *instr = emit_packed(vec, scalar);
+   instr->branch.label = label;
+   instr->branch.lt = lt;
+   instr->branch.eq = eq;
+   instr->branch.gt = gt;
+   instr->branch.lane = lane;
+   list_addtail(&instr->link, &vp->instructions);
+}
+
+static struct grate_vp_cf *
+cf_push(struct grate_vp_shader *vp, bool is_loop)
+{
+   if (vp->cf_depth >= GRATE_VP_MAX_CF_DEPTH) {
+      fprintf(stderr, "GRATE VERTEX: control flow nested too deep\n");
+      vp->failed = true;
+      return NULL;
+   }
+   struct grate_vp_cf *cf = &vp->cf[vp->cf_depth++];
+   memset(cf, 0, sizeof(*cf));
+   cf->is_loop = is_loop;
+   cf->label_a = vp->num_labels++;
+   if (is_loop)
+      cf->label_b = vp->num_labels++;
+   return cf;
+}
+
+/* The innermost open loop, for BRK and CONT. */
+static struct grate_vp_cf *
+cf_loop(struct grate_vp_shader *vp)
+{
+   for (unsigned i = vp->cf_depth; i > 0; i--)
+      if (vp->cf[i - 1].is_loop)
+         return &vp->cf[i - 1];
+   fprintf(stderr, "GRATE VERTEX: BRK or CONT outside of a loop\n");
+   vp->failed = true;
+   return NULL;
+}
+
+/* The innermost open construct, which has to be a loop or an IF. */
+static struct grate_vp_cf *
+cf_top(struct grate_vp_shader *vp, bool is_loop)
+{
+   if (!vp->cf_depth || vp->cf[vp->cf_depth - 1].is_loop != is_loop) {
+      fprintf(stderr, "GRATE VERTEX: unbalanced control flow\n");
+      vp->failed = true;
+      return NULL;
+   }
+   return &vp->cf[vp->cf_depth - 1];
+}
+
+/* Can the flags be taken from `prev` instead of a MOV of the condition? When
+ * prev is a compare that wrote the lane of the temporary the IF reads: the
+ * flags then say whether that result is zero. */
+static bool
+flags_from_compare(const struct vp_instr *prev,
+                   const struct tgsi_src_register *cond, enum vp_swz lane)
+{
+   if (prev->scalar.op != VP_SCALAR_OP_NOP || prev->cond.check ||
+       prev->cond.set || prev->vec.dst.file != VP_DST_FILE_TEMP ||
+       cond->File != TGSI_FILE_TEMPORARY ||
+       prev->vec.dst.index != cond->Index ||
+       !(prev->vec.dst.write_mask & (1u << lane)))
+      return false;
+
+   switch (prev->vec.op) {
+   case VP_VEC_OP_SLT:
+   case VP_VEC_OP_SGE:
+   case VP_VEC_OP_SEQ:
+   case VP_VEC_OP_SNE:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* IF c; BRK; ENDIF (and the same with CONT) is flags = c, BRA if flag == 0
+ * over a BRA that always jumps. One BRA that jumps when the flag is not
+ * zero does the same, which is what NVIDIA's compiler emits for a break
+ * (loop-break-first in tools/gpu/grate-vertex-ops-test.c). The flags are
+ * still set by the instruction right before it. */
+static bool
+fold_jump_in_if(struct grate_vp_shader *vp, const struct grate_vp_cf *cf)
+{
+   if (list_is_empty(&vp->instructions))
+      return false;
+
+   struct vp_instr *jump =
+      list_last_entry(&vp->instructions, struct vp_instr, link);
+   if (jump->is_label || jump->scalar.op != VP_SCALAR_OP_BRA ||
+       !jump->branch.lt || !jump->branch.eq || !jump->branch.gt ||
+       jump->link.prev == &vp->instructions)
+      return false;
+
+   struct vp_instr *skip = list_entry(jump->link.prev, struct vp_instr, link);
+   if (skip->is_label || skip->scalar.op != VP_SCALAR_OP_BRA ||
+       skip->branch.label != cf->label_a || skip->branch.lt ||
+       !skip->branch.eq || skip->branch.gt)
+      return false;
+
+   jump->branch.lt = true;
+   jump->branch.eq = false;
+   jump->branch.gt = true;
+   jump->branch.lane = skip->branch.lane;
+   list_del(&skip->link);
+   FREE(skip);
+   return true;
+}
+
+/* NVIDIA's compiler rotates a loop: the test that NIR puts at the top
+ * (header; IF c; BRK; ENDIF) goes first once as a guard and then again at the
+ * bottom as the only branch of an iteration (dloop.vert, lbound.vert):
+ *
+ *    L: header; if (c) goto END; body; goto L
+ *    -->  header; if (c) goto END; TOP: body; L: header; if (!c) goto TOP;
+ * END:
+ *
+ * (CONT jumps to L.) That saves one jump per iteration. It needs a header of
+ * a few instructions without branches that ends with the flags of the break,
+ * which fold_jump_in_if() has made out of the IF. */
+static bool
+rotate_loop(struct grate_vp_shader *vp, const struct grate_vp_cf *cf)
+{
+   struct vp_instr *top = NULL;
+
+   list_for_each_entry_rev (struct vp_instr, instr, &vp->instructions, link) {
+      if (instr->is_label && instr->label == cf->label_a) {
+         top = instr;
+         break;
+      }
+   }
+   if (!top)
+      return false;
+
+   struct list_head *first = top->link.next;
+   struct vp_instr *brk = NULL;
+   unsigned header = 0;
+   for (struct list_head *l = first; l != &vp->instructions; l = l->next) {
+      struct vp_instr *instr = list_entry(l, struct vp_instr, link);
+      if (instr->is_label)
+         return false;
+      if (instr->scalar.op == VP_SCALAR_OP_BRA) {
+         brk = instr;
+         break;
+      }
+      if (++header > 4)
+         return false;
+   }
+   if (!brk || !header || brk->branch.label != cf->label_b ||
+       !brk->branch.lt || brk->branch.eq || !brk->branch.gt ||
+       !list_entry(brk->link.prev, struct vp_instr, link)->cond.set)
+      return false;
+
+   unsigned label_body = vp->num_labels++;
+   struct vp_instr *body = emit_packed(emit_vNOP(), emit_sNOP());
+   body->is_label = true;
+   body->label = label_body;
+   list_add(&body->link, &brk->link);
+
+   /* CONT jumps to the test at the bottom now */
+   list_del(&top->link);
+   list_addtail(&top->link, &vp->instructions);
+
+   for (struct list_head *l = first; l != &brk->link; l = l->next) {
+      struct vp_instr *copy = MALLOC(sizeof(*copy));
+      if (!copy) {
+         vp->failed = true;
+         return true;
+      }
+      *copy = *list_entry(l, struct vp_instr, link);
+      list_addtail(&copy->link, &vp->instructions);
+   }
+   emit_branch(vp, label_body, false, true, false, brk->branch.lane);
+   return true;
+}
+
+/* Returns false when the opcode is not control flow. */
+static bool
+tgsi_control_flow(struct grate_vp_shader *vp,
+                  const struct tgsi_full_instruction *inst)
+{
+   struct grate_vp_cf *cf;
+
+   switch (inst->Instruction.Opcode) {
+   case TGSI_OPCODE_IF: {
+      cf = cf_push(vp, false);
+      if (!cf)
+         return true;
+      const struct tgsi_src_register *cond = &inst->Src[0].Register;
+      /* the lane of the flags that holds the condition (a float, nonzero is
+       * true) */
+      enum vp_swz lane = VP_SWZ_X;
+      struct vp_instr *prev = NULL;
+      if (!list_is_empty(&vp->instructions))
+         prev = list_last_entry(&vp->instructions, struct vp_instr, link);
+      if (prev && !prev->is_label &&
+          flags_from_compare(prev, cond, cond->SwizzleX)) {
+         /* the compare that made the condition sets the flags itself, as in
+          * NVIDIA's compiler (SLT r63.x with the flags set); they are those
+          * of the lane the condition is read from */
+         prev->cond.set = true;
+         lane = cond->SwizzleX;
+      } else {
+         struct vp_instr *flags = emit_packed(
+            emit_vMOV(dst_temp(63, 0x1, false), tgsi_src_to_vp(vp, cond)),
+            emit_sNOP());
+         flags->cond.set = true;
+         if (!legalize_fetches(vp, flags, &vp->instructions))
+            vp->failed = true;
+         list_addtail(&flags->link, &vp->instructions);
+      }
+      emit_branch(vp, cf->label_a, false, true, false, lane);
+      return true;
+   }
+
+   case TGSI_OPCODE_ELSE:
+      cf = cf_top(vp, false);
+      if (!cf)
+         return true;
+      cf->has_else = true;
+      cf->label_b = vp->num_labels++;
+      emit_branch(vp, cf->label_b, true, true, true, VP_SWZ_X);
+      emit_label(vp, cf->label_a);
+      return true;
+
+   case TGSI_OPCODE_ENDIF:
+      cf = cf_top(vp, false);
+      if (!cf)
+         return true;
+      if (cf->has_else || !fold_jump_in_if(vp, cf))
+         emit_label(vp, cf->has_else ? cf->label_b : cf->label_a);
+      vp->cf_depth--;
+      return true;
+
+   case TGSI_OPCODE_BGNLOOP:
+      cf = cf_push(vp, true);
+      if (cf)
+         emit_label(vp, cf->label_a);
+      return true;
+
+   case TGSI_OPCODE_ENDLOOP:
+      cf = cf_top(vp, true);
+      if (!cf)
+         return true;
+      if (!rotate_loop(vp, cf))
+         emit_branch(vp, cf->label_a, true, true, true, VP_SWZ_X);
+      emit_label(vp, cf->label_b);
+      vp->cf_depth--;
+      return true;
+
+   case TGSI_OPCODE_BRK:
+      cf = cf_loop(vp);
+      if (cf)
+         emit_branch(vp, cf->label_b, true, true, true, VP_SWZ_X);
+      return true;
+
+   case TGSI_OPCODE_CONT:
+      cf = cf_loop(vp);
+      if (cf)
+         emit_branch(vp, cf->label_a, true, true, true, VP_SWZ_X);
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+/* Replace the labels by instruction indices. A branch to the end of the
+ * program, and a program that ends with a branch, need one more instruction
+ * to land on: NVIDIA's compiler ends such a program with an empty one (the
+ * one with the end-of-program bit). */
+static void
+resolve_labels(struct grate_vp_shader *vp)
+{
+   unsigned *index =
+      CALLOC(vp->num_labels ? vp->num_labels : 1, sizeof(*index));
+   if (!index) {
+      vp->failed = true;
+      return;
+   }
+
+   unsigned count = 0;
+   list_for_each_entry_safe (struct vp_instr, instr, &vp->instructions,
+                             link) {
+      if (instr->is_label) {
+         index[instr->label] = count;
+         list_del(&instr->link);
+         FREE(instr);
+      } else {
+         count++;
+      }
+   }
+
+   bool landing = false;
+   for (unsigned i = 0; i < vp->num_labels; i++)
+      landing |= index[i] == count;
+   if (count > 0 &&
+       list_last_entry(&vp->instructions, struct vp_instr, link)->scalar.op ==
+          VP_SCALAR_OP_BRA)
+      landing = true;
+   if (landing) {
+      struct vp_instr *nop = emit_packed(emit_vNOP(), emit_sNOP());
+      list_addtail(&nop->link, &vp->instructions);
+   }
+
+   list_for_each_entry (struct vp_instr, instr, &vp->instructions, link)
+      if (instr->scalar.op == VP_SCALAR_OP_BRA)
+         instr->branch.target = index[instr->branch.label];
+
+   FREE(index);
+}
+
 void
 grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
 {
@@ -662,6 +1132,8 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
    vp->num_immediates = 0;
    vp->num_temps = 0;
    vp->failed = false;
+   vp->cf_depth = 0;
+   vp->num_labels = 0;
 
    while (!tgsi_parse_end_of_tokens(tgsi)) {
       tgsi_parse_token(tgsi);
@@ -691,6 +1163,8 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
 
       case TGSI_TOKEN_TYPE_INSTRUCTION:
          if (tgsi->FullToken.FullInstruction.Instruction.Opcode != TGSI_OPCODE_END) {
+            if (tgsi_control_flow(vp, &tgsi->FullToken.FullInstruction))
+               break;
             struct vp_instr *instr = tgsi_to_vp(vp, &tgsi->FullToken.FullInstruction);
             if (!instr) 
                continue;
@@ -701,4 +1175,11 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
          break;
       }
    }
+
+   if (vp->cf_depth) {
+      fprintf(stderr, "GRATE VERTEX: unbalanced control flow\n");
+      vp->failed = true;
+   }
+   if (!vp->failed)
+      resolve_labels(vp);
 }

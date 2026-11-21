@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "util/macros.h"
 
@@ -101,6 +102,7 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
     * for these registers.
     */
    int attr_fetch = -1, uniform_fetch = -1;
+   bool relative = false;
    for (int i = 0; i < 3; ++i) {
       switch (instr->vec.src[i].file) {
       case VP_SRC_FILE_ATTRIB:
@@ -112,8 +114,10 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
 
       case VP_SRC_FILE_UNIFORM:
          assert(uniform_fetch < 0 ||
-                uniform_fetch == instr->vec.src[i].index);
+                (uniform_fetch == instr->vec.src[i].index &&
+                 relative == instr->vec.src[i].relative));
          uniform_fetch = instr->vec.src[i].index;
+         relative = instr->vec.src[i].relative;
          instr->vec.src[i].index = 0;
          break;
 
@@ -132,8 +136,10 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
 
       case VP_SRC_FILE_UNIFORM:
          assert(uniform_fetch < 0 ||
-                uniform_fetch == instr->scalar.src.index);
+                (uniform_fetch == instr->scalar.src.index &&
+                 relative == instr->scalar.src.relative));
          uniform_fetch = instr->scalar.src.index;
+         relative = instr->scalar.src.relative;
          instr->scalar.src.index = 0;
          break;
 
@@ -144,6 +150,10 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
 
    tmp.attribute_fetch_index = attr_fetch >= 0 ? attr_fetch : 0;
    tmp.uniform_fetch_index = uniform_fetch >= 0 ? uniform_fetch : 0;
+   /* the uniform slot is the fetch index plus the address register (A0.x,
+    * select 0), as in NVIDIA's compiler (idx-uniform in
+    * tools/gpu/grate-vertex-ops-test.c) */
+   tmp.constant_relative_addressing_enable = relative;
 
    tmp.vector_opcode = instr->vec.op;
    switch (instr->vec.dst.file) {
@@ -211,6 +221,29 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
       tmp.predicate_eq = instr->cond.eq;
       tmp.predicate_gt = instr->cond.gt;
       tmp.predicate_swizzle = vp_swizzle(instr->cond.swizzle);
+   }
+
+   if (instr->scalar.op == VP_SCALAR_OP_BRA) {
+      /* Like NVIDIA's compiler (tools/gpu/ar20vp-dump.py): the predicate
+       * fields choose the condition although condition_check stays 0, the
+       * sources are the NOP's attribute 0, and the target instruction index
+       * is the swizzle byte of source C. */
+      static const enum vp_swz identity[4] = {VP_SWZ_X, VP_SWZ_Y, VP_SWZ_Z,
+                                              VP_SWZ_W};
+      struct vp_src_operand nop = {.file = VP_SRC_FILE_ATTRIB};
+      memcpy(nop.swizzle, identity, sizeof(nop.swizzle));
+      assert(instr->branch.target < 256);
+
+      tmp.rA = vp_src_reg(nop);
+      tmp.rB = vp_src_reg(nop);
+      tmp.rC =
+         (vp_src_reg(nop) & ~(0xffu << 8)) | (instr->branch.target << 8);
+      tmp.predicate_lt = instr->branch.lt;
+      tmp.predicate_eq = instr->branch.eq;
+      tmp.predicate_gt = instr->branch.gt;
+      tmp.predicate_swizzle =
+         vp_swizzle((enum vp_swz[4]){instr->branch.lane, instr->branch.lane,
+                                     instr->branch.lane, instr->branch.lane});
    }
 
    tmp.end_of_program = end_of_program;

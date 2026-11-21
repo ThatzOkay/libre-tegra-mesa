@@ -38,8 +38,21 @@ struct tgsi_full_instruction;
 #define GRATE_FP_DRIVER_Z_OFFSET  (GRATE_FP_DRIVER_WORD_BASE + 1)
 #define GRATE_FP_UNIFORM_COMPONENTS 256
 
+/* Open IF and BGNLOOP constructs of a vertex program, see vp/tgsi.c */
+#define GRATE_VP_MAX_CF_DEPTH 16
+
+struct grate_vp_cf {
+   bool is_loop;
+   bool has_else;
+   unsigned label_a; /* IF: the else part (or ENDIF), loop: the top */
+   unsigned label_b; /* IF: ENDIF once there is an ELSE, loop: the end */
+};
+
 struct grate_vp_shader {
    struct list_head instructions;
+   struct grate_vp_cf cf[GRATE_VP_MAX_CF_DEPTH];
+   unsigned cf_depth;
+   unsigned num_labels;
    uint16_t output_mask;
    uint32_t immediates[GRATE_VP_MAX_IMMEDIATES]
                       [4]; /* raw 32-bit words, slot i of the immediates */
