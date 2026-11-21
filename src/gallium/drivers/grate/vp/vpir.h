@@ -91,6 +91,8 @@ struct vp_src_operand {
    bool negate, absolute;
    /* uniform only: read slot index + the address register (see ARL) */
    bool relative;
+   /* lane of the address register that a relative read uses */
+   unsigned addr_lane;
 };
 
 struct vp_vec_instr {
@@ -136,6 +138,8 @@ struct vp_instr {
     * instruction, it is dropped when the labels are resolved. */
    bool is_label;
    unsigned label;
+   /* the TGSI instruction is precise: no fusing of operations */
+   bool precise;
 };
 
 void
