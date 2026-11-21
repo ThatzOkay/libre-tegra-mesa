@@ -117,14 +117,6 @@ grate_resource_transfer_map(struct pipe_context *pcontext,
 }
 
 static void
-grate_resource_transfer_flush_region(struct pipe_context *pcontext,
-                                     struct pipe_transfer *transfer,
-                                     const struct pipe_box *box)
-{
-   grate_unimplemented();
-}
-
-static void
 grate_resource_transfer_unmap(struct pipe_context *pcontext,
                               struct pipe_transfer *transfer)
 {
@@ -896,7 +888,9 @@ grate_context_resource_init(struct pipe_context *pcontext)
    grate_trace();
    pcontext->buffer_map = grate_resource_transfer_map;
    pcontext->texture_map = grate_resource_transfer_map;
-   pcontext->transfer_flush_region = grate_resource_transfer_flush_region;
+   /* the mapping is the buffer object itself, there is no staging copy
+    * to write back */
+   pcontext->transfer_flush_region = u_default_transfer_flush_region;
    pcontext->buffer_unmap = grate_resource_transfer_unmap;
    pcontext->texture_unmap = grate_resource_transfer_unmap;
    pcontext->buffer_subdata = u_default_buffer_subdata;
