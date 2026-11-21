@@ -308,6 +308,11 @@ grate_screen_init_shader_caps(struct grate_screen *screen)
    caps->max_alu_instructions = 1024;
    caps->max_tex_instructions = 0;
    caps->max_tex_indirections = 0;
+   /* Stays 0 although vp/tgsi.c translates loops and ifs into BRA: with 0
+    * nir_to_tgsi flattens every if whatever its size (peephole_select limit
+    * ~0), which is what NVIDIA's compiler does (an 8+8 statement if/else is
+    * 87 instructions without a branch, docs/grate-vertex-control-flow.md).
+    * Only loops reach the BRA path. */
    caps->max_control_flow_depth = 0;
    caps->max_inputs = 16;
    caps->max_outputs = 16;
