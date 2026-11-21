@@ -37,33 +37,49 @@ grate_vs_tgsi_transform_instruction(struct tgsi_transform_context *ctx,
    struct grate_vs_tgsi_transform_context *gctx =
       (struct grate_vs_tgsi_transform_context *)ctx;
 
-   int const_index = -1;
+   const struct tgsi_full_src_register *first = NULL;
    for (unsigned i = 0; i < inst->Instruction.NumSrcRegs; i++) {
       if (inst->Src[i].Register.File != TGSI_FILE_CONSTANT)
          continue;
 
-      if (const_index < 0)
-         const_index = inst->Src[i].Register.Index;
-      else if (inst->Src[i].Register.Index != const_index) {
-         /* We already have a constant-reads in this instruction,
-          * add extra instructions in order to read more
-          */
-         unsigned temp = gctx->next_temp++;
-         tgsi_transform_temp_decl(ctx, temp);
-         /* insert MOV to temp */
-         tgsi_transform_op1_inst(ctx, TGSI_OPCODE_MOV,
-                                 /* dst reg */
-                                 TGSI_FILE_TEMPORARY, temp,
-                                 TGSI_WRITEMASK_XYZW,
-                                 /* src reg */
-                                 TGSI_FILE_CONSTANT,
-                                 inst->Src[i].Register.Index);
-
-         /* rewrite instruction */
-         tgsi_transform_src_reg_xyzw(&inst->Src[i], TGSI_FILE_TEMPORARY, temp);
-         inst->Src[i].Register.File = TGSI_FILE_TEMPORARY;
-         inst->Src[i].Register.Index = temp;
+      if (!first) {
+         first = &inst->Src[i];
+         continue;
       }
+
+      /* the same constant read the same way: one fetch serves both */
+      if (inst->Src[i].Register.Index == first->Register.Index &&
+          inst->Src[i].Register.Indirect == first->Register.Indirect &&
+          (!first->Register.Indirect ||
+           (inst->Src[i].Indirect.Index == first->Indirect.Index &&
+            inst->Src[i].Indirect.Swizzle == first->Indirect.Swizzle)))
+         continue;
+
+      /* We already have a constant-reads in this instruction,
+       * add extra instructions in order to read more
+       */
+      unsigned temp = gctx->next_temp++;
+      tgsi_transform_temp_decl(ctx, temp);
+      /* insert MOV to temp, with the indirect addressing of the source */
+      struct tgsi_full_instruction mov = tgsi_default_full_instruction();
+      mov.Instruction.Opcode = TGSI_OPCODE_MOV;
+      mov.Instruction.NumDstRegs = 1;
+      mov.Dst[0].Register.File = TGSI_FILE_TEMPORARY;
+      mov.Dst[0].Register.Index = temp;
+      mov.Dst[0].Register.WriteMask = TGSI_WRITEMASK_XYZW;
+      mov.Instruction.NumSrcRegs = 1;
+      tgsi_transform_src_reg_xyzw(&mov.Src[0], TGSI_FILE_CONSTANT,
+                                  inst->Src[i].Register.Index);
+      mov.Src[0].Register.Indirect = inst->Src[i].Register.Indirect;
+      mov.Src[0].Indirect = inst->Src[i].Indirect;
+      ctx->emit_instruction(ctx, &mov);
+
+      /* rewrite instruction */
+      tgsi_transform_src_reg_xyzw(&inst->Src[i], TGSI_FILE_TEMPORARY, temp);
+      inst->Src[i].Register.File = TGSI_FILE_TEMPORARY;
+      inst->Src[i].Register.Index = temp;
+      inst->Src[i].Register.Indirect = 0;
+      inst->Src[i].Register.Dimension = 0;
    }
 
    ctx->emit_instruction(ctx, inst);
