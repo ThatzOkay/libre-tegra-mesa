@@ -1653,6 +1653,15 @@ emit_tgsi_instr(struct grate_fp_shader *fp, const struct tgsi_full_instruction *
       fprintf(stderr, "GRATE FRAG TGSI UNIMPLEMENTED: 0x%02x %s\n",
               inst->Instruction.Opcode,
               tgsi_get_opcode_name(inst->Instruction.Opcode));
+      if (inst->Instruction.Opcode == TGSI_OPCODE_BGNLOOP)
+         /* not a gap to fill: the fragment unit has no branches, and
+          * NVIDIA's compiler refuses the same shader (cgtest 1 2 on a for
+          * loop with a uniform bound: error C5013, profile does not
+          * support "for" statements and "for" could not be unrolled; a
+          * constant bound is unrolled). Matching it means refusing too. */
+         fprintf(stderr, "GRATE FRAG: a loop whose bound is not a constant "
+                         "cannot run on the fragment unit; NVIDIA's compiler "
+                         "refuses it too (C5013), the shader is refused\n");
       fp->allocation_failed = true;
       break;
    }
