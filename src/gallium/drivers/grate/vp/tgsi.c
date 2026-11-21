@@ -1,10 +1,13 @@
+#include <strings.h>
 #include <assert.h>
 #include "grate_compiler.h"
 #include "unistd.h"
 #include "vpir.h"
 
 #include "tgsi/tgsi_parse.h"
+#include "tgsi/tgsi_scan.h"
 
+#include "util/bitscan.h"
 #include "util/u_memory.h"
 
 static struct vp_src_operand
@@ -238,7 +241,7 @@ tgsi_dst_to_vp(struct grate_vp_shader *vp, const struct tgsi_dst_register *dst, 
       return emit_output(vp, dst->Index, dst->WriteMask, saturate);
 
    case TGSI_FILE_TEMPORARY:
-      return dst_temp(dst->Index, dst->WriteMask, saturate);
+      return dst_temp(vp->temp_base + dst->Index, dst->WriteMask, saturate);
 
    default:
       UNREACHABLE("unsupported output");
@@ -268,11 +271,12 @@ tgsi_src_to_vp(struct grate_vp_shader *vp, const struct tgsi_src_register *src)
          uniform(vp->num_immediates + src->Index, swizzle, negate, absolute);
       /* CONST[ADDR[0].x + index], checked in tgsi_to_vp() */
       ret.relative = src->Indirect != 0;
+      ret.addr_lane = vp->addr_lane;
       return ret;
    }
 
    case TGSI_FILE_TEMPORARY:
-      return src_temp(src->Index, swizzle, negate, absolute);
+      return src_temp(vp->temp_base + src->Index, swizzle, negate, absolute);
 
    case TGSI_FILE_IMMEDIATE:
       /* the values are recorded in grate_tgsi_to_vp() and uploaded to the
@@ -310,14 +314,17 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
 
    switch (inst->Instruction.Opcode) {
    case TGSI_OPCODE_ARL: {
-      /* A0.x = floor(src.x): the vector op ARL, as in NVIDIA's compiler
-       * (idx-attr in tools/gpu/grate-vertex-ops-test.c). Like NVIDIA's
-       * compiler it writes the register it reads (ARL r0.y A=r0.yyyy): with
-       * another destination, even r63 or a scratch, the address register was
-       * not loaded on the tablet (idx-attr, idx-two read slot 0). The floor
-       * stays in that register, which changes nothing, because an integer
-       * is a float holding an integer here. A source that is not lane x of
-       * a temporary, or that has a modifier, is copied to one first. */
+      /* A0.L = floor(src.L): the vector op ARL, as in NVIDIA's compiler
+       * (idx-attr in tools/gpu/grate-vertex-ops-test.c). NVIDIA's ARL always
+       * has r0 as its destination (ARL r0.xy A=r0.xyxx). On the tablet the
+       * address register was loaded only then: with r63, or any other
+       * register, it was not (idx-attr and idx-two read slot 0, and a first
+       * index in r1 failed while the same index in r0 worked). So r0 is
+       * reserved for it: temp_base is 1 in a program with an ARL. What the
+       * ARL leaves in r0 is the floor of the index, nobody reads it. The
+       * lane of the source is the lane of the address register, the reads
+       * that follow select it. A source that is not a plain temporary is
+       * copied to one first. */
       static const enum vp_swz xxxx[4] = {VP_SWZ_X, VP_SWZ_X, VP_SWZ_X,
                                           VP_SWZ_X};
       const struct tgsi_src_register *src = &inst->Src[0].Register;
@@ -329,24 +336,27 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
          return 0;
       }
 
-      unsigned t = src->Index;
+      unsigned lane = src->SwizzleX;
       struct vp_src_operand a = tgsi_src_to_vp(vp, src);
-      if (src->File != TGSI_FILE_TEMPORARY ||
-          src->SwizzleX != TGSI_SWIZZLE_X || src->Negate || src->Absolute) {
+      if (src->File != TGSI_FILE_TEMPORARY || src->Negate || src->Absolute) {
          if (vp->num_temps >= 62) {
             fprintf(stderr, "GRATE VERTEX: out of temporaries for ARL\n");
             vp->failed = true;
             return 0;
          }
-         t = vp->num_temps++;
+         unsigned t = vp->num_temps++;
+         lane = VP_SWZ_X;
          struct vp_instr *copy =
             emit_packed(emit_vMOV(dst_temp(t, 0x1, false), a), emit_sNOP());
          legalize_fetches(vp, copy, &vp->instructions);
          list_addtail(&copy->link, &vp->instructions);
          a = src_temp(t, xxxx, false, false);
       }
+      for (unsigned k = 0; k < 4; k++)
+         a.swizzle[k] = lane;
+      vp->addr_lane = lane;
       return emit_packed(
-         emit_vec_unop(VP_VEC_OP_ARL, dst_temp(t, 0x1, false), a),
+         emit_vec_unop(VP_VEC_OP_ARL, dst_temp(0, 1u << lane, false), a),
          emit_sNOP());
    }
 
@@ -359,7 +369,7 @@ tgsi_to_vp(struct grate_vp_shader *vp, const struct tgsi_full_instruction *inst)
                                               VP_SWZ_W};
       const struct tgsi_dst_register *d = &inst->Dst[0].Register;
       bool scratch = d->File != TGSI_FILE_TEMPORARY;
-      unsigned t = d->Index;
+      unsigned t = vp->temp_base + d->Index;
       if (saturate) {
          fprintf(stderr, "GRATE VERTEX: saturated TRUNC\n");
          vp->failed = true;
@@ -1079,6 +1089,620 @@ tgsi_control_flow(struct grate_vp_shader *vp,
    }
 }
 
+/* Peepholes, run before the labels are resolved. */
+
+static bool
+reads_temp(const struct vp_instr *instr, unsigned t)
+{
+   if (instr->is_label)
+      return false;
+   for (unsigned i = 0; i < 3; i++)
+      if (instr->vec.src[i].file == VP_SRC_FILE_TEMP &&
+          instr->vec.src[i].index == t)
+         return true;
+   return instr->scalar.src.file == VP_SRC_FILE_TEMP &&
+          instr->scalar.src.index == t;
+}
+
+static bool
+writes_temp(const struct vp_instr *instr, unsigned t)
+{
+   return !instr->is_label &&
+          ((instr->vec.dst.file == VP_DST_FILE_TEMP &&
+            instr->vec.dst.index == t && instr->vec.dst.write_mask) ||
+           (instr->scalar.dst.file == VP_DST_FILE_TEMP &&
+            instr->scalar.dst.index == t && instr->scalar.dst.write_mask));
+}
+
+static bool
+has_branches(const struct grate_vp_shader *vp)
+{
+   list_for_each_entry (struct vp_instr, instr, &vp->instructions, link)
+      if (instr->is_label || instr->scalar.op == VP_SCALAR_OP_BRA)
+         return true;
+   return false;
+}
+
+static bool
+is_plain(const struct vp_instr *instr)
+{
+   return !instr->is_label && !instr->precise &&
+          instr->scalar.op == VP_SCALAR_OP_NOP && !instr->cond.set &&
+          !instr->cond.check;
+}
+
+static bool temp_dead_after(const struct grate_vp_shader *vp,
+                            const struct vp_instr *from, unsigned t,
+                            unsigned live);
+
+/* int() of a float that is only an array index: TRUNC, then ARL. NVIDIA's
+ * compiler emits a MAD and the ARL alone for m[int(a.x * 10.0 + 0.5)]
+ * (idx-attr), the ARL's floor does the conversion: for a negative index,
+ * undefined in GLSL anyway, floor and truncation differ. Our TRUNC is three
+ * instructions (flags from x, FLR of |x|, a predicated negate) in place on
+ * a temporary, and the ARL reads and writes that temporary. They go when
+ * nothing else reads it, and without branches, which could run the code
+ * more than once.
+ *
+ *    MOV r63.x = t.x (flags); FLR t.x = |t.x|; MOV t.x = -t.x if LT; ...;
+ *    ARL t.x = t.x   -->   ARL t.x = t.x
+ */
+static void
+fold_trunc_into_arl(struct grate_vp_shader *vp)
+{
+   if (has_branches(vp))
+      return;
+
+   list_for_each_entry (struct vp_instr, arl, &vp->instructions, link) {
+      if (arl->vec.op != VP_VEC_OP_ARL ||
+          arl->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          arl->vec.dst.write_mask != 0x1 || arl->vec.src[0].swizzle[0] != 0)
+         continue;
+      unsigned t = arl->vec.src[0].index;
+
+      /* the nearest write of t before the ARL has to be the negate */
+      struct vp_instr *neg = NULL;
+      for (struct list_head *l = arl->link.prev; l != &vp->instructions;
+           l = l->prev) {
+         struct vp_instr *instr = list_entry(l, struct vp_instr, link);
+         if (writes_temp(instr, t)) {
+            neg = instr;
+            break;
+         }
+      }
+      if (!neg || neg->link.prev == &vp->instructions)
+         continue;
+      struct vp_instr *flr =
+         list_entry(neg->link.prev, struct vp_instr, link);
+      if (flr->link.prev == &vp->instructions)
+         continue;
+      struct vp_instr *flags =
+         list_entry(flr->link.prev, struct vp_instr, link);
+
+      if (neg->vec.op != VP_VEC_OP_MOV || !neg->cond.check || !neg->cond.lt ||
+          neg->cond.eq || neg->cond.gt ||
+          neg->vec.dst.file != VP_DST_FILE_TEMP || neg->vec.dst.index != t ||
+          neg->vec.dst.write_mask != 0x1 ||
+          neg->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          neg->vec.src[0].index != t || !neg->vec.src[0].negate ||
+          flr->vec.op != VP_VEC_OP_FLR ||
+          flr->vec.dst.file != VP_DST_FILE_TEMP || flr->vec.dst.index != t ||
+          flr->vec.dst.write_mask != 0x1 ||
+          flr->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          flr->vec.src[0].index != t || !flr->vec.src[0].absolute ||
+          flags->vec.op != VP_VEC_OP_MOV || !flags->cond.set ||
+          flags->vec.dst.file != VP_DST_FILE_TEMP ||
+          flags->vec.dst.index != 63 || flags->vec.dst.write_mask != 0x1 ||
+          flags->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          flags->vec.src[0].index != t)
+         continue;
+
+      /* nothing reads t between the three and the ARL, and what t holds
+       * after it is dead (overwritten before any read, straight-line code):
+       * the ARL reads x itself now, t is no longer truncated. The reads
+       * before the three see the value they were written with, there are
+       * no branches. */
+      bool between_reads = false;
+      for (struct list_head *l = neg->link.next; l != &arl->link; l = l->next)
+         between_reads |= reads_temp(list_entry(l, struct vp_instr, link), t);
+      if (between_reads || !is_plain(arl) ||
+          !temp_dead_after(vp, arl, t, 0x1))
+         continue;
+
+      list_del(&flags->link);
+      list_del(&flr->link);
+      list_del(&neg->link);
+      FREE(flags);
+      FREE(flr);
+      FREE(neg);
+      /* the list changed under the loop, start again */
+      fold_trunc_into_arl(vp);
+      return;
+   }
+}
+
+/* Is the value that lanes `live` of temporary t hold after `from` dead? True
+ * when an unconditional write overwrites all of them before anything reads t
+ * (straight-line code only: a label or a branch stops the search), or when
+ * the program ends first. */
+static bool
+temp_dead_after(const struct grate_vp_shader *vp, const struct vp_instr *from,
+                unsigned t, unsigned live)
+{
+   if (!live)
+      return true;
+
+   for (const struct list_head *l = from->link.next; l != &vp->instructions;
+        l = l->next) {
+      const struct vp_instr *instr =
+         list_entry(l, const struct vp_instr, link);
+      if (instr->is_label || instr->scalar.op == VP_SCALAR_OP_BRA ||
+          reads_temp(instr, t))
+         return false;
+      if (writes_temp(instr, t) && !instr->cond.check &&
+          instr->vec.dst.file == VP_DST_FILE_TEMP &&
+          instr->vec.dst.index == t)
+         live &= ~instr->vec.dst.write_mask;
+      if (!live)
+         return true;
+   }
+   return true;
+}
+
+/* MUL t = a * b; ADD d = t + c  -->  MAD d = a * b + c, as NVIDIA's compiler
+ * emits for a * b + c (mad-fuse, mad-fuse-neg). Only for two neighbours that
+ * read like the lanes of one product, when the product is not needed
+ * anywhere else, and when the three sources need one attribute and one
+ * uniform fetch at most. */
+static void
+fuse_mad(struct grate_vp_shader *vp)
+{
+   list_for_each_entry_safe (struct vp_instr, mul, &vp->instructions, link) {
+      if (mul->vec.op != VP_VEC_OP_MUL || !is_plain(mul) ||
+          mul->vec.dst.file != VP_DST_FILE_TEMP || mul->vec.dst.saturate ||
+          mul->link.next == &vp->instructions)
+         continue;
+      struct vp_instr *add =
+         list_entry(mul->link.next, struct vp_instr, link);
+      if (add->vec.op != VP_VEC_OP_ADD || !is_plain(add))
+         continue;
+
+      unsigned t = mul->vec.dst.index;
+      /* ADD takes its operands in slots 0 and 2 */
+      int ti = -1;
+      for (unsigned i = 0; i < 3; i += 2) {
+         const struct vp_src_operand *s = &add->vec.src[i];
+         if (s->file == VP_SRC_FILE_TEMP && s->index == t) {
+            if (ti >= 0)
+               ti = -2;
+            else if (ti == -1)
+               ti = i;
+         }
+      }
+      if (ti < 0)
+         continue;
+      const struct vp_src_operand *tsrc = &add->vec.src[ti];
+      const struct vp_src_operand *csrc = &add->vec.src[2 - ti];
+      /* the lanes the ADD writes read the same lanes of the product */
+      bool lanes = true;
+      for (unsigned i = 0; i < 4; i++)
+         if ((add->vec.dst.write_mask & (1u << i)) && tsrc->swizzle[i] != i)
+            lanes = false;
+      if (tsrc->absolute || !lanes ||
+          (add->vec.dst.write_mask & ~mul->vec.dst.write_mask))
+         continue;
+
+      /* the product is dead after the ADD (which may write t again) */
+      unsigned live = mul->vec.dst.write_mask;
+      if (add->vec.dst.file == VP_DST_FILE_TEMP && add->vec.dst.index == t)
+         live &= ~add->vec.dst.write_mask;
+      if (!temp_dead_after(vp, add, t, live))
+         continue;
+
+      struct vp_vec_instr mad = {
+         .op = VP_VEC_OP_MAD,
+         .dst = add->vec.dst,
+         .src = {mul->vec.src[0], mul->vec.src[1], *csrc},
+      };
+      if (tsrc->negate) {
+         /* -(a * b) = (-a) * b, on a source that has no abs on it */
+         if (mad.src[0].absolute && mad.src[1].absolute)
+            continue;
+         struct vp_src_operand *neg =
+            mad.src[0].absolute ? &mad.src[1] : &mad.src[0];
+         neg->negate = !neg->negate;
+      }
+
+      /* one attribute and one uniform fetch per instruction */
+      int attr = -1, uni = -1;
+      bool uni_rel = false, ok = true;
+      for (unsigned i = 0; i < 3; i++) {
+         const struct vp_src_operand *s = &mad.src[i];
+         if (s->file == VP_SRC_FILE_ATTRIB) {
+            ok &= attr < 0 || attr == s->index;
+            attr = s->index;
+         } else if (s->file == VP_SRC_FILE_UNIFORM) {
+            ok &= uni < 0 || (uni == s->index && uni_rel == s->relative);
+            uni = s->index;
+            uni_rel = s->relative;
+         }
+      }
+      if (!ok)
+         continue;
+
+      add->vec = mad;
+      list_del(&mul->link);
+      FREE(mul);
+   }
+}
+
+static bool
+same_operand(const struct vp_src_operand *a, const struct vp_src_operand *b,
+             unsigned mask)
+{
+   if (a->file != b->file || a->index != b->index ||
+       a->relative != b->relative || a->negate != b->negate ||
+       a->absolute != b->absolute ||
+       (a->relative && a->addr_lane != b->addr_lane))
+      return false;
+   for (unsigned i = 0; i < 4; i++)
+      if ((mask & (1u << i)) && a->swizzle[i] != b->swizzle[i])
+         return false;
+   return true;
+}
+
+static bool
+is_zero_immediate(const struct grate_vp_shader *vp,
+                  const struct vp_src_operand *op, unsigned mask)
+{
+   if (op->file != VP_SRC_FILE_UNIFORM || op->relative ||
+       (unsigned)op->index >= vp->num_immediates)
+      return false;
+   for (unsigned i = 0; i < 4; i++) {
+      if (!(mask & (1u << i)))
+         continue;
+      uint32_t bits = vp->immediates[op->index][op->swizzle[i]];
+      if (bits & 0x7fffffff)
+         return false;
+   }
+   return true;
+}
+
+/* How many lanes of the operands may differ between the two sources of an
+ * instruction: at most one attribute index, one uniform index (with its
+ * relative bit and address lane). */
+static bool
+fetches_fit(const struct vp_src_operand *src[3])
+{
+   int attr = -1, uni = -1;
+   bool rel = false;
+   unsigned lane = 0;
+
+   for (unsigned i = 0; i < 3; i++) {
+      if (src[i]->file == VP_SRC_FILE_ATTRIB) {
+         if (attr >= 0 && attr != src[i]->index)
+            return false;
+         attr = src[i]->index;
+      } else if (src[i]->file == VP_SRC_FILE_UNIFORM) {
+         if (uni >= 0 && (uni != src[i]->index || rel != src[i]->relative ||
+                          (rel && lane != src[i]->addr_lane)))
+            return false;
+         uni = src[i]->index;
+         rel = src[i]->relative;
+         lane = src[i]->addr_lane;
+      }
+   }
+   return true;
+}
+
+/* MUL_PRECISE t = x * 0.0; ADD_PRECISE d = t + x. NIR puts this exact pair
+ * after a varying that came out of an add, it is x again (but for infinities
+ * and NaN), and NVIDIA's compiler has nothing of it (idx-two: 7 instructions
+ * against our 13). */
+static void
+fold_identity_pair(struct grate_vp_shader *vp)
+{
+   list_for_each_entry_safe (struct vp_instr, mul, &vp->instructions, link) {
+      if (mul->is_label || mul->vec.op != VP_VEC_OP_MUL || !mul->precise ||
+          mul->scalar.op != VP_SCALAR_OP_NOP || mul->cond.set ||
+          mul->cond.check || mul->vec.dst.file != VP_DST_FILE_TEMP ||
+          mul->link.next == &vp->instructions)
+         continue;
+      struct vp_instr *add =
+         list_entry(mul->link.next, struct vp_instr, link);
+      if (add->is_label || add->vec.op != VP_VEC_OP_ADD || !add->precise ||
+          add->scalar.op != VP_SCALAR_OP_NOP || add->cond.set ||
+          add->cond.check)
+         continue;
+
+      unsigned t = mul->vec.dst.index, mask = mul->vec.dst.write_mask;
+      int zero = is_zero_immediate(vp, &mul->vec.src[1], mask)   ? 1
+                 : is_zero_immediate(vp, &mul->vec.src[0], mask) ? 0
+                                                                 : -1;
+      if (zero < 0 || (add->vec.dst.write_mask & ~mask))
+         continue;
+      const struct vp_src_operand *x = &mul->vec.src[1 - zero];
+
+      int ti = -1;
+      for (unsigned i = 0; i < 3; i += 2) {
+         const struct vp_src_operand *o = &add->vec.src[i];
+         if (o->file == VP_SRC_FILE_TEMP && o->index == t && !o->negate &&
+             !o->absolute) {
+            bool lanes = true;
+            for (unsigned k = 0; k < 4; k++)
+               if ((add->vec.dst.write_mask & (1u << k)) &&
+                   o->swizzle[k] != k)
+                  lanes = false;
+            if (lanes)
+               ti = i;
+         }
+      }
+      if (ti < 0)
+         continue;
+      const struct vp_src_operand *other = &add->vec.src[2 - ti];
+      if (!same_operand(x, other, add->vec.dst.write_mask))
+         continue;
+
+      unsigned live = mask;
+      if (add->vec.dst.file == VP_DST_FILE_TEMP && add->vec.dst.index == t)
+         live &= ~add->vec.dst.write_mask;
+      if (!temp_dead_after(vp, add, t, live))
+         continue;
+
+      struct vp_vec_instr mov = emit_vMOV(add->vec.dst, *other);
+      add->vec = mov;
+      add->precise = false;
+      list_del(&mul->link);
+      FREE(mul);
+   }
+}
+
+/* MOV t = t (the same lanes): nir_to_tgsi leaves them in front of an ARL. */
+static void
+drop_self_moves(struct grate_vp_shader *vp)
+{
+   list_for_each_entry_safe (struct vp_instr, mov, &vp->instructions, link) {
+      if (mov->vec.op != VP_VEC_OP_MOV || !is_plain(mov) ||
+          mov->vec.dst.file != VP_DST_FILE_TEMP || mov->vec.dst.saturate ||
+          mov->vec.dst.index == 63 ||
+          mov->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          mov->vec.src[0].index != mov->vec.dst.index ||
+          mov->vec.src[0].negate || mov->vec.src[0].absolute)
+         continue;
+      bool same = true;
+      for (unsigned i = 0; i < 4; i++)
+         if ((mov->vec.dst.write_mask & (1u << i)) &&
+             mov->vec.src[0].swizzle[i] != i)
+            same = false;
+      if (!same)
+         continue;
+      list_del(&mov->link);
+      FREE(mov);
+   }
+}
+
+/* MOV t1.x = s.L; ARL t1.x  -->  ARL s.L: the ARL reads the register that
+ * holds the index, on its own lane, and the reads that follow use that lane
+ * of the address register (nir_to_tgsi copies the index first). */
+static void
+fold_copy_into_arl(struct grate_vp_shader *vp)
+{
+   list_for_each_entry_safe (struct vp_instr, mov, &vp->instructions, link) {
+      if (mov->vec.op != VP_VEC_OP_MOV || !is_plain(mov) ||
+          mov->vec.dst.file != VP_DST_FILE_TEMP ||
+          mov->vec.dst.write_mask != 0x1 || mov->vec.dst.saturate ||
+          mov->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          mov->vec.src[0].negate || mov->vec.src[0].absolute ||
+          mov->vec.src[0].index == mov->vec.dst.index ||
+          mov->link.next == &vp->instructions)
+         continue;
+      struct vp_instr *arl =
+         list_entry(mov->link.next, struct vp_instr, link);
+      unsigned t1 = mov->vec.dst.index;
+      if (arl->is_label || arl->vec.op != VP_VEC_OP_ARL || !is_plain(arl) ||
+          arl->vec.dst.write_mask != 0x1 ||
+          arl->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          arl->vec.src[0].index != t1 || !temp_dead_after(vp, arl, t1, 0x1))
+         continue;
+
+      /* the reads up to the next ARL move to the new lane */
+      bool ok = true;
+      for (struct list_head *l = arl->link.next; l != &vp->instructions;
+           l = l->next) {
+         struct vp_instr *instr = list_entry(l, struct vp_instr, link);
+         if (instr->is_label || instr->scalar.op == VP_SCALAR_OP_BRA) {
+            ok = false;
+            break;
+         }
+         if (instr->vec.op == VP_VEC_OP_ARL)
+            break;
+      }
+      if (!ok)
+         continue;
+
+      unsigned lane = mov->vec.src[0].swizzle[0];
+      struct vp_src_operand a = mov->vec.src[0];
+      for (unsigned k = 0; k < 4; k++)
+         a.swizzle[k] = lane;
+      arl->vec.dst.write_mask = 1u << lane;
+      arl->vec.src[0] = a;
+      for (struct list_head *l = arl->link.next; l != &vp->instructions;
+           l = l->next) {
+         struct vp_instr *instr = list_entry(l, struct vp_instr, link);
+         if (instr->vec.op == VP_VEC_OP_ARL)
+            break;
+         for (unsigned k = 0; k < 3; k++)
+            if (instr->vec.src[k].relative)
+               instr->vec.src[k].addr_lane = lane;
+         if (instr->scalar.src.relative)
+            instr->scalar.src.addr_lane = lane;
+      }
+      list_del(&mov->link);
+      FREE(mov);
+   }
+}
+
+/* ARL t.a; ...; ARL t.b  -->  ARL t.ab; ...: NVIDIA's compiler loads both
+ * indices with one ARL (ARL r0.xy A=r0.xyxx, idx-two) and the reads choose
+ * their lane. Nothing in between may write t or load the address register. */
+static void
+merge_arls(struct grate_vp_shader *vp)
+{
+   list_for_each_entry_safe (struct vp_instr, arl1, &vp->instructions, link) {
+      if (arl1->vec.op != VP_VEC_OP_ARL || !is_plain(arl1) ||
+          arl1->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          util_bitcount(arl1->vec.dst.write_mask) != 1)
+         continue;
+      unsigned t = arl1->vec.src[0].index;
+      struct vp_instr *arl2 = NULL;
+
+      for (struct list_head *l = arl1->link.next; l != &vp->instructions;
+           l = l->next) {
+         struct vp_instr *instr = list_entry(l, struct vp_instr, link);
+         if (instr->is_label || instr->scalar.op == VP_SCALAR_OP_BRA)
+            break;
+         if (instr->vec.op == VP_VEC_OP_ARL) {
+            if (is_plain(instr) &&
+                util_bitcount(instr->vec.dst.write_mask) == 1 &&
+                !(instr->vec.dst.write_mask & arl1->vec.dst.write_mask) &&
+                instr->vec.src[0].file == VP_SRC_FILE_TEMP &&
+                instr->vec.src[0].index == t)
+               arl2 = instr;
+            break;
+         }
+         if (writes_temp(instr, t))
+            break;
+      }
+      if (!arl2)
+         continue;
+
+      unsigned lane2 = ffs(arl2->vec.dst.write_mask) - 1;
+      arl1->vec.dst.write_mask |= arl2->vec.dst.write_mask;
+      arl1->vec.src[0].swizzle[lane2] = lane2;
+      list_del(&arl2->link);
+      FREE(arl2);
+   }
+}
+
+/* MOV t = s; I reads t  -->  I reads s: the copy is dead afterwards. Only for
+ * lane by lane operations, and when the sources of I still need no more than
+ * one attribute and one uniform fetch (the copies legalize_fetches() made
+ * for that reason stay). */
+static void
+propagate_copies(struct grate_vp_shader *vp)
+{
+   list_for_each_entry_safe (struct vp_instr, mov, &vp->instructions, link) {
+      if (mov->vec.op != VP_VEC_OP_MOV || !is_plain(mov) ||
+          mov->vec.dst.file != VP_DST_FILE_TEMP || mov->vec.dst.index == 63 ||
+          mov->vec.dst.saturate || mov->vec.src[0].negate ||
+          mov->vec.src[0].absolute ||
+          (mov->vec.src[0].file == VP_SRC_FILE_TEMP &&
+           mov->vec.src[0].index == mov->vec.dst.index) ||
+          mov->vec.src[0].file == VP_SRC_FILE_UNDEF ||
+          mov->link.next == &vp->instructions)
+         continue;
+      struct vp_instr *user =
+         list_entry(mov->link.next, struct vp_instr, link);
+      if (user->is_label || !is_plain(user))
+         continue;
+      switch (user->vec.op) {
+      case VP_VEC_OP_MOV:
+      case VP_VEC_OP_MUL:
+      case VP_VEC_OP_ADD:
+      case VP_VEC_OP_MAD:
+      case VP_VEC_OP_MIN:
+      case VP_VEC_OP_MAX:
+      case VP_VEC_OP_SLT:
+      case VP_VEC_OP_SGE:
+      case VP_VEC_OP_SEQ:
+      case VP_VEC_OP_SNE:
+      case VP_VEC_OP_FRC:
+      case VP_VEC_OP_FLR:
+         break;
+      default:
+         continue;
+      }
+
+      unsigned t = mov->vec.dst.index, m = mov->vec.dst.write_mask;
+      struct vp_vec_instr nv = user->vec;
+      bool reads = false, ok = true;
+      for (unsigned k = 0; k < 3; k++) {
+         struct vp_src_operand *o = &nv.src[k];
+         if (o->file != VP_SRC_FILE_TEMP || o->index != t)
+            continue;
+         reads = true;
+         struct vp_src_operand n = mov->vec.src[0];
+         for (unsigned i = 0; i < 4; i++) {
+            if (!(user->vec.dst.write_mask & (1u << i)))
+               continue;
+            if (!(m & (1u << o->swizzle[i])))
+               ok = false;
+            n.swizzle[i] = mov->vec.src[0].swizzle[o->swizzle[i]];
+         }
+         n.negate = o->negate;
+         n.absolute = o->absolute;
+         *o = n;
+      }
+      if (!reads || !ok || user->scalar.src.file == VP_SRC_FILE_TEMP)
+         continue;
+      const struct vp_src_operand *srcs[3] = {&nv.src[0], &nv.src[1],
+                                              &nv.src[2]};
+      if (!fetches_fit(srcs))
+         continue;
+
+      unsigned live = m;
+      if (user->vec.dst.file == VP_DST_FILE_TEMP && user->vec.dst.index == t)
+         live &= ~user->vec.dst.write_mask;
+      if (!temp_dead_after(vp, user, t, live))
+         continue;
+
+      user->vec = nv;
+      list_del(&mov->link);
+      FREE(mov);
+   }
+}
+
+/* P = ...; MOV out = P's result  -->  P writes the output: NVIDIA's compiler
+ * writes the last operation of a value straight to the output (MUL o7). */
+static void
+retarget_outputs(struct grate_vp_shader *vp)
+{
+   list_for_each_entry_safe (struct vp_instr, mov, &vp->instructions, link) {
+      if (mov->vec.op != VP_VEC_OP_MOV || !is_plain(mov) ||
+          mov->vec.dst.file != VP_DST_FILE_OUTPUT || mov->vec.dst.saturate ||
+          mov->vec.src[0].file != VP_SRC_FILE_TEMP ||
+          mov->vec.src[0].negate || mov->vec.src[0].absolute ||
+          mov->link.prev == &vp->instructions)
+         continue;
+      unsigned t = mov->vec.src[0].index, m = mov->vec.dst.write_mask;
+      bool lanes = true;
+      for (unsigned i = 0; i < 4; i++)
+         if ((m & (1u << i)) && mov->vec.src[0].swizzle[i] != i)
+            lanes = false;
+      struct vp_instr *prev =
+         list_entry(mov->link.prev, struct vp_instr, link);
+      if (!lanes || prev->is_label || prev->cond.set || prev->cond.check ||
+          prev->precise || prev->scalar.op == VP_SCALAR_OP_BRA ||
+          prev->vec.op == VP_VEC_OP_ARL)
+         continue;
+
+      struct vp_dst_operand *pd = NULL;
+      if (prev->scalar.op == VP_SCALAR_OP_NOP &&
+          prev->vec.op != VP_VEC_OP_NOP)
+         pd = &prev->vec.dst;
+      else if (prev->vec.op == VP_VEC_OP_NOP &&
+               prev->scalar.op != VP_SCALAR_OP_NOP)
+         pd = &prev->scalar.dst;
+      if (!pd || pd->file != VP_DST_FILE_TEMP || pd->index != t ||
+          pd->write_mask != m || !temp_dead_after(vp, mov, t, m))
+         continue;
+
+      *pd = mov->vec.dst;
+      list_del(&mov->link);
+      FREE(mov);
+   }
+}
+
 /* Replace the labels by instruction indices. A branch to the end of the
  * program, and a program that ends with a branch, need one more instruction
  * to land on: NVIDIA's compiler ends such a program with an empty one (the
@@ -1134,6 +1758,13 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
    vp->failed = false;
    vp->cf_depth = 0;
    vp->num_labels = 0;
+   vp->addr_lane = 0;
+   {
+      struct tgsi_shader_info info;
+      tgsi_scan_shader(tgsi->Tokens, &info);
+      vp->temp_base = info.opcode_count[TGSI_OPCODE_ARL] ? 1 : 0;
+      vp->num_temps = vp->temp_base;
+   }
 
    while (!tgsi_parse_end_of_tokens(tgsi)) {
       tgsi_parse_token(tgsi);
@@ -1156,8 +1787,8 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
          const struct tgsi_full_declaration *decl =
             &tgsi->FullToken.FullDeclaration;
          if (decl->Declaration.File == TGSI_FILE_TEMPORARY &&
-             decl->Range.Last + 1 > vp->num_temps)
-            vp->num_temps = decl->Range.Last + 1;
+             vp->temp_base + decl->Range.Last + 1 > vp->num_temps)
+            vp->num_temps = vp->temp_base + decl->Range.Last + 1;
          break;
       }
 
@@ -1168,6 +1799,8 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
             struct vp_instr *instr = tgsi_to_vp(vp, &tgsi->FullToken.FullInstruction);
             if (!instr) 
                continue;
+            instr->precise =
+               tgsi->FullToken.FullInstruction.Instruction.Precise;
             if (!legalize_fetches(vp, instr, &vp->instructions))
                vp->failed = true;
             list_addtail(&instr->link, &vp->instructions);
@@ -1180,6 +1813,15 @@ grate_tgsi_to_vp(struct grate_vp_shader *vp, struct tgsi_parse_context *tgsi)
       fprintf(stderr, "GRATE VERTEX: unbalanced control flow\n");
       vp->failed = true;
    }
-   if (!vp->failed)
+   if (!vp->failed) {
+      fold_trunc_into_arl(vp);
+      fold_identity_pair(vp);
+      drop_self_moves(vp);
+      fold_copy_into_arl(vp);
+      merge_arls(vp);
+      fuse_mad(vp);
+      propagate_copies(vp);
+      retarget_outputs(vp);
       resolve_labels(vp);
+   }
 }

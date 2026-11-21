@@ -103,6 +103,7 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
     */
    int attr_fetch = -1, uniform_fetch = -1;
    bool relative = false;
+   unsigned addr_lane = 0;
    for (int i = 0; i < 3; ++i) {
       switch (instr->vec.src[i].file) {
       case VP_SRC_FILE_ATTRIB:
@@ -115,9 +116,11 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
       case VP_SRC_FILE_UNIFORM:
          assert(uniform_fetch < 0 ||
                 (uniform_fetch == instr->vec.src[i].index &&
-                 relative == instr->vec.src[i].relative));
+                 relative == instr->vec.src[i].relative &&
+                 (!relative || addr_lane == instr->vec.src[i].addr_lane)));
          uniform_fetch = instr->vec.src[i].index;
          relative = instr->vec.src[i].relative;
+         addr_lane = instr->vec.src[i].addr_lane;
          instr->vec.src[i].index = 0;
          break;
 
@@ -137,9 +140,11 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
       case VP_SRC_FILE_UNIFORM:
          assert(uniform_fetch < 0 ||
                 (uniform_fetch == instr->scalar.src.index &&
-                 relative == instr->scalar.src.relative));
+                 relative == instr->scalar.src.relative &&
+                 (!relative || addr_lane == instr->scalar.src.addr_lane)));
          uniform_fetch = instr->scalar.src.index;
          relative = instr->scalar.src.relative;
+         addr_lane = instr->scalar.src.addr_lane;
          instr->scalar.src.index = 0;
          break;
 
@@ -154,6 +159,7 @@ grate_vp_pack(uint32_t *dst, struct vp_instr *instr, bool end_of_program)
     * select 0), as in NVIDIA's compiler (idx-uniform in
     * tools/gpu/grate-vertex-ops-test.c) */
    tmp.constant_relative_addressing_enable = relative;
+   tmp.address_register_select = relative ? addr_lane : 0;
 
    tmp.vector_opcode = instr->vec.op;
    switch (instr->vec.dst.file) {

@@ -53,6 +53,10 @@ struct grate_vp_shader {
    struct grate_vp_cf cf[GRATE_VP_MAX_CF_DEPTH];
    unsigned cf_depth;
    unsigned num_labels;
+   unsigned
+      addr_lane; /* lane the last ARL loaded: where relative reads look */
+   unsigned temp_base; /* 1 with an ARL: r0 is its destination, the program's
+                          temporaries start at r1 */
    uint16_t output_mask;
    uint32_t immediates[GRATE_VP_MAX_IMMEDIATES]
                       [4]; /* raw 32-bit words, slot i of the immediates */
