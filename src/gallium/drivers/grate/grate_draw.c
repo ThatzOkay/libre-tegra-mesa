@@ -533,8 +533,13 @@ grate_draw_vbo(struct pipe_context *pcontext,
 
    /* A shader that failed to compile is never created, so the state tracker
     * binds none. Skip the draw instead of dereferencing it. */
-   if (!context->vshader || !context->fshader)
+   if (!context->vshader || !context->fshader) {
+      if (grate_debug & GRATE_DEBUG_UNIMPLEMENTED)
+         mesa_logw("GRATE: draw skipped, no %s (%u vertices, %u instances)\n",
+                   !context->vshader ? "vertex program" : "fragment program",
+                   draws[0].count, info->instance_count);
       return;
+   }
 
    if (context->blend_dual && !context->dual_pass) {
       grate_draw_dual(pcontext, info, drawid_offset, indirect, draws,

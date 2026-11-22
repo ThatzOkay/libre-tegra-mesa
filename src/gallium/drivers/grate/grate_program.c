@@ -101,6 +101,19 @@ grate_vs_tgsi_transform(const struct tgsi_token *tokens_in)
    return tgsi_transform_shader(tokens_in, new_len, &ctx.base);
 }
 
+/**
+ * Tell the state tracker that a program cannot be compiled, if it asked to
+ * be told (it does when linking): the GL program then fails to link and the
+ * application can fall back to a simpler shader, instead of drawing with no
+ * program at all (see grate_draw_vbo()).
+ */
+static void
+grate_report_compile_error(const struct pipe_shader_state *template,
+                           const char *message)
+{
+   if (template->report_compile_error)
+      ((struct pipe_shader_state *)template)->error_message = strdup(message);
+}
 
 static void *
 grate_create_vs_state(struct pipe_context *pcontext,
@@ -129,8 +142,11 @@ grate_create_vs_state(struct pipe_context *pcontext,
    }
 
    struct tgsi_token *new_tokens = grate_vs_tgsi_transform(so->base.tokens);
-   if (!new_tokens)
+   if (!new_tokens) {
+      grate_report_compile_error(template, "cannot transform the vertex "
+                                           "program");
       return NULL;
+   }
 
    struct tgsi_parse_context parser;
    unsigned ok = tgsi_parse_init(&parser, new_tokens);
@@ -141,7 +157,10 @@ grate_create_vs_state(struct pipe_context *pcontext,
    tgsi_parse_free(&parser);
    if (vp.failed) {
       /* refused: the draws that need this shader are skipped, see
-       * grate_draw_vbo() */
+       * grate_draw_vbo(), unless the link fails because of the message */
+      grate_report_compile_error(template, "the vertex program uses "
+                                           "something the hardware "
+                                           "compiler does not support");
       FREE(so);
       return NULL;
    }
@@ -1975,6 +1994,10 @@ grate_create_fs_state(struct pipe_context *pcontext,
    }
 
    if (!grate_compile_fs(context, so, &output)) {
+      grate_report_compile_error(template, "the fragment program is too "
+                                           "large or uses something the "
+                                           "hardware compiler does not "
+                                           "support");
       if (template->type == PIPE_SHADER_IR_NIR)
          FREE((void *)so->base.tokens);
       FREE(so);
