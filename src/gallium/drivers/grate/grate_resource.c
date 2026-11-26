@@ -251,9 +251,13 @@ grate_screen_resource_create(struct pipe_screen *pscreen,
                  (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT))
          resource->pitch = align(resource->pitch, 32);
 
-      /* The kernel reflects BOTTOM_UP framebuffers at scanout. GBM/KMS
-       * buffers already use the display's normal row order. */
-      flags = (template->bind & PIPE_BIND_SCANOUT)
+      /* The kernel reflects BOTTOM_UP framebuffers at scanout. Window
+       * system buffers (GBM/KMS scanout buffers, and shared buffers such
+       * as Wayland client buffers) are rendered in the display's normal
+       * row order, so they must not carry the flag: a compositor doing
+       * direct scanout of a fullscreen client would otherwise show it
+       * upside down until the client reallocates with scanout usage. */
+      flags = (template->bind & (PIPE_BIND_SCANOUT | PIPE_BIND_SHARED))
                  ? 0
                  : DRM_TEGRA_GEM_CREATE_BOTTOM_UP;
    }
